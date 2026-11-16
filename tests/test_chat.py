@@ -31,7 +31,11 @@ from rootcoz.engine.chat import (
 )
 from rootcoz.models import ChatInitRequest
 from rootcoz.sources.jenkins_source import _extract_build_params
-from tests.conftest import AdvancingClock, capture_main_logs
+from tests.conftest import (
+    MACHINE_GLOBAL_ARTIFACT_ROOT,
+    AdvancingClock,
+    capture_main_logs,
+)
 
 _TEST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
 _TEST_ENCRYPTION_KEY = "test-encryption-key-for-hmac"  # pragma: allowlist secret
@@ -4142,6 +4146,15 @@ class TestChatEndpoints:
 
 class TestAdminChatArtifactEndpoints:
     """Tests for admin chat artifact save/download endpoints."""
+
+    def test_artifact_root_is_not_the_machine_global_path(self):
+        """Every worker writes its own tree, never the shared /tmp one (#582)."""
+        from rootcoz import main as main_mod
+
+        assert main_mod._ADMIN_ARTIFACTS_BASE != MACHINE_GLOBAL_ARTIFACT_ROOT
+        assert main_mod._get_admin_artifacts_dir("admin").is_relative_to(
+            main_mod._ADMIN_ARTIFACTS_BASE
+        )
 
     def test_save_artifact(self, test_client):
         response = test_client.post(

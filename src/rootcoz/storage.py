@@ -12635,6 +12635,12 @@ async def complete_chat_message_if_generation(
     server_source: bool = False,
 ) -> bool:
     """Complete a pending reply only while its credentials, grant and admin role are current."""
+    from rootcoz.config import get_settings
+
+    free_models = get_settings().enable_free_models
+    # The free-pair half of require_server_provider_grant (#582): a pair retired,
+    # or the ENABLE_FREE_MODELS gate turned off, mid-call must not publish the
+    # answer it authorized a moment ago.
     async with _connect_db() as db:
         cursor = await db.execute(
             "UPDATE chat_messages SET content = ?, status = 'completed', "
@@ -12645,7 +12651,11 @@ async def complete_chat_message_if_generation(
             "AND COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) = ?)) "
             "AND (? = 0 OR chat_messages.username = 'admin' OR EXISTS "
             "(SELECT 1 FROM users WHERE username = chat_messages.username "
-            "AND (role = 'admin' OR can_use_server_providers = 1))) "
+            "AND (role = 'admin' OR can_use_server_providers = 1)) OR "
+            "(? = 1 AND EXISTS (SELECT 1 FROM users "
+            "WHERE username = chat_messages.username) AND EXISTS "
+            "(SELECT 1 FROM free_ai_models "
+            "WHERE lower(provider) = lower(?) AND model = ?))) "
             "AND (chat_messages.job_id != '__admin_chat__' "
             "OR chat_messages.username = 'admin' OR EXISTS "
             "(SELECT 1 FROM users WHERE username = chat_messages.username "
@@ -12661,6 +12671,9 @@ async def complete_chat_message_if_generation(
                 ai_provider,
                 credential_generation,
                 int(server_source),
+                int(free_models),
+                ai_provider,
+                ai_model,
             ),
         )
         await db.commit()

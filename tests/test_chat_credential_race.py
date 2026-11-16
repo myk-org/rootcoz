@@ -1,6 +1,7 @@
 """In-flight chat results cannot restore a session after credential rotation."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,6 +11,7 @@ from fastapi import BackgroundTasks
 
 from rootcoz import main, storage
 from rootcoz.models import ChatInitRequest, ChatMessageRequest
+from tests.conftest import capture_main_logs
 
 
 @pytest.mark.asyncio
@@ -726,6 +728,170 @@ async def test_revoked_server_grant_mid_call_does_not_publish_reply(
         assert "SECRET REPLY" not in msg["content"]
 
 
+# -- The completion guard asks the same question as Start (#582) ------------
+#
+# A server-credential chat session without the full grant can only exist on an
+# admin-declared free pair, so the completion recheck must use the canonical
+# predicate (full grant, or the free grant for a pair still declared free)
+# instead of the full grant alone — the defect that failed every free turn.
+
+_FREE_PAIR = ("p", "m")
+
+
+async def _run_turn(
+    tmp_path,
+    monkeypatch,
+    *,
+    admin: bool = False,
+    full_grant: bool = False,
+    free_pair: bool = False,
+    free_models: bool = True,
+    source: str = "server",
+    during_call=None,
+) -> dict:
+    """Run one chat turn as ``alice`` and return the assistant row it settled."""
+    from rootcoz import config
+    from rootcoz.engine import chat
+    from rootcoz.sources import chat_workspace
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "free-pair-turn.db")
+    await storage.init_db()
+    if admin:
+        await storage.create_admin_user("alice")
+    else:
+        await storage.create_user(
+            "alice", role="reviewer", can_use_server_providers=full_grant
+        )
+        await storage.update_user_ai_credential("alice", "p", "user-key")
+
+    class _Settings:
+        enable_free_models = free_models
+        active_server_providers = ""
+
+    monkeypatch.setattr(config, "get_settings", lambda: _Settings())
+    if free_pair:
+        await storage.set_free_ai_models([_FREE_PAIR], "admin")
+
+    job_id = main.ADMIN_CHAT_JOB_ID if admin else "job"
+    if not admin:
+        await storage.save_result(
+            job_id,
+            "",
+            "completed",
+            {"status": "completed", "summary": "t", "failures": []},
+        )
+        monkeypatch.setattr(
+            main,
+            "_resolve_chat_credentials",
+            AsyncMock(return_value=("", "", None, "", "")),
+        )
+    await storage.save_ai_session_source("turn-sid", "alice", "p", source)
+    await storage.add_chat_message(
+        job_id,
+        "assistant",
+        "",
+        username="alice",
+        ai_provider="p",
+        ai_model="m",
+        session_id="turn-sid",
+    )
+    _, pending = await storage.add_chat_message_pair(
+        job_id, "hello", username="alice", ai_provider="p", ai_model="m"
+    )
+    monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
+    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
+    monkeypatch.setattr(
+        chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
+
+    async def ai_call(**kwargs):
+        if during_call:
+            await during_call()
+        return True, "the answer", "turn-sid"
+
+    monkeypatch.setattr(
+        chat, "admin_chat_with_ai" if admin else "chat_with_ai", ai_call
+    )
+    process = main._process_admin_chat_message if admin else main._process_chat_message
+    await process(
+        **({} if admin else {"job_id": job_id}),
+        user_msg_id=1,
+        assistant_msg_id=pending,
+        message="hello",
+        ai_provider_override="p",
+        ai_model_override="m",
+        username="alice",
+        credential_source=source,
+    )
+    return (await storage.get_chat_messages(job_id, username="alice"))[-1]
+
+
+@pytest.mark.asyncio
+async def test_free_pair_turn_succeeds_without_full_grant(tmp_path, monkeypatch):
+    """The #582 regression: a declared free pair must answer, not be refused."""
+    msg = await _run_turn(tmp_path, monkeypatch, free_pair=True)
+    assert (msg["status"], msg["content"]) == ("completed", "the answer")
+
+
+@pytest.mark.asyncio
+async def test_undeclared_pair_turn_still_refused_without_full_grant(
+    tmp_path, monkeypatch, caplog
+):
+    caplog.set_level(logging.INFO)
+    with capture_main_logs(caplog, logging.INFO):
+        msg = await _run_turn(tmp_path, monkeypatch, free_pair=False)
+    assert msg["status"] == "failed"
+    assert msg["content"] == ("Server provider access requires an administrator grant")
+    # The log names the pair and the real condition, never a revocation.
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "p/m" in logs and "revoked" not in logs
+
+
+@pytest.mark.asyncio
+async def test_free_pair_turn_refused_when_free_models_disabled(tmp_path, monkeypatch):
+    msg = await _run_turn(tmp_path, monkeypatch, free_pair=True, free_models=False)
+    assert msg["status"] == "failed"
+    assert "the answer" not in msg["content"]
+
+
+@pytest.mark.asyncio
+async def test_admin_chat_completion_uses_the_same_predicate(tmp_path, monkeypatch):
+    """Admin chat shares the predicate: a pair deselected mid-call is refused.
+
+    A role admin always holds the full grant, so the free-pair case cannot
+    arise there; what admin chat must share is the *predicate*, which also
+    rechecks the server pool selection and provider activation.
+    """
+
+    async def deselect() -> None:
+        await storage.set_server_provider_models(
+            "p", [{"id": "other", "included": True}], "admin"
+        )
+
+    msg = await _run_turn(tmp_path, monkeypatch, admin=True, during_call=deselect)
+    assert msg["status"] == "failed"
+    assert "the answer" not in msg["content"]
+    assert "excluded from server credentials" in msg["content"]
+
+
+@pytest.mark.asyncio
+async def test_user_credential_turn_unaffected_by_completion_guard(
+    tmp_path, monkeypatch
+):
+    msg = await _run_turn(tmp_path, monkeypatch, source="user")
+    assert (msg["status"], msg["content"]) == ("completed", "the answer")
+
+
+@pytest.mark.asyncio
+async def test_granted_server_turn_unaffected_by_completion_guard(
+    tmp_path, monkeypatch
+):
+    msg = await _run_turn(tmp_path, monkeypatch, full_grant=True)
+    assert (msg["status"], msg["content"]) == ("completed", "the answer")
+
+
 @pytest.mark.asyncio
 async def test_server_reply_survives_unrelated_user_key_rotation(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "server-rotation.db")
@@ -854,6 +1020,41 @@ async def test_server_grant_revoked_while_completion_waits(tmp_path, monkeypatch
     assert (
         "SECRET REPLY"
         not in (await storage.get_chat_messages("job", username="alice"))[-1]["content"]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retired", [False, True])
+async def test_free_pair_reply_publishes_only_while_the_pair_stays_free(
+    tmp_path, monkeypatch, retired
+):
+    """The commit mirrors the free-pair half of the grant predicate (#582)."""
+    from rootcoz import config
+
+    class _Settings:
+        enable_free_models = True
+
+    monkeypatch.setattr(config, "get_settings", lambda: _Settings())
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "free-commit.db")
+    await storage.init_db()
+    await storage.create_user("alice", role="reviewer")
+    await storage.set_free_ai_models([("p", "m")], "admin")
+    _, pending = await storage.add_chat_message_pair("job", "hi", username="alice")
+    if retired:
+        await storage.set_free_ai_models([], "admin")
+    saved = await storage.complete_chat_message_if_generation(
+        pending,
+        content="FREE REPLY",
+        ai_provider="p",
+        ai_model="m",
+        session_id="sid",
+        credential_generation=None,
+        server_source=True,
+    )
+    assert saved is not retired
+    message = (await storage.get_chat_messages("job", username="alice"))[-1]
+    assert (message["content"], message["status"]) == (
+        ("", "pending") if retired else ("FREE REPLY", "completed")
     )
 
 

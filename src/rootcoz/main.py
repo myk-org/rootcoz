@@ -27294,21 +27294,29 @@ async def _process_chat_message(
                         )
                         return
 
-                    if (
-                        credential_source == "server"
-                        and not await storage.can_user_use_server_providers(username)
-                    ):
-                        logger.info(
-                            "Chat: server grant revoked before completion for user=%s",
-                            username,
-                        )
-                        await _fail_chat_assistant_placeholder(
-                            assistant_msg_id,
-                            job_id,
-                            username,
-                            "Server provider access requires an administrator grant",
-                        )
-                        return
+                    if credential_source == "server":
+                        # Same predicate Start applied (#582): the full grant,
+                        # or the free grant for a pair still declared free.
+                        from rootcoz.ai_client import require_server_provider_grant
+
+                        try:
+                            await require_server_provider_grant(ai_provider, ai_model)
+                        except ValueError as exc:
+                            logger.info(
+                                "Chat: %s/%s refused on server credentials for"
+                                " user=%s: %s",
+                                ai_provider,
+                                ai_model,
+                                username,
+                                exc,
+                            )
+                            await _fail_chat_assistant_placeholder(
+                                assistant_msg_id,
+                                job_id,
+                                username,
+                                str(exc),
+                            )
+                            return
 
                     current_status = await storage.get_chat_message_status(
                         assistant_msg_id
@@ -28138,21 +28146,29 @@ async def _process_admin_chat_message(
                 )
                 return
 
-            if (
-                credential_source == "server"
-                and not await storage.can_user_use_server_providers(username)
-            ):
-                logger.info(
-                    "Admin chat: server grant revoked before completion for user=%s",
-                    username,
-                )
-                await _fail_chat_assistant_placeholder(
-                    assistant_msg_id,
-                    ADMIN_CHAT_JOB_ID,
-                    username,
-                    "Server provider access requires an administrator grant",
-                )
-                return
+            if credential_source == "server":
+                # Same predicate Start applied (#582): the full grant, or the
+                # free grant for a pair still declared free.
+                from rootcoz.ai_client import require_server_provider_grant
+
+                try:
+                    await require_server_provider_grant(ai_provider, ai_model)
+                except ValueError as exc:
+                    logger.info(
+                        "Admin chat: %s/%s refused on server credentials for"
+                        " user=%s: %s",
+                        ai_provider,
+                        ai_model,
+                        username,
+                        exc,
+                    )
+                    await _fail_chat_assistant_placeholder(
+                        assistant_msg_id,
+                        ADMIN_CHAT_JOB_ID,
+                        username,
+                        str(exc),
+                    )
+                    return
 
             # Check if message was aborted while AI was processing
             current_status = await storage.get_chat_message_status(assistant_msg_id)
