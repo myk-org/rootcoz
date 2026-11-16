@@ -231,6 +231,7 @@ from rootcoz.logging_context import (
     enable_log_file,
     get_log_file,
     job_id_var,
+    user_var,
 )
 from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
@@ -1780,20 +1781,63 @@ def _audit_setting_details(key: str) -> dict[str, Any]:
     }
 
 
-def _audit_request_ip(request: Request | None) -> str | None:
-    """Client IP for the audit row — only when a trusted proxy sets it.
+def _parse_forwarded_ip(raw_hop: str) -> str | None:
+    """The canonical address in one ``X-Forwarded-For`` hop, or ``None``.
 
-    Without ``TRUST_PROXY_HEADERS`` the forwarded header can be forged, so no
-    address is recorded at all rather than a wrong one.
+    The header is caller text until it is parsed, so anything that is not an
+    address (``unknown``, a token, a scoped IPv6 literal) is rejected rather
+    than recorded. Ports are accepted and dropped; a bare IPv6 literal has no
+    port to strip.
     """
-    if request is None or not get_settings().trust_proxy_headers:
+    candidate = raw_hop.strip()
+    if not candidate or "%" in candidate:
         return None
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first
-    return request.client.host if request.client else None
+    if candidate.startswith("["):
+        host, separator, remainder = candidate[1:].partition("]")
+        if separator and remainder and not remainder.startswith(":"):
+            return None
+        if remainder[1:] and not (
+            remainder[1:].isdigit() and 1 <= int(remainder[1:]) <= 65535
+        ):
+            return None
+        return _canonical_ip(host)
+    address = _canonical_ip(candidate)
+    if address is not None:
+        return address
+    # Only a single colon can be host:port — more would be a bare IPv6 literal.
+    if candidate.count(":") == 1:
+        host, _, port = candidate.partition(":")
+        if port.isdigit() and 1 <= int(port) <= 65535:
+            return _canonical_ip(host)
+    return None
+
+
+def _canonical_ip(value: str) -> str | None:
+    """``ipaddress``-validated canonical text, or ``None``."""
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return None
+
+
+def _audit_request_ip(request: Request | None) -> str | None:
+    """Client IP for the audit row, from the proxy when one is trusted.
+
+    ``X-Forwarded-For`` is caller text unless a proxy is trusted, so it is used
+    only behind ``TRUST_PROXY_HEADERS`` and only once validated as an address;
+    otherwise (untrusted, absent or malformed) the socket peer is recorded.
+    ``None`` only when there is no peer at all — a non-request background event.
+    """
+    if request is None:
+        return None
+    if get_settings().trust_proxy_headers:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            parsed = _parse_forwarded_ip(forwarded.split(",")[0])
+            if parsed:
+                return parsed
+    peer = getattr(getattr(request, "client", None), "host", None)
+    return (_sanitize_control_chars(peer).strip() or None) if peer else None
 
 
 async def record_audit(
@@ -4621,129 +4665,139 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 cookie_username = ""
             username = cookie_username
 
-        # 5. Refuse a disabled account on every path (#379): a key, a session and
-        #    a proxy identity are all only as good as the row they name. A
-        #    locked one is refused at login only — see _account_block_reason.
-        #    The row is loaded once here and reused for the grants below.
-        #    "admin" is reserved, so a bootstrap admin has no row to check.
-        if (
-            has_valid_session
-            and username
-            and username != "admin"
-            and fetched_user is None
-        ):
-            fetched_user = await storage.get_user_by_username(username)
-        if fetched_user and fetched_user.get("disabled"):
-            logger.debug("Refused disabled account '%s' on %s", username, path)
-            await _record_account_blocked(
-                username=username,
-                reason="disabled",
-                role=resolved_role,
-                request=request,
-            )
-            await _audit_refused_issue_call(request, username, "account_disabled")
-            return _unauthenticated_response(request, path)
-
-        request.state.username = username
-        request.state.is_admin = is_admin
-        request.state.role = resolved_role
-        # can_view_reports: admins effective True; non-admins reload stored flag
-        # from users table each request (no session invalidation needed).
-        # Reuse a user row already loaded via Bearer/SSO when available.
-        if is_admin:
-            request.state.can_view_reports = effective_can_view_reports(True)
-        elif has_valid_session and username:
-            request.state.can_view_reports = effective_can_view_reports(
-                False, bool(fetched_user and fetched_user.get("can_view_reports"))
-            )
-        else:
-            request.state.can_view_reports = False
-
-        if has_valid_session and username:
-            try:
-                request.state.can_use_server_providers = (
-                    await storage.can_user_use_server_providers(username)
-                )
-                request.state.can_use_free_providers = (
-                    await storage.can_user_use_free_providers(username)
-                )
-            except Exception:
-                logger.exception("Unable to load server provider grant", exc_info=False)
-
-        # Track user activity only for authenticated identities
-        if has_valid_session and username:
-            _spawn_background(_safe_track_user(username))
-
-        # Admin-only path enforcement
-        if path.startswith("/api/admin/") and not authenticated_admin:
-            return JSONResponse(
-                status_code=403, content={"detail": "Admin access required"}
-            )
-
-        # Require authentication for all non-public, non-optional paths
-        if not has_valid_session and not self._is_public_path(path):
-            # No identity: ``username`` here can only be the untrusted
-            # ``rootcoz_username`` cookie, so it must never be attributed.
-            await _audit_refused_issue_call(request, "", "unauthenticated")
-            return _unauthenticated_response(request, path)
-
-        # Check pending user status when REQUIRE_APPROVAL is enabled.
-        # Admin users and the bootstrap admin always bypass this check.
-        if (
-            has_valid_session
-            and username
-            and not is_admin
-            and settings.require_approval
-            and not self._is_public_path(path)
-        ):
-            user_status = await storage.get_user_status(username)
-            blocked = _blocked_user_status_response(user_status)
-            if blocked is not None:
-                # Pending/rejected is a refusal the handler never sees, so this
-                # is the only place its issue attempt can reach the trail.
-                await _audit_refused_issue_call(
-                    request, username, f"account_{user_status}"
-                )
-                return blocked
-
-        username_token = ai_username.set(username)
+        # Every refusal below returns from this dispatch, so the auth layer
+        # is the only place their lines can be attributed. Bound after Step 4:
+        # never from the untrusted display cookie.
+        user_token = user_var.set(username) if has_valid_session and username else None
         try:
-            response = await call_next(request)
+            # 5. Refuse a disabled account on every path (#379): a key, a session and
+            #    a proxy identity are all only as good as the row they name. A
+            #    locked one is refused at login only — see _account_block_reason.
+            #    The row is loaded once here and reused for the grants below.
+            #    "admin" is reserved, so a bootstrap admin has no row to check.
+            if (
+                has_valid_session
+                and username
+                and username != "admin"
+                and fetched_user is None
+            ):
+                fetched_user = await storage.get_user_by_username(username)
+            if fetched_user and fetched_user.get("disabled"):
+                logger.debug("Refused disabled account '%s' on %s", username, path)
+                await _record_account_blocked(
+                    username=username,
+                    reason="disabled",
+                    role=resolved_role,
+                    request=request,
+                )
+                await _audit_refused_issue_call(request, username, "account_disabled")
+                return _unauthenticated_response(request, path)
+
+            request.state.username = username
+            request.state.is_admin = is_admin
+            request.state.role = resolved_role
+            # can_view_reports: admins effective True; non-admins reload stored flag
+            # from users table each request (no session invalidation needed).
+            # Reuse a user row already loaded via Bearer/SSO when available.
+            if is_admin:
+                request.state.can_view_reports = effective_can_view_reports(True)
+            elif has_valid_session and username:
+                request.state.can_view_reports = effective_can_view_reports(
+                    False, bool(fetched_user and fetched_user.get("can_view_reports"))
+                )
+            else:
+                request.state.can_view_reports = False
+
+            if has_valid_session and username:
+                try:
+                    request.state.can_use_server_providers = (
+                        await storage.can_user_use_server_providers(username)
+                    )
+                    request.state.can_use_free_providers = (
+                        await storage.can_user_use_free_providers(username)
+                    )
+                except Exception:
+                    logger.exception(
+                        "Unable to load server provider grant", exc_info=False
+                    )
+
+            # Track user activity only for authenticated identities
+            if has_valid_session and username:
+                _spawn_background(_safe_track_user(username))
+
+            # Admin-only path enforcement
+            if path.startswith("/api/admin/") and not authenticated_admin:
+                return JSONResponse(
+                    status_code=403, content={"detail": "Admin access required"}
+                )
+
+            # Require authentication for all non-public, non-optional paths
+            if not has_valid_session and not self._is_public_path(path):
+                # No identity: ``username`` here can only be the untrusted
+                # ``rootcoz_username`` cookie, so it must never be attributed.
+                await _audit_refused_issue_call(request, "", "unauthenticated")
+                return _unauthenticated_response(request, path)
+
+            # Check pending user status when REQUIRE_APPROVAL is enabled.
+            # Admin users and the bootstrap admin always bypass this check.
+            if (
+                has_valid_session
+                and username
+                and not is_admin
+                and settings.require_approval
+                and not self._is_public_path(path)
+            ):
+                user_status = await storage.get_user_status(username)
+                blocked = _blocked_user_status_response(user_status)
+                if blocked is not None:
+                    # Pending/rejected is a refusal the handler never sees, so this
+                    # is the only place its issue attempt can reach the trail.
+                    await _audit_refused_issue_call(
+                        request, username, f"account_{user_status}"
+                    )
+                    return blocked
+
+            username_token = ai_username.set(username)
+            try:
+                response = await call_next(request)
+            finally:
+                ai_username.reset(username_token)
+
+            # Set rootcoz_username cookie from X-Forwarded-User header (SSO)
+            if getattr(request.state, "set_proxy_cookie", None):
+                proxy_cookie_value = request.state.set_proxy_cookie
+                if _read_cookie(request, "rootcoz_username") != proxy_cookie_value:
+                    _set_username_cookie(
+                        response, proxy_cookie_value, secure=settings.secure_cookies
+                    )
+
+            # Refresh session cookie max_age if session was renewed
+            if getattr(request.state, "renew_session_token", None):
+                # Skip if downstream handler already set/cleared rootcoz_session
+                # (e.g., login sets a new session, logout deletes it)
+                path = request.url.path
+                if path not in ("/api/auth/login", "/api/auth/logout"):
+                    settings = get_settings()
+                    response.set_cookie(
+                        "rootcoz_session",
+                        request.state.renew_session_token,
+                        httponly=True,
+                        samesite="lax",
+                        secure=settings.secure_cookies,
+                        max_age=storage.current_session_ttl_seconds(),
+                    )
+                    # Clear legacy cookie after migration
+                    response.delete_cookie(
+                        "jji_session",
+                        httponly=True,
+                        samesite="lax",
+                        secure=settings.secure_cookies,
+                    )
+
+            return response
         finally:
-            ai_username.reset(username_token)
-
-        # Set rootcoz_username cookie from X-Forwarded-User header (SSO)
-        if getattr(request.state, "set_proxy_cookie", None):
-            proxy_cookie_value = request.state.set_proxy_cookie
-            if _read_cookie(request, "rootcoz_username") != proxy_cookie_value:
-                _set_username_cookie(
-                    response, proxy_cookie_value, secure=settings.secure_cookies
-                )
-
-        # Refresh session cookie max_age if session was renewed
-        if getattr(request.state, "renew_session_token", None):
-            # Skip if downstream handler already set/cleared rootcoz_session
-            # (e.g., login sets a new session, logout deletes it)
-            path = request.url.path
-            if path not in ("/api/auth/login", "/api/auth/logout"):
-                settings = get_settings()
-                response.set_cookie(
-                    "rootcoz_session",
-                    request.state.renew_session_token,
-                    httponly=True,
-                    samesite="lax",
-                    secure=settings.secure_cookies,
-                    max_age=storage.current_session_ttl_seconds(),
-                )
-                # Clear legacy cookie after migration
-                response.delete_cookie(
-                    "jji_session",
-                    httponly=True,
-                    samesite="lax",
-                    secure=settings.secure_cookies,
-                )
-
-        return response
+            if user_token is not None:
+                user_var.reset(user_token)
 
 
 _REPORT_CREATE_ISSUE_PATH_RE = re.compile(
@@ -4934,7 +4988,6 @@ class AttachmentEnvelopeBoundMiddleware:
 
 
 app.add_middleware(AttachmentEnvelopeBoundMiddleware)
-app.add_middleware(AuthMiddleware)
 app.add_middleware(ErrorTrackingMiddleware)
 
 
@@ -4995,6 +5048,10 @@ class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(RequestBodyLoggingMiddleware)
+# After the body logger: in Starlette's LIFO stack this makes AuthMiddleware
+# the outer one, so a DEBUG body line is already authenticated (and tagged)
+# and an unauthenticated body is never parsed.
+app.add_middleware(AuthMiddleware)
 
 
 class CacheControlMiddleware(BaseHTTPMiddleware):
@@ -8780,6 +8837,7 @@ async def get_job_result(
     # Apply user classification overrides so the UI shows effective classifications
     if result.get("result"):
         await _apply_effective_classifications(job_id, result["result"])
+        await _apply_failure_reviews(job_id, result["result"])
         status = result.get("status")
         if status in IN_PROGRESS_STATUSES:
             await _attach_token_usage(job_id, result["result"], detailed=False)
@@ -8988,11 +9046,10 @@ async def _build_full_result_payload(
         classification = analysis.get("classification", "")
         if classification:
             classification_counts[classification] += 1
-        entry = resolve_failure_review(
+        review_fields = _failure_review_fields(
             reviews, failure.get("test_name", ""), child_job, child_build
         )
-        reviewed = entry is not None
-        if reviewed:
+        if review_fields["reviewed"]:
             reviewed_count += 1
         failures.append(
             {
@@ -9003,10 +9060,7 @@ async def _build_full_result_payload(
                 "error_signature": failure.get("error_signature", ""),
                 "child_job_name": child_job,
                 "child_build_number": child_build,
-                "reviewed": reviewed,
-                "reviewed_by": (
-                    _sanitize_control_chars(entry["username"]) if entry else ""
-                ),
+                **review_fields,
             }
         )
 
@@ -9977,6 +10031,44 @@ async def _validate_test_name_in_result(
         )
 
 
+def _failure_review_fields(
+    reviews: dict[str, dict[str, Any]],
+    test_name: str,
+    child_job_name: str = "",
+    child_build_number: int = 0,
+) -> dict[str, Any]:
+    """The review projection every failure payload carries (#566).
+
+    ``reviewed_at`` is the immutable first-review anchor: ``NULL`` while the
+    failure is unreviewed (or was recorded before the anchor existed).
+    """
+    entry = resolve_failure_review(
+        reviews, test_name, child_job_name, child_build_number
+    )
+    return {
+        "reviewed": entry is not None,
+        "reviewed_by": _sanitize_control_chars(entry["username"]) if entry else "",
+        "reviewed_at": entry.get("reviewed_at") if entry else None,
+    }
+
+
+async def _apply_failure_reviews(job_id: str, result_data: dict[str, Any]) -> None:
+    """Attach the review projection to every failure in the result tree.
+
+    Read-only, and skipped entirely when the result has no failures.
+    """
+    scoped = list(_iter_scoped_failures(result_data))
+    if not scoped:
+        return
+    reviews = await storage.get_reviews_for_job(job_id)
+    for failure, child_job, child_build in scoped:
+        failure.update(
+            _failure_review_fields(
+                reviews, failure.get("test_name", ""), child_job, child_build
+            )
+        )
+
+
 def _child_matches(child: dict[str, Any], job_name: str, build_number: int = 0) -> bool:
     """Return True if *child* matches the given job name and optional build number.
 
@@ -10364,48 +10456,75 @@ async def set_reviewed(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Toggle the reviewed state for a test failure."""
-    _require_reviewer(request)
-    _check_allow_list(request)
-    _require_reviewer(request)
+    safe_username = _sanitize_control_chars(request.state.username or "")
+    safe_job_id = _sanitize_control_chars(job_id)
+    safe_test_name = _sanitize_control_chars(body.test_name)
+    safe_child_job_name = _sanitize_control_chars(body.child_job_name)
+    action = "review.marked" if body.reviewed else "review.delete"
+    details = {
+        "test_name": safe_test_name,
+        "child_job_name": safe_child_job_name,
+        "child_build_number": body.child_build_number,
+    }
     logger.debug(
-        f"PUT /results/{job_id}/reviewed: test_name={body.test_name}, reviewed={body.reviewed}"
+        f"PUT /results/{safe_job_id}/reviewed: test_name={safe_test_name},"
+        f" reviewed={body.reviewed}"
     )
-    await _validate_test_name_in_result(
-        job_id, body.test_name, body.child_job_name, body.child_build_number
+    # ``test_name`` is unvalidated here, so a refusal names only the job: a
+    # secret pasted into the body must not reach ``audit_events.message``.
+    refused_message = (
+        f"User '{safe_username}' attempted to "
+        f"{'mark a failure as reviewed' if body.reviewed else 'clear a failure review'}"
+        f" in job {_scrub_audit_text(safe_job_id)}"
     )
-    username = request.state.username
     try:
-        await storage.set_reviewed(
+        _check_allow_list(request)
+        _require_reviewer(request)
+        await _validate_test_name_in_result(
+            job_id, body.test_name, body.child_job_name, body.child_build_number
+        )
+        first_reviewed_at = await storage.set_reviewed(
             job_id=job_id,
             test_name=body.test_name,
             reviewed=body.reviewed,
             child_job_name=body.child_job_name,
             child_build_number=body.child_build_number,
-            username=username,
+            username=safe_username,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    notify_comments_changed(job_id)
-    if not body.reviewed:
-        await record_audit(
-            action="review.delete",
-            actor=username,
-            message=(
-                f"User '{username}' cleared the review of '{body.test_name}'"
-                f" in job {job_id}"
-            ),
-            target_type="job",
-            target_id=job_id,
-            details={
-                "test_name": body.test_name,
-                "child_job_name": body.child_job_name,
-                "child_build_number": body.child_build_number,
-            },
+    except (HTTPException, ValueError) as exc:
+        # ``_record_refused_attempt`` reads ``exc.status_code``, so the storage
+        # layer's ``ValueError`` is converted in the one place it can be.
+        refusal = _refusal_exception(exc, status_code=400)
+        await _record_refused_attempt(
+            action=action,
             request=request,
+            message=refused_message,
+            target_type="job",
+            target_id=safe_job_id,
+            exc=refusal,
+            details=details,
         )
+        raise refusal from None
+    notify_comments_changed(job_id)
+    await record_audit(
+        action=action,
+        actor=safe_username,
+        message=(
+            f"User '{safe_username}' marked '{_scrub_audit_text(safe_test_name)}'"
+            f" as reviewed in job {safe_job_id}"
+            if body.reviewed
+            else f"User '{safe_username}' cleared the review of"
+            f" '{_scrub_audit_text(safe_test_name)}' in job {safe_job_id}"
+        ),
+        target_type="job",
+        target_id=safe_job_id,
+        details=details,
+        request=request,
+    )
     return {
         "status": "ok",
-        "reviewed_by": username if body.reviewed else "",
+        "reviewed_by": safe_username if body.reviewed else "",
+        "reviewed_at": first_reviewed_at if body.reviewed else None,
     }
 
 
@@ -18443,11 +18562,9 @@ async def register_user(request: Request) -> JSONResponse:
 
     # Block reserved username prefixes (e.g., rootcoz-ai)
     if username.startswith("rootcoz"):
-        return JSONResponse(
+        raise HTTPException(
             status_code=400,
-            content={
-                "detail": "Usernames starting with 'rootcoz' are reserved for system use"
-            },
+            detail="Usernames starting with 'rootcoz' are reserved for system use",
             headers={"Cache-Control": "no-store"},
         )
 
@@ -19286,6 +19403,9 @@ def _install_sse_log_handler() -> None:
         return
     handler = _SSELogHandler()
     handler.setLevel(logging.DEBUG)
+    # ``_install_job_id_filter()`` swept the handlers that existed one line
+    # before this one, so the stream would otherwise publish untagged lines.
+    handler.addFilter(_job_id_filter)
     # Copy formatter from the first RotatingFileHandler we find
     for lg in _known_loggers():
         for h in lg.handlers:
@@ -20414,7 +20534,9 @@ async def set_free_ai_models_endpoint(
 # --- Admin server provider credentials (#347) ---
 
 
-async def _seed_server_provider_selection(provider: str, updated_by: str) -> None:
+async def _seed_server_provider_selection(
+    provider: str, updated_by: str, request: Request | None = None
+) -> None:
     """Seed a selection for a newly-keyed provider (#347 r4, #350).
 
     A stored key makes a provider *managed* (see
@@ -20477,6 +20599,7 @@ async def _seed_server_provider_selection(provider: str, updated_by: str) -> Non
             target_type="provider",
             target_id=provider,
             details={"provider": provider, "count": len(entries)},
+            request=request,
         )
 
 
@@ -21168,7 +21291,7 @@ async def _verify_and_store_server_provider_key(
     )
     if not replacing:
         await _seed_server_provider_selection(
-            provider, request.state.username or "admin"
+            provider, request.state.username or "admin", request=request
         )
     action = (
         "provider.key.rotate"

@@ -48,7 +48,7 @@ Use this when you already know the job ID and test name and only need to confirm
 
    Click `Review` on a single failure when you are satisfied with it. On grouped cards, use `Review All` when the whole group is ready, or review individual tests from the `Affected Tests` list if only part of the group is ready.
 
-   The button changes to `Reviewed` and shows who reviewed it. Click it again if you need to reopen the failure.
+   The button changes to `Reviewed` and shows who reviewed it and when it was first reviewed (`Reviewed by <user> on <timestamp>`); the tooltip repeats both. The timestamp is the first time the failure was marked, so reopening it and marking it again preserves the original moment — only a review recorded before reviews carried a timestamp shows just the reviewer. Click it again if you need to reopen the failure.
 
 6. Correct the labels when the default answer is wrong.
 

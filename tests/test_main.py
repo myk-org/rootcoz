@@ -3662,6 +3662,171 @@ class TestReviewedEndpoint:
         assert response.status_code == 404
 
 
+class TestReviewAttribution:
+    """``reviewed_at`` is the first-review anchor, exposed everywhere (#566)."""
+
+    async def _seed(self, job_id: str = "job-attr-1") -> None:
+        from rootcoz import storage
+
+        await storage.save_result(
+            job_id,
+            "http://jenkins",
+            "completed",
+            {
+                "status": "completed",
+                "summary": "",
+                "failures": [
+                    {
+                        "test_name": "test_alpha",
+                        "error": "err",
+                        "analysis": {"classification": "CODE ISSUE"},
+                    }
+                ],
+                "child_job_analyses": [
+                    {
+                        "job_name": "child-job",
+                        "build_number": 4,
+                        "failures": [
+                            {
+                                "test_name": "test_child",
+                                "error": "err",
+                                "analysis": {"classification": "PRODUCT BUG"},
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+    async def _put(
+        self, test_client, job_id: str, reviewed: bool, test_name: str = "test_alpha"
+    ):
+        from rootcoz import storage
+
+        if not hasattr(self, "_key"):
+            _, self._key = await storage.create_user("attr-reviewer")
+        return test_client.put(
+            f"/results/{job_id}/reviewed",
+            json={"test_name": test_name, "reviewed": reviewed},
+            headers={"Authorization": f"Bearer {self._key}"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_reviewed_at_survives_unmark_and_remark(self, test_client):
+        await self._seed()
+
+        first = await self._put(test_client, "job-attr-1", True)
+        assert first.status_code == 200
+        t1 = first.json()["reviewed_at"]
+        assert t1 and t1.endswith("Z")
+
+        result = test_client.get("/results/job-attr-1").json()
+        top = result["result"]["failures"][0]
+        assert (top["reviewed"], top["reviewed_by"], top["reviewed_at"]) == (
+            True,
+            "attr-reviewer",
+            t1,
+        )
+        # Every failure in the tree carries the review fields, not just the top.
+        child = result["result"]["child_job_analyses"][0]["failures"][0]
+        assert {"reviewed", "reviewed_by", "reviewed_at"} <= set(child)
+        full = test_client.get("/api/results/job-attr-1/full").json()
+        assert full["failures"][0]["reviewed_at"] == t1
+
+        unmarked = await self._put(test_client, "job-attr-1", False)
+        assert unmarked.status_code == 200
+        assert unmarked.json()["reviewed_at"] is None
+        after_unmark = test_client.get("/results/job-attr-1").json()
+        top = after_unmark["result"]["failures"][0]
+        assert (top["reviewed"], top["reviewed_by"], top["reviewed_at"]) == (
+            False,
+            "",
+            None,
+        )
+        # /comments keeps the anchor so a re-mark can restore it.
+        reviews = test_client.get("/results/job-attr-1/comments").json()["reviews"]
+        assert reviews["test_alpha"]["reviewed"] is False
+        assert reviews["test_alpha"]["reviewed_at"] == t1
+
+        remarked = await self._put(test_client, "job-attr-1", True)
+        assert remarked.status_code == 200
+        assert remarked.json()["reviewed_at"] == t1
+        restored = test_client.get("/api/results/job-attr-1/full").json()
+        assert restored["failures"][0]["reviewed_at"] == t1
+        reviews = test_client.get("/results/job-attr-1/comments").json()["reviews"]
+        assert reviews["test_alpha"]["reviewed"] is True
+        assert reviews["test_alpha"]["username"] == "attr-reviewer"
+        assert reviews["test_alpha"]["reviewed_at"] == t1
+
+    @pytest.mark.asyncio
+    async def test_legacy_row_stays_null_through_the_endpoint(self, test_client):
+        import sqlite3
+
+        from rootcoz import storage
+
+        await self._seed()
+        with sqlite3.connect(storage.DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO failure_reviews"
+                " (job_id, test_name, reviewed, username)"
+                " VALUES ('job-attr-1', 'test_alpha', 1, 'alice')"
+            )
+
+        result = test_client.get("/results/job-attr-1").json()
+        top = result["result"]["failures"][0]
+        assert (top["reviewed"], top["reviewed_by"], top["reviewed_at"]) == (
+            True,
+            "alice",
+            None,
+        )
+
+        remark = await self._put(test_client, "job-attr-1", True)
+        assert remark.status_code == 200
+        assert remark.json()["reviewed_by"] == "attr-reviewer"
+        assert remark.json()["reviewed_at"] is None
+        assert (
+            test_client.get("/results/job-attr-1").json()["result"]["failures"][0][
+                "reviewed_at"
+            ]
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_reviewed_at_is_selectable_via_sparse_fields(self, test_client):
+        await self._seed()
+        granted = await self._put(test_client, "job-attr-1", True)
+        t1 = granted.json()["reviewed_at"]
+
+        listed = test_client.get("/api/results/fields").json()["fields"]
+        assert {
+            "result.failures.reviewed",
+            "result.failures.reviewed_by",
+            "result.failures.reviewed_at",
+        } <= set(listed)
+
+        sparse = test_client.get(
+            "/results/job-attr-1",
+            params={
+                "fields": (
+                    "result.failures.test_name,"
+                    "result.failures.reviewed,"
+                    "result.failures.reviewed_by,"
+                    "result.failures.reviewed_at"
+                )
+            },
+        )
+        assert sparse.status_code == 200
+        projected = sparse.json()["result"]["failures"]
+        assert projected == [
+            {
+                "test_name": "test_alpha",
+                "reviewed": True,
+                "reviewed_by": "attr-reviewer",
+                "reviewed_at": t1,
+            }
+        ]
+
+
 class TestReviewStatusEndpoint:
     @pytest.mark.asyncio
     async def test_get_review_status(self, test_client):
@@ -20002,6 +20167,10 @@ class TestGetJobResultsFullEndpoint:
         assert failure["child_build_number"] == 7
         assert failure["reviewed"] is True
         assert failure["reviewed_by"] == "bob"
+        assert isinstance(failure["reviewed_at"], str) and failure[
+            "reviewed_at"
+        ].endswith("Z")
+        assert {"reviewed", "reviewed_by", "reviewed_at"} <= set(failure)
         assert item["summary"]["classifications"] == {"PRODUCT BUG": 1}
 
     @pytest.mark.asyncio

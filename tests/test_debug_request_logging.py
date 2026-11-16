@@ -488,3 +488,91 @@ class TestAnalyzeRouteUrlRefusalMasking:
         assert "tests_repo_url" in response.text
         assert "\\u0000" not in response.text
         assert "\x00" not in response.text
+
+
+# ---------------------------------------------------------------------------
+# [user=<actor>] attribution on request lines (#566)
+# ---------------------------------------------------------------------------
+
+
+class _TagSink(logging.Handler):
+    """Collect rendered lines with the real tag filter applied, as a handler does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.messages.append(record.getMessage())
+        except Exception as exc:  # noqa: BLE001 - the render is what is under test
+            self.messages.append(f"<unrenderable {type(exc).__name__}>")
+
+
+@pytest.fixture
+def tag_sink():
+    """The ``rootcoz.main`` tree rendered through the production tag filter."""
+    from rootcoz import main as main_module
+    from tests.conftest import forget_duplicate_history
+
+    logger = logging.getLogger("rootcoz.main")
+    original_level = logger.level
+    sink = _TagSink()
+    sink.addFilter(main_module._job_id_filter)
+    forget_duplicate_history(logger)
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(sink)
+    try:
+        yield sink
+    finally:
+        logger.removeHandler(sink)
+        logger.setLevel(original_level)
+        forget_duplicate_history(logger)
+
+
+def test_an_authenticated_body_log_line_carries_the_user_tag(
+    test_client, tag_sink
+) -> None:
+    """The body logger runs inside AuthMiddleware, so its line is attributed."""
+    response = test_client.post(
+        "/api/validate-token",
+        json={"token_type": "github", "token": "x"},  # pragma: allowlist secret
+    )
+    assert response.status_code in (200, 400, 422)
+
+    lines = [line for line in tag_sink.messages if line.startswith("[user=admin] ")]
+    assert [line for line in lines if "Incoming POST /api/validate-token body:" in line]
+
+
+def test_an_auth_middleware_refusal_carries_the_user_tag(test_client, tag_sink) -> None:
+    """A disabled account is refused in the middleware, which is where it logs."""
+    import asyncio
+
+    from rootcoz import storage
+
+    _, key = asyncio.run(storage.create_user("disabled-tag"))
+    asyncio.run(storage.set_user_disabled("disabled-tag", disabled=True))
+
+    response = test_client.get(
+        "/api/results", headers={"Authorization": f"Bearer {key}"}
+    )
+    assert response.status_code == 401
+
+    assert [
+        line
+        for line in tag_sink.messages
+        if line.startswith("[user=disabled-tag] [AUDIT]")
+    ]
+
+
+def test_a_forged_cookie_never_binds_a_user_tag(test_client, tag_sink) -> None:
+    """``rootcoz_username`` is a display cookie: it is not an identity."""
+    response = test_client.post(
+        "/api/validate-token",
+        json={"token_type": "github", "token": "x"},  # pragma: allowlist secret
+        headers={"Authorization": "Bearer not-a-real-key"},
+        cookies={"rootcoz_username": "spoof"},
+    )
+    assert response.status_code in (200, 400, 401, 422)
+
+    assert not [line for line in tag_sink.messages if "[user=spoof]" in line]

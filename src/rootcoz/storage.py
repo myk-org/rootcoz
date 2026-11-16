@@ -1893,9 +1893,14 @@ async def init_db() -> None:
                 reviewed BOOLEAN DEFAULT 0,
                 username TEXT NOT NULL DEFAULT '',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                first_reviewed_at TEXT,
                 PRIMARY KEY (job_id, test_name, child_job_name, child_build_number)
             )
         """)
+
+        # Migration: the immutable first-review anchor (#566). NULL on every
+        # row written before it — the moment is never invented.
+        await _migrate_add_column(db, "failure_reviews", "first_reviewed_at", "TEXT")
 
         # Migration: add child_build_number to existing tables
         # (needed when upgrading from versions without this column)
@@ -1951,6 +1956,7 @@ async def init_db() -> None:
                         reviewed BOOLEAN DEFAULT 0,
                         username TEXT NOT NULL DEFAULT '',
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        first_reviewed_at TEXT,
                         PRIMARY KEY (job_id, test_name, child_job_name, child_build_number)
                     )
                 """)
@@ -1958,11 +1964,11 @@ async def init_db() -> None:
                     INSERT INTO failure_reviews (
                         job_id, test_name, child_job_name,
                         child_build_number, reviewed, username,
-                        updated_at
+                        updated_at, first_reviewed_at
                     )
                     SELECT job_id, test_name, child_job_name,
                         child_build_number, reviewed,
-                        COALESCE(username, ''), updated_at
+                        COALESCE(username, ''), updated_at, first_reviewed_at
                     FROM failure_reviews_old
                 """)
                 await db.execute("DROP TABLE failure_reviews_old")
@@ -3329,21 +3335,50 @@ async def set_reviewed(
     child_job_name: str = "",
     child_build_number: int = 0,
     username: str = "",
-) -> None:
-    """Set or update the reviewed state for a test failure."""
+) -> str | None:
+    """Set or update the reviewed state for a test failure.
+
+    Returns the row's ``first_reviewed_at``: the immutable moment the failure
+    was first marked reviewed (#566). ``NULL`` only for a row written before
+    that column existed, so a re-mark never fabricates a moment.
+    """
     logger.debug(
         f"set_reviewed: job_id={job_id}, test_name={test_name}, reviewed={reviewed}"
     )
     _validate_child_identifier_pairing(child_job_name, child_build_number)
+    mark_ts = audit_timestamp() if reviewed else None
     async with _connect_db() as db:
-        await db.execute(
-            "INSERT OR REPLACE INTO failure_reviews"
+        cursor = await db.execute(
+            "INSERT INTO failure_reviews"
             " (job_id, test_name, child_job_name,"
-            " child_build_number, reviewed, username, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-            (job_id, test_name, child_job_name, child_build_number, reviewed, username),
+            " child_build_number, reviewed, username, updated_at, first_reviewed_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)"
+            " ON CONFLICT(job_id, test_name, child_job_name, child_build_number)"
+            " DO UPDATE SET"
+            " reviewed = excluded.reviewed,"
+            " username = excluded.username,"
+            " updated_at = CURRENT_TIMESTAMP,"
+            # Kept once set; a pre-existing reviewed row keeps its unknown
+            # moment instead of being stamped now.
+            " first_reviewed_at = CASE"
+            " WHEN failure_reviews.first_reviewed_at IS NOT NULL"
+            " THEN failure_reviews.first_reviewed_at"
+            " WHEN failure_reviews.reviewed THEN NULL"
+            " ELSE excluded.first_reviewed_at END"
+            " RETURNING first_reviewed_at",
+            (
+                job_id,
+                test_name,
+                child_job_name,
+                child_build_number,
+                reviewed,
+                username,
+                mark_ts,
+            ),
         )
+        row = await cursor.fetchone()
         await db.commit()
+    return row["first_reviewed_at"] if row else None
 
 
 async def get_reviews_for_job(job_id: str) -> dict[str, dict[str, Any]]:
@@ -3351,8 +3386,9 @@ async def get_reviews_for_job(job_id: str) -> dict[str, dict[str, Any]]:
     logger.debug(f"get_reviews_for_job: job_id={job_id}")
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT test_name, child_job_name, child_build_number, reviewed, username, updated_at "
-            "FROM failure_reviews WHERE job_id = ?",
+            "SELECT test_name, child_job_name, child_build_number, reviewed, username,"
+            " updated_at, first_reviewed_at"
+            " FROM failure_reviews WHERE job_id = ?",
             (job_id,),
         )
         rows = await cursor.fetchall()
@@ -3365,6 +3401,7 @@ async def get_reviews_for_job(job_id: str) -> dict[str, dict[str, Any]]:
                 "reviewed": bool(row["reviewed"]),
                 "username": row["username"],
                 "updated_at": row["updated_at"],
+                "reviewed_at": row["first_reviewed_at"],
             }
         logger.debug(f"get_reviews_for_job: job_id={job_id}, count={len(result)}")
         return result

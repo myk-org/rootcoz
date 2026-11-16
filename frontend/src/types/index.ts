@@ -322,6 +322,8 @@ export interface ReviewState {
   reviewed: boolean
   username: string
   updated_at: string
+  /** Immutable first-review moment (UTC ISO-8601); null before #566 rows. */
+  reviewed_at?: string | null
 }
 
 export interface CommentsAndReviews {

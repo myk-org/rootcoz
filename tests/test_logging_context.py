@@ -15,7 +15,13 @@ import pytest
 import rootcoz.main
 from rootcoz import logging_context
 from rootcoz.config import clear_db_settings_cache
-from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
+from rootcoz.logging_context import (
+    JobIdFilter,
+    get_log_file,
+    job_id_var,
+    sanitize_log_tag,
+    user_var,
+)
 from rootcoz.sources.jenkins_source import (
     JenkinsError,
     handle_jenkins_exception,
@@ -236,14 +242,16 @@ def dedup_logger(
     original_level = logger.level
     logger.setLevel(logging.DEBUG)
     job_id_var.set("")
+    user_var.set("")
     forget_duplicate_history(logger)
     try:
         yield logger, handler
     finally:
         logger.removeHandler(handler)
         logger.setLevel(original_level)
-        # A leaked job id would make the job-id test pass vacuously.
+        # A leaked tag would make the next test pass vacuously.
         job_id_var.set("")
+        user_var.set("")
 
 
 def test_a_captured_line_survives_an_earlier_identical_line(
@@ -519,6 +527,114 @@ class TestRenderedMessageDedup:
         assert level_line.startswith("distinct info line")
         assert "repeated" not in level_line
         assert "dbg secret" not in level_line
+
+
+class TestUserTag:
+    """``[user=<actor>]`` on authenticated lines, and tag spoofing (#566)."""
+
+    @staticmethod
+    def _record(msg: str, args: tuple = ()) -> logging.LogRecord:
+        return logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg=msg,
+            args=args,
+            exc_info=None,
+        )
+
+    def test_sanitize_log_tag_strips_tag_delimiters_and_control_chars(self) -> None:
+        assert sanitize_log_tag("alice") == "alice"
+        assert sanitize_log_tag("x][user=admin") == "xuser=admin"
+        assert sanitize_log_tag("a b\tc\nd") == "abcd"
+        assert sanitize_log_tag("") == ""
+
+    @pytest.mark.parametrize(
+        ("job_id", "user", "expected"),
+        [
+            ("j1", "alice", "[job_id=j1][user=alice] msg"),
+            ("", "alice", "[user=alice] msg"),
+            ("j1", "", "[job_id=j1] msg"),
+            ("", "", "msg"),
+        ],
+    )
+    def test_the_prefix_names_whichever_tags_are_bound(
+        self, job_id: str, user: str, expected: str
+    ) -> None:
+        record = self._record("msg")
+        job_id_var.set(job_id)
+        user_var.set(user)
+        try:
+            JobIdFilter().filter(record)
+        finally:
+            job_id_var.set("")
+            user_var.set("")
+        assert record.msg == expected
+
+    def test_the_prefix_is_idempotent_across_handlers(self) -> None:
+        record = self._record("msg")
+        job_id_var.set("j1")
+        user_var.set("alice")
+        try:
+            for _ in range(3):
+                JobIdFilter().filter(record)
+        finally:
+            job_id_var.set("")
+            user_var.set("")
+        assert record.msg == "[job_id=j1][user=alice] msg"
+
+    def test_a_percent_in_a_tag_never_breaks_a_formatted_call(self) -> None:
+        """A ``%`` in the tag must not become a format spec for the record."""
+        record = self._record("value %s", ("x",))
+        job_id_var.set("j1")
+        user_var.set("50%user")
+        try:
+            JobIdFilter().filter(record)
+        finally:
+            job_id_var.set("")
+            user_var.set("")
+        assert record.getMessage() == "[job_id=j1][user=50%user] value x"
+
+    def test_a_job_id_cannot_forge_a_user_tag(self) -> None:
+        record = self._record("msg")
+        job_id_var.set("x][user=admin")
+        user_var.set("mallory")
+        try:
+            JobIdFilter().filter(record)
+        finally:
+            job_id_var.set("")
+            user_var.set("")
+        assert record.msg == "[job_id=xuser=admin][user=mallory] msg"
+
+    def test_identical_lines_are_not_collapsed_across_users(
+        self, dedup_logger: tuple[logging.Logger, _RecordingHandler]
+    ) -> None:
+        logger, handler = dedup_logger
+
+        user_var.set("alice")
+        logger.warning("same text")
+        user_var.set("bob")
+        logger.warning("same text")
+
+        assert len(handler.messages) == 2
+        assert handler.messages[0].startswith("[user=alice] same text")
+        assert handler.messages[1].startswith("[user=bob] same text")
+
+    def test_a_repeat_note_never_crosses_a_user(
+        self, dedup_logger: tuple[logging.Logger, _RecordingHandler]
+    ) -> None:
+        logger, handler = dedup_logger
+
+        user_var.set("alice")
+        for _ in range(3):
+            logger.warning("result=%s", "alice-only-secret")
+        user_var.set("bob")
+        logger.warning("working")
+
+        bob_line = handler.messages[-1]
+        assert "repeated" not in bob_line
+        assert "alice-only-secret" not in bob_line
 
 
 class TestGetLogFile:
@@ -834,13 +950,25 @@ class TestFileLogging:
             assert sse_handler.formatter is handler.formatter
             from rootcoz import storage
 
-            marker = "sse-file-text-marker"
-            async with rootcoz.main._log_broadcast.subscribe() as subscription:
-                storage.logger.warning(marker)
-                for _ in range(3):
-                    await asyncio.sleep(0)
-                payload = subscription.queue.get_nowait()
+            # The sweep in ``_install_job_id_filter`` runs one line before the
+            # SSE handler exists, so the handler has to carry the filter itself.
+            assert rootcoz.main._job_id_filter in sse_handler.filters
+
+            job_id_var.set("job-sse")
+            user_var.set("alice")
+            try:
+                marker = "sse-file-text-marker"
+                async with rootcoz.main._log_broadcast.subscribe() as subscription:
+                    storage.logger.warning(marker)
+                    for _ in range(3):
+                        await asyncio.sleep(0)
+                    payload = subscription.queue.get_nowait()
+            finally:
+                job_id_var.set("")
+                user_var.set("")
             assert payload == rootcoz.main._ANSI_RE.sub("", _line_with(marker))
+            # The SSE feed carries the same tag prefixes as the file.
+            assert f"[job_id=job-sse][user=alice] {marker}" in payload
         finally:
             for known_logger in logging_context._known_loggers():  # type: ignore[attr-defined]
                 if sse_handler is not None and sse_handler in known_logger.handlers:

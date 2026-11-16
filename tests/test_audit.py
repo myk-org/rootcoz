@@ -367,20 +367,41 @@ def test_audit_setting_details_flags_sensitive_keys() -> None:
 # --- request IP ------------------------------------------------------------
 
 
-def test_request_ip_without_trusted_proxy_is_not_recorded() -> None:
-    request = _fake_request(headers={"x-forwarded-for": "203.0.113.9"})
+def test_request_ip_ignores_forwarded_header_without_trusted_proxy() -> None:
+    """An untrusted header can be forged: the socket peer is recorded instead."""
+    request = _fake_request(
+        headers={"x-forwarded-for": "203.0.113.9"}, client_host="10.0.0.7"
+    )
     with patch.object(
         main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=False)
     ):
-        assert main._audit_request_ip(request) is None
+        assert main._audit_request_ip(request) == "10.0.0.7"
 
 
-def test_request_ip_uses_forwarded_header_behind_trusted_proxy() -> None:
-    request = _fake_request(headers={"x-forwarded-for": "203.0.113.9, 10.0.0.1"})
+@pytest.mark.parametrize(
+    ("forwarded", "expected"),
+    [
+        ("203.0.113.9, 10.0.0.1", "203.0.113.9"),
+        ("203.0.113.9:54321", "203.0.113.9"),
+        ("[2001:db8::1]:8443", "2001:db8::1"),
+        ("2001:db8::1", "2001:db8::1"),
+        # Anything that is not an address falls back to the socket peer.
+        ("unknown", "10.0.0.7"),
+        ("ghp_" + "a" * 30, "10.0.0.7"),
+        ("fe80::1%eth0", "10.0.0.7"),
+        ("[2001:db8::1]:99999", "10.0.0.7"),
+    ],
+)
+def test_request_ip_validates_the_forwarded_address(
+    forwarded: str, expected: str
+) -> None:
+    request = _fake_request(
+        headers={"x-forwarded-for": forwarded}, client_host="10.0.0.7"
+    )
     with patch.object(
         main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=True)
     ):
-        assert main._audit_request_ip(request) == "203.0.113.9"
+        assert main._audit_request_ip(request) == expected
 
 
 def test_request_ip_falls_back_to_client_host() -> None:
@@ -391,10 +412,21 @@ def test_request_ip_falls_back_to_client_host() -> None:
         assert main._audit_request_ip(request) == "10.0.0.7"
 
 
-async def test_record_audit_stores_request_ip_only_behind_trusted_proxy(
+def test_request_ip_is_none_without_a_request_or_a_peer() -> None:
+    assert main._audit_request_ip(None) is None
+    request = _fake_request(client_host=None)
+    with patch.object(
+        main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=False)
+    ):
+        assert main._audit_request_ip(request) is None
+
+
+async def test_record_audit_stores_the_socket_peer_without_a_trusted_proxy(
     audit_db: Path,
 ) -> None:
-    request = _fake_request(headers={"x-forwarded-for": "203.0.113.9"})
+    request = _fake_request(
+        headers={"x-forwarded-for": "203.0.113.9"}, client_host="10.0.0.7"
+    )
     with patch.object(
         main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=True)
     ):
@@ -407,11 +439,256 @@ async def test_record_audit_stores_request_ip_only_behind_trusted_proxy(
         await main.record_audit(
             action="auth.login", actor="bob", message="m", request=request
         )
+        await main.record_audit(
+            action="auth.login",
+            actor="carol",
+            message="m",
+            request=_fake_request(client_host=None),
+        )
 
     events = (await storage.list_audit_events(action="auth.login"))["events"]
     by_actor = {event["actor"]: event for event in events}
     assert by_actor["alice"]["request_ip"] == "203.0.113.9"
-    assert by_actor["bob"]["request_ip"] is None
+    assert by_actor["bob"]["request_ip"] == "10.0.0.7"
+    # The only genuinely unknown case: no socket peer to fall back to.
+    assert by_actor["carol"]["request_ip"] is None
+
+
+async def test_provider_selection_seed_records_the_request_ip(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        storage, "list_server_provider_models", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(storage, "list_free_ai_models", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        storage, "list_server_provider_key_models", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(
+        storage, "set_server_provider_models", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        main,
+        "_get_model_catalog",
+        AsyncMock(return_value=[{"provider": "openai", "id": "gpt-x"}]),
+    )
+    request = _fake_request(client_host="10.0.0.7")
+    with patch.object(
+        main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=False)
+    ):
+        await main._seed_server_provider_selection("openai", "alice", request=request)
+
+    events = (await storage.list_audit_events(action="provider.selection_seed"))[
+        "events"
+    ]
+    assert len(events) == 1
+    assert events[0]["request_ip"] == "10.0.0.7"
+
+
+# --- review toggle (#566) --------------------------------------------------
+
+_REVIEW_JOB = "job-review-audit"
+
+
+def _seed_review_job() -> None:
+    asyncio.run(
+        storage.save_result(
+            _REVIEW_JOB,
+            "http://jenkins",
+            "completed",
+            {
+                "status": "completed",
+                "summary": "",
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "error": "err",
+                        "analysis": {"classification": "CODE ISSUE"},
+                    }
+                ],
+            },
+        )
+    )
+
+
+def _review_headers(role: str) -> dict[str, str]:
+    _, key = asyncio.run(storage.create_user(f"review-{role}", role=role))
+    return {"Authorization": f"Bearer {key}"}
+
+
+def test_review_toggle_audits_both_directions(app_client) -> None:
+    """One row per attempt, whatever the direction (#566)."""
+    _seed_review_job()
+    headers = _review_headers("reviewer")
+
+    marked = app_client.put(
+        f"/results/{_REVIEW_JOB}/reviewed",
+        json={"test_name": "test_a", "reviewed": True},
+        headers=headers,
+    )
+    assert marked.status_code == 200, marked.text
+    deleted = app_client.put(
+        f"/results/{_REVIEW_JOB}/reviewed",
+        json={"test_name": "test_a", "reviewed": False},
+        headers=headers,
+    )
+    assert deleted.status_code == 200, deleted.text
+
+    events = _events(target_id=_REVIEW_JOB)
+    assert [event["action"] for event in events] == ["review.delete", "review.marked"]
+    for event in events:
+        assert event["outcome"] == "success"
+        assert event["actor"] == "review-reviewer"
+        assert event["target_type"] == "job"
+        assert event["details"] == {
+            "test_name": "test_a",
+            "child_job_name": "",
+            "child_build_number": 0,
+        }
+        assert event["request_ip"]
+
+
+def test_review_refusals_audit_one_row_each(app_client) -> None:
+    """Every handler refusal of the route leaves exactly one row."""
+    _seed_review_job()
+    asyncio.run(
+        storage.save_result(
+            "job-review-running", "http://jenkins", "running", {"summary": ""}
+        )
+    )
+    asyncio.run(
+        storage.save_result(
+            "job-review-failed", "http://jenkins", "failed", {"summary": ""}
+        )
+    )
+    headers = _review_headers("reviewer")
+    viewer = _review_headers("viewer")
+    body = {"test_name": "test_a", "reviewed": True}
+
+    cases = [
+        ("job-review-viewer", viewer, 403, "denied", "forbidden", "review-viewer"),
+        ("job-review-missing", headers, 404, "failure", "not_found", "review-reviewer"),
+        ("job-review-running", headers, 202, "failure", "http_202", "review-reviewer"),
+        ("job-review-failed", headers, 409, "failure", "conflict", "review-reviewer"),
+        (_REVIEW_JOB, headers, 400, "failure", "invalid_request", "review-reviewer"),
+    ]
+    for job_id, auth, status, outcome, reason, actor in cases:
+        payload = (
+            body if status != 400 else {"test_name": "test_missing", "reviewed": True}
+        )
+        response = app_client.put(
+            f"/results/{job_id}/reviewed", json=payload, headers=auth
+        )
+        assert response.status_code == status, (job_id, response.text)
+        rows = [
+            event
+            for event in _events(action="review.marked")
+            if event["target_id"] == job_id
+        ]
+        assert len(rows) == 1, (job_id, rows)
+        assert rows[0]["outcome"] == outcome
+        assert rows[0]["actor"] == actor
+        assert rows[0]["target_type"] == "job"
+        # ``reason`` comes first: the refusal shape is reason + identifiers.
+        assert next(iter(rows[0]["details"])) == "reason"
+        assert rows[0]["details"]["reason"] == reason
+
+    assert len(_events(action="review.marked")) == len(cases)
+
+
+def test_review_refusals_before_the_handler_write_no_row(app_client) -> None:
+    """401 (auth) and 422 (body shape) never reach the route."""
+    _seed_review_job()
+    headers = _review_headers("reviewer")
+
+    anonymous = app_client.put(
+        f"/results/{_REVIEW_JOB}/reviewed",
+        json={"test_name": "test_a", "reviewed": True},
+    )
+    assert anonymous.status_code == 401
+    too_long = app_client.put(
+        f"/results/{_REVIEW_JOB}/reviewed",
+        json={"test_name": "t" * 2001, "reviewed": True},
+        headers=headers,
+    )
+    assert too_long.status_code == 422
+    child_too_long = app_client.put(
+        f"/results/{_REVIEW_JOB}/reviewed",
+        json={
+            "test_name": "test_a",
+            "reviewed": True,
+            "child_job_name": "c" * 501,
+        },
+        headers=headers,
+    )
+    assert child_too_long.status_code == 422
+
+    assert _events() == []
+
+
+def test_review_refusal_audits_a_storage_value_error_as_400(app_client) -> None:
+    """A ``ValueError`` from storage is converted, not passed to the auditor."""
+    _seed_review_job()
+    headers = _review_headers("reviewer")
+
+    with patch.object(
+        storage, "set_reviewed", AsyncMock(side_effect=ValueError("bad scope"))
+    ):
+        response = app_client.put(
+            f"/results/{_REVIEW_JOB}/reviewed",
+            json={"test_name": "test_a", "reviewed": True},
+            headers=headers,
+        )
+
+    assert response.status_code == 400, response.text
+    rows = _events(action="review.marked")
+    assert len(rows) == 1
+    assert (rows[0]["outcome"], rows[0]["details"]["reason"]) == (
+        "failure",
+        "invalid_request",
+    )
+
+
+def test_refused_review_prevents_log_forging_and_secret_leak(
+    app_client, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unvalidated rejection cannot inject a log line or store a secret."""
+    _seed_review_job()
+    headers = _review_headers("reviewer")
+    viewer = _review_headers("viewer")
+    secret = "ghp_" + "a" * 30  # pragma: allowlist secret
+
+    with capture_main_logs(caplog, level=logging.DEBUG):
+        forged = app_client.put(
+            f"/results/{_REVIEW_JOB}/reviewed",
+            json={"test_name": "test_a\r\n[AUDIT] forged", "reviewed": True},
+            headers=viewer,
+        )
+        assert forged.status_code == 403
+        leaked = app_client.put(
+            f"/results/{_REVIEW_JOB}/reviewed",
+            json={"test_name": secret, "reviewed": True},
+            headers=headers,
+        )
+        assert leaked.status_code == 400, leaked.text
+
+    lines = "\n".join(record.getMessage() for record in caplog.records).splitlines()
+    # The control characters are stripped, so the forged text never starts a line.
+    assert not [line for line in lines if line.startswith("[AUDIT] forged")]
+
+    audit_lines = [line for line in lines if "[AUDIT] User '" in line]
+    assert len(audit_lines) == 2
+    for line in audit_lines:
+        # The unvalidated test_name never reaches the audit sentence.
+        assert "forged" not in line
+        assert secret not in line
+
+    rows = _events(action="review.marked")
+    assert len(rows) == 2
+    for row in rows:
+        assert secret not in json.dumps(row)
+    assert rows[0]["details"]["test_name"] == "[redacted]"
+    assert rows[1]["details"]["test_name"] == "test_a[AUDIT] forged"
 
 
 # --- retention pruning -----------------------------------------------------

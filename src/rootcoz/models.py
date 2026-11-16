@@ -1165,7 +1165,7 @@ class _ChildJobFieldsValidator(BaseModel):
     Negative values are rejected.
     """
 
-    child_job_name: str = ""
+    child_job_name: str = Field(default="", max_length=500)
     child_build_number: Annotated[int, Field(ge=0)] = 0
 
     @model_validator(mode="after")
@@ -1190,7 +1190,7 @@ class AddCommentRequest(_ChildJobFieldsValidator):
 class SetReviewedRequest(_ChildJobFieldsValidator):
     """Request body for toggling the reviewed state of a test failure."""
 
-    test_name: str
+    test_name: str = Field(max_length=2000)
     reviewed: bool
 
 

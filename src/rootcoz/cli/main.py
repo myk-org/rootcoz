@@ -1341,9 +1341,12 @@ def set_reviewed_cmd(
     if not _state.get("json", False):
         state = "reviewed" if reviewed else "not reviewed"
         reviewer = data.get("reviewed_by", "")
+        reviewed_at = data.get("reviewed_at") or ""
         msg = f"Marked as {state}"
         if reviewer:
-            msg += f" (by {reviewer})"
+            msg += f" (by {reviewer}"
+            msg += f" on {reviewed_at}" if reviewed_at else ""
+            msg += ")"
         typer.echo(msg)
 
 
@@ -1595,6 +1598,8 @@ def _render_full_result(data: dict[str, Any], *, offset: int, limit: int) -> Non
             )
             reviewed = "✓" if f.get("reviewed") else "✗"
             reviewed_by = f" by {f.get('reviewed_by', '')}" if f.get("reviewed") else ""
+            if f.get("reviewed") and f.get("reviewed_at"):
+                reviewed_by += f" on {f['reviewed_at']}"
             typer.echo(
                 f"  {reviewed} {f.get('test_name', '')}{scope} — "
                 f"{f.get('classification', '')} / {f.get('pattern', '')}{reviewed_by}"

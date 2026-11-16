@@ -303,7 +303,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
         const res = await putReviewed(jobId, { testName: t.test_name, childJobName: scopedChildJobName, childBuildNumber: scopedChildBuildNumber }, newState)
         dispatch({
           type: 'SET_REVIEW',
-          payload: { key: scopedReviewKey(t.test_name), state: scopedReviewState(newState, res.reviewed_by) },
+          payload: { key: scopedReviewKey(t.test_name), state: scopedReviewState(newState, res.reviewed_by, res.reviewed_at) },
         })
       })
       if (failed.length > 0) {

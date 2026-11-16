@@ -1030,6 +1030,122 @@ class TestSetReviewedCommand:
         assert kwargs["child_build_number"] == 5
 
 
+class TestReviewAttributionCommand:
+    """``reviewed_at`` in the human output (#566)."""
+
+    def test_set_reviewed_shows_the_first_review_timestamp(self, mock_client):
+        mock_client.set_reviewed.return_value = {
+            "status": "ok",
+            "reviewed_by": "alice",
+            "reviewed_at": "2026-01-02T03:04:05.000006Z",
+        }
+        result = runner.invoke(
+            app,
+            ["results", "set-reviewed", "job-1", "--test", "test_a", "--reviewed"],
+        )
+        assert result.exit_code == 0
+        assert (
+            "Marked as reviewed (by alice on 2026-01-02T03:04:05.000006Z)"
+            in result.output
+        )
+
+    def test_set_unreviewed_omits_the_timestamp(self, mock_client):
+        mock_client.set_reviewed.return_value = {
+            "status": "ok",
+            "reviewed_by": "",
+            "reviewed_at": None,
+        }
+        result = runner.invoke(
+            app,
+            ["results", "set-reviewed", "job-1", "--test", "test_a", "--not-reviewed"],
+        )
+        assert result.exit_code == 0
+        assert "not reviewed" in result.output
+        assert " on " not in result.output
+
+    def test_results_full_shows_the_first_review_timestamp(self, mock_client):
+        job = {
+            "job": {
+                "job_id": "a",
+                "job_name": "pipe",
+                "build_number": 1,
+                "status": "completed",
+                "analysis_state": "analyzed",
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+            "counts": {"passed": 1, "skipped": 0, "failed": 1},
+            "failures": [
+                {
+                    "test_name": "test_a",
+                    "classification": "CODE ISSUE",
+                    "pattern": "NEW",
+                    "error": "boom",
+                    "error_signature": "sig",
+                    "child_job_name": "",
+                    "child_build_number": 0,
+                    "reviewed": True,
+                    "reviewed_by": "alice",
+                    "reviewed_at": "2026-01-02T03:04:05.000006Z",
+                }
+            ],
+            "summary": {
+                "total_failures": 1,
+                "reviewed_count": 1,
+                "classifications": {"CODE ISSUE": 1},
+            },
+            "comments": [],
+            "tracked_in": {},
+        }
+        mock_client.get_full_result.return_value = job
+        result = runner.invoke(app, ["results", "full", "a"])
+        assert result.exit_code == 0
+        assert "by alice on 2026-01-02T03:04:05.000006Z" in result.output
+
+        mock_client.get_full_results.return_value = {
+            "jobs": [job, dict(job, job=dict(job["job"], job_id="b"))],
+            "missing": [],
+            "forbidden": [],
+        }
+        batch = runner.invoke(app, ["results", "full", "a", "b"])
+        assert batch.exit_code == 0
+        assert batch.output.count("by alice on 2026-01-02T03:04:05.000006Z") == 2
+
+    def test_results_show_fields_passes_reviewed_at_through(self, mock_client):
+        mock_client.get_result.return_value = {
+            "job_id": "job-1",
+            "result": {
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "reviewed": True,
+                        "reviewed_by": "alice",
+                        "reviewed_at": "2026-01-02T03:04:05.000006Z",
+                    }
+                ]
+            },
+        }
+        result = runner.invoke(
+            app,
+            [
+                "results",
+                "show",
+                "job-1",
+                "--fields",
+                "result.failures.test_name,result.failures.reviewed_at",
+            ],
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert (
+            parsed["result"]["failures"][0]["reviewed_at"]
+            == "2026-01-02T03:04:05.000006Z"
+        )
+        mock_client.get_result.assert_called_once_with(
+            "job-1",
+            fields="result.failures.test_name,result.failures.reviewed_at",
+        )
+
+
 class TestEnrichCommentsCommand:
     # Real shape: GET /results/{job_id}/enrich-comments ->
     # {"enrichments": {comment_id: [badges]}, "failed": bool}
