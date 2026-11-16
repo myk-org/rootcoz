@@ -2361,8 +2361,9 @@ def _sanitize_control_chars(value: str) -> str:
 # Brackets let a caller-supplied value forge a bracketed log tag when it is
 # echoed into a message (``evil][user=admin]`` rendered ``[user=admin]``), and
 # control characters let it start a new line that looks like a real ``[AUDIT]``
-# record. Both are stripped wherever an identifier is echoed into text.
-_ECHO_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\[\]]")
+# record. Control bytes are dropped by the one helper the URL funnel uses, so
+# only the bracket rule lives here.
+_ECHO_UNSAFE_RE = re.compile(r"[\[\]]")
 
 
 def _echo_safe_text(value: str) -> str:
@@ -2375,7 +2376,7 @@ def _echo_safe_text(value: str) -> str:
     """
     if not value:
         return ""
-    return _scrub_audit_text(_ECHO_UNSAFE_RE.sub("", value))
+    return _scrub_audit_text(_ECHO_UNSAFE_RE.sub("", strip_nonprintable(value)))
 
 
 def resolve_failure_review(
