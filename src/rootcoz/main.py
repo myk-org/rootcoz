@@ -1795,19 +1795,21 @@ def _is_port(text: str) -> bool:
 def _parse_forwarded_ip(raw_hop: str) -> str | None:
     """The canonical address in one ``X-Forwarded-For`` hop, or ``None``.
 
-    The header is caller text until it is parsed, so anything that is not an
-    address (``unknown``, a token, a scoped IPv6 literal) is rejected rather
-    than recorded. Ports are accepted and dropped; a bare IPv6 literal has no
-    port to strip.
+    The header is caller text until it is parsed, so a hop that is not a
+    well-formed address is rejected whole (``unknown``, a token, a scoped IPv6
+    literal, an empty or out-of-range port, trailing junk): no bare address is
+    salvaged out of a malformed hop. Ports are accepted and dropped; an
+    unbracketed token is taken whole, because a bare IPv6 literal has no port to
+    strip and its last group is an address, never a port.
     """
     candidate = raw_hop.strip()
     if not candidate or "%" in candidate:
         return None
     if candidate.startswith("["):
         host, separator, remainder = candidate[1:].partition("]")
-        if separator and remainder and not remainder.startswith(":"):
+        if not separator:
             return None
-        if remainder[1:] and not _is_port(remainder[1:]):
+        if remainder and (not remainder.startswith(":") or not _is_port(remainder[1:])):
             return None
         return _canonical_ip(host)
     address = _canonical_ip(candidate)
@@ -1833,8 +1835,9 @@ def _audit_request_ip(request: Request | None) -> str | None:
     """Client IP for the audit row, from the proxy when one is trusted.
 
     ``X-Forwarded-For`` is caller text unless a proxy is trusted, so it is used
-    only behind ``TRUST_PROXY_HEADERS`` and only once validated as an address;
-    otherwise (untrusted, absent or malformed) the socket peer is recorded.
+    only behind ``TRUST_PROXY_HEADERS`` and only once validated as an address.
+    Only the first (client) hop is read; when it is absent or malformed the
+    socket peer is recorded — the header is not trusted for the next hop.
     ``None`` only when there is no peer at all — a non-request background event.
     """
     if request is None:

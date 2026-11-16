@@ -394,6 +394,23 @@ def test_request_ip_ignores_forwarded_header_without_trusted_proxy() -> None:
         # ``int()`` raise, so both are rejected before the conversion.
         ("203.0.113.9:\u00b2", "10.0.0.7"),
         ("203.0.113.9:" + "9" * 5000, "10.0.0.7"),
+        # A malformed hop is rejected whole — no bare address is salvaged out of
+        # it: an empty port, an out-of-range port, trailing junk and an
+        # unclosed bracket are all malformed.
+        ("[203.0.113.9]:", "10.0.0.7"),
+        ("[2001:db8::1]:", "10.0.0.7"),
+        ("[2001:db8::1]:0", "10.0.0.7"),
+        ("[2001:db8::1]:65536", "10.0.0.7"),
+        ("[2001:db8::1]junk", "10.0.0.7"),
+        ("[2001:db8::1]:8443junk", "10.0.0.7"),
+        ("[2001:db8::1", "10.0.0.7"),
+        ("203.0.113.9:", "10.0.0.7"),
+        # An unbracketed token is never split at its last colon: ``ipaddress``
+        # reads a bare integer half as an IPv4 (``2001`` -> ``0.0.7.209``), and
+        # a port-like last group of a real IPv6 is an address, not a port.
+        ("2001:8443", "10.0.0.7"),
+        ("2001:db8::1:99999", "10.0.0.7"),
+        ("2001:db8::1:8443", "2001:db8::1:8443"),
     ],
 )
 def test_request_ip_validates_the_forwarded_address(
@@ -406,6 +423,23 @@ def test_request_ip_validates_the_forwarded_address(
         main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=True)
     ):
         assert main._audit_request_ip(request) == expected
+
+
+def test_a_rejected_forwarded_hop_falls_back_to_the_socket_peer() -> None:
+    """The contract is the peer, not the next hop: only the client hop is read.
+
+    A malformed first hop means the header cannot be trusted for attribution, so
+    the socket peer is recorded rather than a later hop of the same untrusted
+    header.
+    """
+    request = _fake_request(
+        headers={"x-forwarded-for": "[203.0.113.9]:, 198.51.100.1"},
+        client_host="10.0.0.7",
+    )
+    with patch.object(
+        main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=True)
+    ):
+        assert main._audit_request_ip(request) == "10.0.0.7"
 
 
 def test_request_ip_falls_back_to_client_host() -> None:
