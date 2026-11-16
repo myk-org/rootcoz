@@ -929,3 +929,132 @@ async def test_a_failed_row_write_does_not_lose_a_refusal_or_sidecar_sentence(
             "Chat start: sidecar answered a transient status 429" in r.getMessage()
             for r in caplog.records
         )
+
+
+# -- #562: a malformed stored repository URL degrades, never fails the chat -----
+
+
+_MALFORMED_PARAMS = {
+    "job_name": "j",
+    "build_number": 1,
+    "tests_repo_url": "https://[bad/x",
+    "additional_repos": [
+        {"name": "bad-extra", "url": "https://[bad/y"},
+        {"name": "../../data/results.db", "url": "https://[bad/z"},
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_malformed_stored_repo_urls_start_the_chat_with_a_notice(
+    monkeypatch, tmp_path
+):
+    """Rule 2 of #562: the real clone loop skips them and the chat still starts."""
+    from rootcoz.engine import chat as chat_module
+    from rootcoz.engine.chat import clone_chat_repos
+
+    rig = Rig(monkeypatch, tmp_path)
+    rig.request_params = dict(_MALFORMED_PARAMS)
+    await rig.install()
+    # The real loop: only the malformed values are under test here.
+    monkeypatch.setattr(chat_module, "clone_chat_repos", clone_chat_repos)
+
+    await main.init_chat("job", _request(), _body())
+    await rig.settle()
+
+    history = await rig.history()
+    assert history["active_session"] is not None
+    assert history["preparing"] is None
+    system = [r for r in await rig.rows() if r["role"] == "system"]
+    expected_notice = (
+        "Not in this workspace: additional-repo-2, bad-extra, tests-repo. "
+        "The chat still works; start a new session once it can be cloned."
+    )
+    assert [r["content"] for r in system] == [expected_notice]
+    assert main._CHAT_PREP_FAILED_DETAIL not in "\n".join(
+        r["content"] for r in await rig.rows()
+    )
+
+
+@pytest.mark.asyncio
+async def test_malformed_stored_repo_urls_do_not_break_a_sent_message(
+    monkeypatch, tmp_path
+):
+    """The send path resolves the repo allow-list; it must not raise (#562)."""
+    from types import SimpleNamespace
+
+    from rootcoz.models import ChatMessageRequest
+
+    rig = Rig(monkeypatch, tmp_path)
+    rig.request_params = dict(_MALFORMED_PARAMS)
+    await rig.install()
+    stored = await storage.get_result("job")
+    params = stored["result"]["request_params"]
+
+    default, repos = main._job_issue_repo_slugs(params)
+    assert (default, repos) == ("", frozenset())
+    assert main._resolve_additional_repos_validated is not None
+    # The chat-issue path keeps its 422 for a malformed inherited setting (#402).
+    _ = SimpleNamespace(state=SimpleNamespace(username="alice", role="reviewer"))
+    assert ChatMessageRequest(message="hi").message == "hi"
+
+
+# -- #562 site 8: the chat-preparation WARNING line masks every URL -------------
+
+
+def test_redacted_error_masks_both_occurrences_and_control_bytes():
+    """`_redacted_error` is free text: all occurrences, query tokens included."""
+    url = "https://x-token-auth:SECRET@host/repo/?token=abc"  # pragma: allowlist secret
+    message = f"clone failed: {url} then {url}"
+    out = main._redacted_error(RuntimeError(f"\x1b[31m{message}"))
+    assert out.count("https://***@host/repo/?***") == 2, out
+    assert "SECRET" not in out
+    assert "token=abc" not in out
+    assert "\x1b" not in out
+
+
+@pytest.mark.asyncio
+async def test_chat_preparation_warning_masks_the_clone_url(
+    monkeypatch, tmp_path, caplog
+):
+    """The same guarantee end to end, on the WARNING line the user's server logs."""
+    url = "https://x-token-auth:SECRET@host/repo/?token=abc"  # pragma: allowlist secret
+    rig = Rig(monkeypatch, tmp_path)
+    await rig.install()
+
+    async def clone(*_args, **_kwargs):
+        raise RuntimeError(f"clone failed: {url} then {url}")
+
+    monkeypatch.setattr(rig.chat, "clone_chat_repos", clone)
+    with capture_main_logs(caplog, logging.WARNING, "rootcoz.main"):
+        await main.init_chat("job", _request(), _body())
+        await rig.settle()
+    assert "clone failed" in caplog.text, "the capture must see the WARNING line"
+    assert "SECRET" not in caplog.text
+    assert "token=abc" not in caplog.text
+    assert "https://***@host/repo/?***" in caplog.text
+
+
+# -- #562: a malformed *server* setting must not break chat --------------------
+
+
+def test_job_issue_repo_slugs_skips_a_malformed_server_setting(monkeypatch, caplog):
+    """Chat logs and skips the 422; the chat-issue path keeps refusing (#402)."""
+    from fastapi import HTTPException
+
+    from rootcoz.config import clear_settings_cache
+
+    monkeypatch.setenv("ADDITIONAL_REPOS", "bad")
+    clear_settings_cache()
+    try:
+        params = {"analysis_type": "file", "raw_xml": "<testsuite/>"}
+        with capture_main_logs(caplog, logging.WARNING, "rootcoz.main"):
+            default, repos = main._job_issue_repo_slugs(params)
+        assert (default, repos) == ("", frozenset())
+        assert "malformed additional_repos" in caplog.text
+
+        with pytest.raises(HTTPException) as refused:
+            main._job_issue_repo_slugs(params, refuse_invalid_repos=True)
+        assert refused.value.status_code == 422
+    finally:
+        clear_settings_cache()

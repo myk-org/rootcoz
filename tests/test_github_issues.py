@@ -6,6 +6,7 @@ Two questions, two destinations: the code-fix search (``tests_repo_filter`` →
 """
 
 import json
+import logging
 import os
 import re
 from collections.abc import Generator
@@ -652,6 +653,36 @@ class TestRunRepoUrls:
 
     def test_empty_input(self) -> None:
         assert run_repo_urls("", []) == ([], 0)
+
+    def test_malformed_stored_url_is_skipped_not_raised(self) -> None:
+        """#562 Rule 2: a stored URL with an unmatched IPv6 bracket is one skip."""
+        urls, skipped = run_repo_urls(
+            "https://[bad/x",
+            [AdditionalRepo(name="ok", url="https://github.com/org/repo")],
+        )
+        assert urls == ["https://github.com/org/repo"]
+        assert skipped == 1
+
+    def test_skip_log_masks_the_credentials(self, caplog) -> None:
+        from tests.conftest import capture_main_logs
+
+        with capture_main_logs(caplog, logging.DEBUG, "rootcoz.github_issues"):
+            run_repo_urls("https://[bad/repo?token=tok", [])
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "?***" in logged
+        assert "tok" not in logged
+
+    def test_skip_log_masks_a_schemeless_query(self, caplog) -> None:
+        """A stored value with no ``scheme://`` still carries its query token."""
+        from tests.conftest import capture_main_logs
+
+        with capture_main_logs(caplog, logging.DEBUG, "rootcoz.github_issues"):
+            urls, skipped = run_repo_urls("github.com/org/repo?token=tok", [])
+        assert urls == []
+        assert skipped == 1
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "?***" in logged
+        assert "tok" not in logged
 
 
 class TestDuplicateSearchBlocker:

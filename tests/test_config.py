@@ -1,5 +1,6 @@
 """Tests for configuration settings."""
 
+import logging
 import os
 from unittest.mock import patch
 
@@ -17,7 +18,9 @@ from rootcoz.config import (
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
+    safe_parse_repo_ref,
     update_db_settings_cache,
+    validate_tests_repo_url,
 )
 from rootcoz.jira import resolve_jira_connection
 from tests.conftest import build_test_env as _build_env
@@ -1095,6 +1098,104 @@ class TestParseRepoRef:
         url, ref = parse_repo_ref("https://github.com/org/repo:feature/foo")
         assert url == "https://github.com/org/repo"
         assert ref == "feature/foo"
+
+
+class TestSafeParseRepoRef:
+    """``safe_parse_repo_ref`` degrades a stored value that no clone could use."""
+
+    def test_blank_is_absent_without_a_warning(self, caplog) -> None:
+        from tests.conftest import capture_main_logs
+
+        with capture_main_logs(
+            caplog, logging.WARNING, "rootcoz.config", bypass_duplicate_filter=True
+        ):
+            assert safe_parse_repo_ref("   ") == ("", "")
+        assert "Ignoring malformed repository URL" not in caplog.text
+
+    def test_valid_url_with_ref_is_kept(self) -> None:
+        assert safe_parse_repo_ref("https://github.com/org/repo:develop") == (
+            "https://github.com/org/repo",
+            "develop",
+        )
+
+    def test_stored_http_url_still_replays(self) -> None:
+        """Only *new* input must be https/git; a stored http value is not dropped."""
+        assert safe_parse_repo_ref("http://host/org/repo:main") == (
+            "http://host/org/repo",
+            "main",
+        )
+
+    @pytest.mark.parametrize(
+        "stored",
+        ["not-a-url", "github.com/org/repo", "/local/path", "https://[bad/x"],
+    )
+    def test_unusable_stored_value_is_absent(self, stored: str) -> None:
+        """A value no clone can use is absent, not a repository (#581 Qodo r3).
+
+        ``parse_repo_ref`` returns a scheme-less value unchanged, so ``not-a-url``
+        used to count as an available tests repository and reached the clone path.
+        """
+        assert safe_parse_repo_ref(stored) == ("", "")
+
+    def test_absent_value_warns_without_its_credentials(self, caplog) -> None:
+        from tests.conftest import capture_main_logs
+
+        with capture_main_logs(
+            caplog, logging.WARNING, "rootcoz.config", bypass_duplicate_filter=True
+        ):
+            assert safe_parse_repo_ref("github.com/org/repo?token=tok") == ("", "")
+        assert "Ignoring malformed repository URL" in caplog.text
+        assert "?***" in caplog.text
+        assert "tok" not in caplog.text
+
+
+class TestValidateTestsRepoUrl:
+    """The request-boundary ``tests_repo_url`` check (#562 Rule 1)."""
+
+    def test_none_and_empty_pass_through(self) -> None:
+        assert validate_tests_repo_url(None) is None
+        assert validate_tests_repo_url("  ") == ""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://github.com/org/repo",
+            "https://github.com/org/repo:feature/foo",
+            "git://host/repo",
+        ],
+    )
+    def test_valid_values_are_returned_stripped(self, value: str) -> None:
+        assert validate_tests_repo_url(f" {value} ") == value
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://github.com/org/repo:bad ref",
+            "https://github.com/org/repo:bad\x00ref",
+            "https://github.com/org/repo:bad\nref",
+        ],
+    )
+    def test_ref_with_whitespace_or_control_bytes_is_refused(self, value: str) -> None:
+        """The ref reaches ``git clone --branch``: it cannot hold either (#581)."""
+        with pytest.raises(ValueError) as excinfo:
+            validate_tests_repo_url(value)
+        assert "tests_repo_url" in str(excinfo.value)
+        assert "bad" not in str(excinfo.value)
+
+    def test_plain_http_is_refused_like_the_clone_refuses_it(self) -> None:
+        """http is refused at the boundary because main's clone refuses it too.
+
+        ``RepositoryManager._validate_repo_url`` (unchanged by #562) raises
+        ``Invalid repository URL scheme. Only https:// and git://`` for an
+        ``http://`` URL, so on main an http ``tests_repo_url`` was accepted by
+        the untyped field and then failed the job at clone time. Refusing it at
+        the request boundary is the same product rule, reported earlier.
+        """
+        with pytest.raises(ValueError) as excinfo:
+            validate_tests_repo_url("http://host/org/repo")
+        assert "tests_repo_url" in str(excinfo.value)
+        assert "https:// or git://" in str(excinfo.value)
+        assert "host" not in str(excinfo.value)
 
 
 class TestPeerSettingsFields:

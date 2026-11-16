@@ -237,8 +237,8 @@ This clones the tests repository plus both extra repositories into the analysis 
 - The job fails with `Unknown keys in .rootcoz/settings.json`.  
   Only the eight keys in the table above are allowed. Remove anything else — including secrets like `token`.
 
-- The job fails with `Invalid additional_repos url`.  
-  The URL must be a valid HTTP(S) URL — `additional_repos` entries are validated as `HttpUrl`, so `git://` is rejected — and the entry must have a non-empty `name`.
+- The submission is refused with `Invalid additional repos URL…` or `422` naming a URL field.  
+  A **caller-supplied** malformed URL (API payload, CLI flag) is rejected at submission with `422` naming the field, and no job is created: the URL must be a valid HTTP(S) URL — `additional_repos` entries are validated as `HttpUrl`, so `git://` is rejected — and the entry must have a non-empty `name`. A **stored** malformed value (in `.rootcoz/settings.json`, the tests-repo setting, or a saved job parameter) is skipped with a warning instead, and the analysis runs without that repository.
 
 - The job fails with `additional_repos contains name '…' which collides with the tests repo clone directory`.  
   Rename the additional repository so it differs from the tests repository's clone directory name.

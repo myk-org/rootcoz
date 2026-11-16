@@ -6,7 +6,8 @@ Cross-cutting URL helpers live in ``rootcoz.url_utils``.
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse
+
+from rootcoz.url_utils import _parse_valid_url
 
 PROW_JOB_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 PROW_BUILD_ID_PATTERN = re.compile(r"^[0-9]+$")
@@ -23,11 +24,14 @@ def normalize_prow_url(value: object) -> str:
         return ""
     if not url.startswith("https://"):
         raise ValueError("prow_url must start with https://")
-    parsed = urlparse(url)
+    # Whitespace/control characters, a malformed authority or port, the scheme,
+    # and an empty hostname are all ``_parse_valid_url``'s checks — never
+    # re-implemented here (#562).
+    parsed = _parse_valid_url(url, allowed_schemes=("https",))
+    if parsed is None:
+        raise ValueError("prow_url must be a valid https:// URL including a hostname")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("prow_url must not contain credentials")
-    if not parsed.hostname:
-        raise ValueError("prow_url must include a hostname")
     return url
 
 

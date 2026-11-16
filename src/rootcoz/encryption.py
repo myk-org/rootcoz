@@ -25,6 +25,7 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 
 from rootcoz import get_child_logger
+from rootcoz.url_utils import mask_stored_url
 
 logger = get_child_logger(__name__)
 
@@ -215,12 +216,22 @@ def _decrypt_additional_repos_tokens(
     return _map_additional_repo_entries(repos, _decrypt_entry), fernet
 
 
+def _response_repo_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """One ``additional_repos`` entry as an API reader may see it.
+
+    The ``token`` field is dropped and the URL's credentials are masked: an
+    ``@<token>`` can sit in the *path* (``repo@ghp_…``), where no userinfo
+    stripper reaches it.
+    """
+    entry = {k: v for k, v in entry.items() if k != "token"}
+    if isinstance(url := entry.get("url"), str):
+        entry["url"] = mask_stored_url(url)
+    return entry
+
+
 def _strip_additional_repos_tokens(repos: list[Any]) -> list[Any]:
     """Remove token fields from additional_repos entries for API responses."""
-    return _map_additional_repo_entries(
-        repos,
-        lambda entry: {k: v for k, v in entry.items() if k != "token"},
-    )
+    return _map_additional_repo_entries(repos, _response_repo_entry)
 
 
 def encrypt_sensitive_fields(params: dict[str, Any]) -> dict[str, Any]:
@@ -261,11 +272,44 @@ def encrypt_sensitive_fields(params: dict[str, Any]) -> dict[str, Any]:
 RESPONSE_REDACTED_KEYS: frozenset[str] = frozenset(SENSITIVE_KEYS)
 
 
+def _mask_url_valued_params(params: dict[str, Any]) -> None:
+    """Mask credentials inside every URL-valued ``request_params`` field.
+
+    A stored URL can carry a credential in its authority (``user:pw@host``),
+    its query (``?token=…``) or its *path* (``repo@ghp_…``) — the last one is
+    what a stored ``tests_repo_url`` leak looked like (#581 A03). Masking
+    happens on the echo only: what is stored, replayed and cloned is unchanged.
+    ``mask_stored_url`` is the log maskers' helper for exactly this shape, so
+    the response and the log can never disagree about what a token looks like.
+    """
+    for key, value in params.items():
+        if key.endswith("_url") and isinstance(value, str):
+            params[key] = mask_stored_url(value)
+
+
+def _mask_progress_log(entries: Any) -> Any:
+    """Mask the clone URL of each progress entry — it rides in the same payload.
+
+    The stored URL keeps the token (a re-run may need it); only the echo is
+    masked. Entries are copied, never mutated: the caller's parsed result is
+    not ours to rewrite.
+    """
+    if not isinstance(entries, list):
+        return entries
+    return [
+        {**entry, "url": mask_stored_url(entry["url"])}
+        if isinstance(entry, dict) and isinstance(entry.get("url"), str)
+        else entry
+        for entry in entries
+    ]
+
+
 def strip_sensitive_from_response(result_data: dict[str, Any]) -> dict[str, Any]:
     """Remove sensitive fields from ``request_params`` before returning to API consumers.
 
     The encrypted values remain in the database for job resumption but are
-    never exposed in HTTP responses.
+    never exposed in HTTP responses. URL-valued fields keep their shape with
+    the credentials masked, since the token can live in the path.
 
     Args:
         result_data: Parsed result dictionary (may contain ``request_params``).
@@ -274,18 +318,35 @@ def strip_sensitive_from_response(result_data: dict[str, Any]) -> dict[str, Any]
         A shallow copy with redacted ``request_params``, or the original dict
         unchanged when ``request_params`` is absent.
     """
-    if not result_data or "request_params" not in result_data:
+    if not result_data:
         return result_data
-    request_params = result_data.get("request_params")
-    if request_params is None:
+    has_params = "request_params" in result_data
+    params_value = result_data.get("request_params")
+    has_progress = "progress_log" in result_data
+    # Nothing to mask: return the caller's dict itself, which callers rely on.
+    if not has_progress and (not has_params or params_value is None):
+        return result_data
+    if not has_params and result_data.get("progress_log") is None:
         return result_data
     result = dict(result_data)
+    # ``progress_log`` is an independent carrier: a caller can hand us a payload
+    # that has it and no ``request_params`` (the two are written together by the
+    # enqueue path, but that is an assumption, not a guarantee -- a partial or
+    # legacy payload kept the token). Mask it before any early return.
+    if "progress_log" in result:
+        result["progress_log"] = _mask_progress_log(result["progress_log"])
+    if "request_params" not in result:
+        return result
+    request_params = result.get("request_params")
+    if request_params is None:
+        return result
     if not isinstance(request_params, dict):
         result.pop("request_params", None)
         return result
     params = dict(request_params)
     for key in RESPONSE_REDACTED_KEYS:
         params.pop(key, None)
+    _mask_url_valued_params(params)
     # Strip tokens from additional_repos entries
     additional_repos = params.get("additional_repos")
     if isinstance(additional_repos, list):

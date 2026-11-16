@@ -9,6 +9,7 @@ import jenkins
 import requests.exceptions
 
 from rootcoz.encryption import SENSITIVE_KEYS
+from rootcoz.url_utils import mask_url_value, strip_nonprintable
 
 #: Combined tuple of exception types that indicate a transient Jenkins
 #: connectivity problem (network outage, DNS failure, timeout, etc.).
@@ -40,7 +41,7 @@ _GENERIC_SENSITIVE_RE = re.compile(r"(password|token|secret|key)", re.IGNORECASE
 _MASK = "***"
 
 
-def mask_sensitive_fields(data: Any) -> Any:
+def mask_sensitive_fields(data: Any, *, sanitize_text: bool = True) -> Any:
     """Return a deep copy of *data* with sensitive field values masked.
 
     Handles nested dicts and lists.  A field is considered sensitive when
@@ -48,7 +49,13 @@ def mask_sensitive_fields(data: Any) -> Any:
     or when the key contains ``password``, ``token``, ``secret``, or ``key``
     (case-insensitive).
 
-    Non-dict/list values are returned unchanged.
+    Non-dict/list values are returned unchanged, except that a string is
+    stripped of non-printable characters and has the credentials of a
+    URL-shaped value masked (#562).
+
+    ``sanitize_text=False`` masks sensitive *keys* only and leaves every
+    string value exactly as it is: a database row is data, and masking belongs
+    to URL-valued fields, not to arbitrary cell text (#581 Qodo r3).
     """
     if isinstance(data, dict):
         masked: dict[str, Any] = {}
@@ -56,10 +63,16 @@ def mask_sensitive_fields(data: Any) -> Any:
             if isinstance(k, str) and is_sensitive_key(k) and v:
                 masked[k] = _MASK
             else:
-                masked[k] = mask_sensitive_fields(v)
+                masked[k] = mask_sensitive_fields(v, sanitize_text=sanitize_text)
         return masked
     if isinstance(data, list):
-        return [mask_sensitive_fields(item) for item in data]
+        return [
+            mask_sensitive_fields(item, sanitize_text=sanitize_text) for item in data
+        ]
+    if isinstance(data, str) and sanitize_text:
+        # Unconditional: ``mask_url_value`` leaves non-URL text alone, so a
+        # scheme-less control-bearing value would otherwise reach a 422 body.
+        return strip_nonprintable(mask_url_value(data))
     return data
 
 

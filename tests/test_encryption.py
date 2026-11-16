@@ -263,6 +263,16 @@ class TestStripSensitiveFromResponse:
         assert key not in stripped["request_params"]
         assert stripped["request_params"]["safe_key"] == "keep"
 
+    def test_masks_credentials_in_url_valued_fields(self) -> None:
+        """An ``@<token>`` in the URL *path* is masked, storage untouched."""
+        url = "https://github.com/org/repo@ghp_secret?foo=1"  # pragma: allowlist secret
+        result_data = {"request_params": {"tests_repo_url": url, "build_url": url}}
+        stripped = strip_sensitive_from_response(result_data)
+        masked = "https://github.com/org/repo@***?***"
+        for key in ("tests_repo_url", "build_url"):
+            assert stripped["request_params"][key] == masked
+            assert result_data["request_params"][key] == url
+
 
 @pytest.mark.usefixtures("_stable_encryption_key")
 class TestAdditionalReposTokenEncryption:
@@ -376,3 +386,27 @@ class TestAdditionalReposTokenEncryption:
         params = {"ai_provider": "claude"}
         encrypted = encrypt_sensitive_fields(params)
         assert "additional_repos" not in encrypted
+
+
+def test_progress_log_is_masked_even_without_request_params() -> None:
+    """A payload carrying only ``progress_log`` must not keep its token (#562).
+
+    The two carriers are written together by the enqueue path, but that is an
+    assumption; the early returns used to skip the masker for any payload
+    without ``request_params``.
+    """
+    tokenized = {"url": "https://host/org/repo@ghp_SECRET123"}
+    for payload in (
+        {"progress_log": [tokenized]},
+        {"progress_log": [tokenized], "status": "completed"},
+        {"request_params": None, "progress_log": [tokenized]},
+    ):
+        masked = strip_sensitive_from_response(dict(payload))
+        rendered = repr(masked)
+        assert "ghp_SECRET123" not in rendered, rendered
+        assert "***" in rendered, rendered
+
+
+def test_a_payload_without_any_carrier_is_returned_unchanged() -> None:
+    payload = {"status": "completed"}
+    assert strip_sensitive_from_response(payload) == payload

@@ -45,6 +45,20 @@ class TestNormalizeProwUrl:
         assert normalize_prow_url("") == ""
         assert normalize_prow_url(None) == ""
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://[bad/prow",
+            "https://prow.example.com:badport",
+            "https://prow.example.com/bad space",
+            "https://prow.example.com/bad\x00path",
+        ],
+    )
+    def test_rejects_urls_the_shared_predicate_refuses(self, url):
+        """The five shared checks are `_parse_valid_url`'s, never re-implemented."""
+        with pytest.raises(ValueError, match="prow_url"):
+            normalize_prow_url(url)
+
 
 class TestNormalizeGcsBucket:
     def test_valid_bucket(self):

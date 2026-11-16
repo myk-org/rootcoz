@@ -376,3 +376,115 @@ def test_get_requests_not_logged(test_client, caplog):
     body_logs = _get_debug_messages(caplog, containing="Incoming GET")
     body_logs = [m for m in body_logs if "body:" in m]
     assert not body_logs, "GET requests should not log a request body"
+
+
+# ---------------------------------------------------------------------------
+# whole-value URL masking (#562 Change 4)
+# ---------------------------------------------------------------------------
+
+_CREDENTIALED_URLS = [
+    "https://user:secret@[bad/repo?token=tok",  # pragma: allowlist secret
+    "HTTPS://user:secret@[bad/repo?token=tok",  # pragma: allowlist secret
+    "GIT://user:secret@[bad/repo",  # pragma: allowlist secret
+    "ssh://user:secret@host/repo?token=tok",  # pragma: allowlist secret
+    "ftp://admin:secret@jenkins.internal/job?token=tok",  # pragma: allowlist secret
+    "https://github.com/org/repo with space?token=tok",  # pragma: allowlist secret
+    "https:// user:secret@host/repo?token=tok",  # pragma: allowlist secret
+    "https://[bad/repo@ghp_secret",
+    "https://github.com/org/repo@ghp_secret?foo=1",
+    "https://github.com/org/repo@ghp_secret:main?foo=1",
+]
+
+# The `@token` suffix is a legal repository spec, so the two `@ghp_secret` forms
+# above are *valid* boundaries and cannot be used to pin a 422; the route test
+# uses the eight a caller boundary rejects plus a spaced `@token` variant.
+_REJECTED_URLS = [
+    *_CREDENTIALED_URLS[:8],
+    "https:// github.com/org/repo@ghp_secret?foo=1",
+]
+
+
+def _assert_no_credential(masked: str) -> None:
+    assert "secret" not in masked
+    assert "tok" not in masked
+    assert "ghp_secret" not in masked
+    assert "\x1b" not in masked
+    assert "\x00" not in masked
+
+
+class TestMaskUrlValue:
+    @pytest.mark.parametrize("url", _CREDENTIALED_URLS)
+    def test_masker_masks_userinfo_query_and_at_token(self, url: str) -> None:
+        from rootcoz.url_utils import mask_url_value
+
+        masked = mask_url_value(url)
+        _assert_no_credential(masked)
+        assert "***" in masked
+        assert "?***" in masked or "?" not in url
+
+    @pytest.mark.parametrize("url", _CREDENTIALED_URLS)
+    def test_funnel_masks_the_same_values(self, url: str) -> None:
+        masked = mask_sensitive_fields({"tests_repo_url": url})["tests_repo_url"]
+        _assert_no_credential(masked)
+
+    def test_plain_url_is_unchanged(self) -> None:
+        from rootcoz.url_utils import mask_url_value
+
+        assert (
+            mask_url_value("https://github.com/org/repo")
+            == "https://github.com/org/repo"
+        )
+
+    def test_non_url_text_is_returned_unchanged(self) -> None:
+        from rootcoz.url_utils import mask_url_value
+
+        assert mask_sensitive_fields("hello") == "hello"
+        assert mask_url_value("ab\x00cd") == "ab\x00cd"
+
+    def test_funnel_strips_scheme_less_control_bytes(self) -> None:
+        assert mask_sensitive_fields({"input": "ab\x00cd"})["input"] == "abcd"
+        assert (
+            mask_sensitive_fields({"input": "a\n[AUDIT] forged"})["input"]
+            == "a[AUDIT] forged"
+        )
+
+
+class TestAnalyzeRouteUrlRefusalMasking:
+    """A rejected caller URL is a 422 that leaks no credential and no control byte."""
+
+    @pytest.mark.parametrize("url", _REJECTED_URLS)
+    def test_analyze_422_names_the_field_without_leaking(
+        self, test_client, caplog, url: str
+    ) -> None:
+        with capture_main_logs(caplog, logging.DEBUG):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "file",
+                    "raw_xml": "<testsuite/>",
+                    "job_name": "j",
+                    "build_number": 1,
+                    "tests_repo_url": url,
+                },
+            )
+        assert response.status_code == 422, response.text
+        assert "tests_repo_url" in response.text
+        _assert_no_credential(response.text)
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        _assert_no_credential(logged)
+
+    def test_analyze_422_strips_scheme_less_control_bytes(self, test_client) -> None:
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "file",
+                "raw_xml": "<testsuite/>",
+                "job_name": "j",
+                "build_number": 1,
+                "tests_repo_url": "ab\x00cd",
+            },
+        )
+        assert response.status_code == 422, response.text
+        assert "tests_repo_url" in response.text
+        assert "\\u0000" not in response.text
+        assert "\x00" not in response.text
