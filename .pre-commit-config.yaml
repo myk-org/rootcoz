@@ -40,7 +40,7 @@ repos:
         exclude: ^docs/
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.4
+    rev: v0.17.5
     hooks:
       - id: ruff
         args: [--fix, --target-version=py314]
@@ -62,7 +62,7 @@ repos:
           [types-requests, types-PyYAML, types-colorama, types-aiofiles, pydantic, pi-sidecar-client]
 
   - repo: https://github.com/pre-commit/mirrors-eslint
-    rev: v10.14.0
+    rev: v10.15.0
     hooks:
       - id: eslint
         files: \.js$
