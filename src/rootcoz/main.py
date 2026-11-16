@@ -27338,11 +27338,15 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
         # A row can carry a credential column (``github_token``, a key): mask the
         # sensitive names in every row before the payload leaves the API, and
         # let the shared response filter redact a ``request_params``-shaped one.
+        # Cell *text* is left verbatim — a row is data, and the URL masker would
+        # cut a value at its first ``?``/``#`` and drop its newlines (#581).
         # The audit row above keeps the row *count* only, never the rows.
         return strip_sensitive_from_response(
             {
                 "columns": columns,
-                "rows": [mask_sensitive_fields(row) for row in results],
+                "rows": [
+                    mask_sensitive_fields(row, sanitize_text=False) for row in results
+                ],
                 "count": len(results),
             }
         )

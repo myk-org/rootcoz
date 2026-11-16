@@ -3390,6 +3390,36 @@ def test_admin_db_query_masks_credential_columns(
     assert secret not in json.dumps(details)
 
 
+def test_admin_db_query_returns_cell_text_verbatim(
+    app_client, temp_db_path: Path
+) -> None:
+    """A row is data, not a URL field: no cell may be rewritten (#581 Qodo r3).
+
+    The URL masker cuts a value at its first ``?``/``#`` and the printable
+    filter drops newlines, so running them on a row lost ``'line1\\nline2'``
+    and turned an ordinary URL into ``https://x/y?***`` on an admin read
+    surface.
+    """
+    admin_login(app_client)
+    cells = {
+        "multiline": "line1\nline2",
+        "url_with_query": "https://x/y?token=abc",
+        "long_value": "ghp_" + "a" * 40,
+    }
+    sql = (
+        "SELECT 'line1\nline2' AS multiline, "
+        "'https://x/y?token=abc' AS url_with_query, "
+        f"'{cells['long_value']}' AS long_value"
+    )
+    with patch.object(main, "DB_PATH", temp_db_path):
+        response = app_client.post("/api/admin/db/query", json={"sql": sql})
+    assert response.status_code == 200, response.text
+
+    payload = response.json()
+    assert payload["columns"] == list(cells)
+    assert payload["rows"] == [cells]
+
+
 def test_admin_db_query_preview_bounds_a_crafted_frame() -> None:
     """Read-only SQL can craft a tiny frame that expands to gigabytes (#419).
 

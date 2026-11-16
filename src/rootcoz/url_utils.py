@@ -23,7 +23,7 @@ def _parse_valid_url(
     authority ``urlparse`` accepts, a port it accepts, an allowed scheme, and
     a non-empty hostname.
     """
-    if any(ch.isspace() or not ch.isprintable() for ch in raw):
+    if has_whitespace_or_control(raw):
         return None
     try:
         parsed = urlparse(raw)
@@ -38,6 +38,11 @@ def _parse_valid_url(
 def strip_nonprintable(text: str) -> str:
     """Drop control and format characters — log- and message-forging bytes."""
     return "".join(ch for ch in text if ch.isprintable())
+
+
+def has_whitespace_or_control(text: str) -> bool:
+    """True when *text* holds whitespace or a non-printable character."""
+    return any(ch.isspace() or not ch.isprintable() for ch in text)
 
 
 def validate_http_url(
@@ -187,35 +192,70 @@ _AT_TOKEN_SUFFIX = re.compile(
 )  # anchored at the end of the pre-?/# head
 
 
-def mask_url_value(text: str) -> str:
-    """Mask the credentials of a whole URL *value* (display only).
+def _mask_one_url_value(segment: str) -> str:
+    """Mask userinfo, ``@token`` suffix and query of one ``scheme://`` segment.
 
-    Unlike :func:`mask_url_credentials_in_text` this has no "stop at the first
-    whitespace" failure mode: it masks the whole value, so an uppercase or
-    arbitrary scheme, an internal space, and the RootCoz ``@<token>`` repo-spec
-    suffix are all covered. String-splitting, never ``urlparse``, so a
-    malformed authority (unmatched IPv6 bracket) is masked too.
-
-    ``shortcut:`` text that is not URL-shaped is returned unchanged — a masker
-    is not a sanitizer; upgrade if a schemeless credential carrier ever reaches
-    a log or a ``422`` body.
+    A whole-value masker has no "stop at the first whitespace" failure mode:
+    an arbitrary scheme, an internal space, and the RootCoz ``@<token>``
+    repo-spec suffix are all covered. String-splitting, never ``urlparse``, so
+    a malformed authority (unmatched IPv6 bracket) is masked too.
     """
-    if not text or _SCHEME.search(text) is None:
-        return text
-    text = strip_nonprintable(text)
-    scheme_end = _SCHEME.search(text).end()  # type: ignore[union-attr]
-    head_end = _query_start(text)
-    head = text[:head_end]
+    match = _SCHEME.match(segment)
+    scheme_end = match.end() if match else 0
+    head_end = _query_start(segment)
+    head = segment[:head_end]
     # Mask userinfo inside the authority only (up to the first ``/``).
     path_start = head.find("/", scheme_end)
     authority_end = len(head) if path_start == -1 else path_start
     authority = head[scheme_end:authority_end]
     if "@" in authority:
         authority = "***@" + authority.rsplit("@", 1)[1]
-        head = text[:scheme_end] + authority + text[authority_end:head_end]
+        head = segment[:scheme_end] + authority + segment[authority_end:head_end]
     # The ``@token`` suffix is masked on the pre-cut head: after the query cut
     # the ``$`` anchor would see ``?foo=1`` and keep the token verbatim.
     slash = head.find("/", scheme_end)
     if slash != -1 and _AT_TOKEN_SUFFIX.search(head[slash:]):
         head = head[:slash] + _AT_TOKEN_SUFFIX.sub("@***", head[slash:])
-    return head if head_end == len(text) else f"{head}?***"
+    if head_end == len(segment):
+        return head
+    # Keep the whitespace that separated this URL from a following one.
+    return f"{head}?***{segment[len(segment.rstrip()) :]}"
+
+
+def mask_url_value(text: str) -> str:
+    """Mask the credentials of every whole URL in **value** *text* (display only).
+
+    Unlike :func:`mask_url_credentials_in_text` this has no "stop at the first
+    whitespace" failure mode, and it masks **every** ``scheme://`` occurrence,
+    so a value holding two URLs does not keep the second one's credentials.
+
+    ``shortcut:`` text that is not URL-shaped is returned unchanged — a masker
+    is not a sanitizer; :func:`mask_stored_url` is the URL-valued-input variant
+    and is what a log of a stored value must use.
+    """
+    if not text or _SCHEME.search(text) is None:
+        return text
+    text = strip_nonprintable(text)
+    starts = [match.start() for match in _SCHEME.finditer(text)]
+    parts = [text[: starts[0]]]
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(text)
+        parts.append(_mask_one_url_value(text[start:end]))
+    return "".join(parts)
+
+
+def mask_stored_url(text: str) -> str:
+    """``mask_url_value`` for a stored URL value whose scheme may be missing.
+
+    ``mask_url_value`` leaves a schemeless value unchanged, so a stored
+    ``github.com/org/repo?token=SECRET`` reached the debug log verbatim. Both
+    credential carriers are masked here — the ``@<token>`` suffix and the
+    query/fragment — and a schemed value is masked exactly as before (this is
+    display only: what the app does with the stored value is unchanged).
+    """
+    text = strip_nonprintable(text)
+    head_end = _query_start(text)
+    head = text[:head_end]
+    if "/" in head:
+        head = _AT_TOKEN_SUFFIX.sub("@***", head)
+    return mask_url_value(head if head_end == len(text) else f"{head}?***")

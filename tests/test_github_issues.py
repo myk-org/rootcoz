@@ -672,6 +672,18 @@ class TestRunRepoUrls:
         assert "?***" in logged
         assert "tok" not in logged
 
+    def test_skip_log_masks_a_schemeless_query(self, caplog) -> None:
+        """A stored value with no ``scheme://`` still carries its query token."""
+        from tests.conftest import capture_main_logs
+
+        with capture_main_logs(caplog, logging.DEBUG, "rootcoz.github_issues"):
+            urls, skipped = run_repo_urls("github.com/org/repo?token=tok", [])
+        assert urls == []
+        assert skipped == 1
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "?***" in logged
+        assert "tok" not in logged
+
 
 class TestDuplicateSearchBlocker:
     """Tests for duplicate_search_blocker — the configuration refusals (D8)."""

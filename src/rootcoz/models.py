@@ -38,7 +38,7 @@ from rootcoz.prow_validation import (
     validate_prow_job_name,
 )
 from rootcoz.repository import RESERVED_REPO_NAMES
-from rootcoz.url_utils import mask_url_value, validate_http_url
+from rootcoz.url_utils import mask_stored_url, validate_http_url
 
 logger = get_child_logger(__name__)
 
@@ -210,7 +210,7 @@ def coerce_stored_additional_repos(
             logger.warning(
                 "Ignoring malformed stored additional repo %s: %s",
                 label,
-                mask_url_value(str(url)),
+                mask_stored_url(str(url)),
             )
             if failed is not None:
                 failed.append(label)

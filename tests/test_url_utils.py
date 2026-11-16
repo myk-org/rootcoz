@@ -9,6 +9,8 @@ import pytest
 
 from rootcoz.url_utils import (
     _parse_valid_url,
+    mask_stored_url,
+    mask_url_value,
     sanitize_clone_url,
     sanitize_http_href,
     strip_nonprintable,
@@ -128,3 +130,55 @@ class TestSanitizersDegrade:
 class TestStripNonprintable:
     def test_drops_control_and_format_characters_keeps_spaces(self) -> None:
         assert strip_nonprintable("a\x00b\x1b[31mc\x7f d\u200be") == "ab[31mc de"
+
+
+class TestMaskUrlValueEveryOccurrence:
+    """A value with several URLs masks every one, not only the first (#581)."""
+
+    def test_masks_credentials_in_the_second_url(self) -> None:
+        masked = mask_url_value(
+            "see https://a/x and https://u2:p2@h2/r2"  # pragma: allowlist secret
+        )
+        assert masked == "see https://a/x and https://***@h2/r2"
+        assert "p2" not in masked
+
+    def test_masks_the_query_of_the_second_url(self) -> None:
+        masked = mask_url_value(
+            "https://a/x?token=tok1 https://u2:p2@h2/r2?token=tok2"  # pragma: allowlist secret
+        )
+        assert masked == "https://a/x?*** https://***@h2/r2?***"
+        assert "tok1" not in masked
+        assert "tok2" not in masked
+
+    def test_single_url_behaviour_is_unchanged(self) -> None:
+        assert (
+            mask_url_value("https://github.com/org/repo")
+            == "https://github.com/org/repo"
+        )
+        assert (
+            mask_url_value("https://user:pw@h/r?token=tok")  # pragma: allowlist secret
+            == "https://***@h/r?***"
+        )
+
+
+class TestMaskStoredUrl:
+    """``mask_stored_url`` masks a stored URL value whose scheme may be missing."""
+
+    def test_schemeless_query_is_masked(self) -> None:
+        masked = mask_stored_url("github.com/org/repo?token=tok")
+        assert masked == "github.com/org/repo?***"
+        assert "tok" not in masked
+
+    def test_schemeless_at_token_is_masked(self) -> None:
+        masked = mask_stored_url("github.com/org/repo@ghp_secret")
+        assert masked == "github.com/org/repo@***"
+
+    def test_schemed_value_masked_like_mask_url_value(self) -> None:
+        credential_url = "https://user:pw@h/r?token=tok"  # pragma: allowlist secret
+        assert mask_stored_url(credential_url) == mask_url_value(credential_url)
+        assert mask_stored_url("https://github.com/org/repo") == (
+            "https://github.com/org/repo"
+        )
+
+    def test_control_bytes_never_survive(self) -> None:
+        assert mask_stored_url("ab\x00cd\n[AUDIT] forged") == ("abcd[AUDIT] forged")

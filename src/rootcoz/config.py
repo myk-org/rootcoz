@@ -17,7 +17,12 @@ from pydantic_settings import (
 from rootcoz import get_child_logger
 from rootcoz.ai_client import normalize_provider
 from rootcoz.metadata_rules import load_metadata_rules
-from rootcoz.url_utils import _parse_valid_url, mask_url_value, validate_http_url
+from rootcoz.url_utils import (
+    _parse_valid_url,
+    has_whitespace_or_control,
+    mask_stored_url,
+    validate_http_url,
+)
 from rootcoz.vapid import get_vapid_config
 
 logger = get_child_logger(__name__)
@@ -228,17 +233,26 @@ def safe_parse_repo_ref(raw: str) -> tuple[str, str]:
 
     Rule 2 of #562: a value already persisted in the DB degrades per
     repository (logged once, credential-free, treated as absent) instead of
-    breaking startup, re-analysis, or chat.
+    breaking startup, re-analysis, or chat. A value no clone could use — one
+    with no ``scheme://`` at all, which ``parse_repo_ref`` returns unchanged —
+    is absent too, not an available repository (#581 Qodo r3). The schemes
+    match what :func:`~rootcoz.repository.sanitize_clone_url` accepts, so a
+    stored ``http://`` value still replays.
     """
     if not raw or not str(raw).strip():
         return ("", "")
+    url, ref = "", ""
     try:
-        return parse_repo_ref(raw)
+        url, ref = parse_repo_ref(raw)
     except ValueError:
+        pass
+    schemes = ("http", "https", "git")
+    if not url or _parse_valid_url(url, allowed_schemes=schemes) is None:
         logger.warning(
-            "Ignoring malformed repository URL: %s", mask_url_value(str(raw))
+            "Ignoring malformed repository URL: %s", mask_stored_url(str(raw))
         )
         return ("", "")
+    return (url, ref)
 
 
 def validate_tests_repo_url(value: str | None) -> str | None:
@@ -246,8 +260,10 @@ def validate_tests_repo_url(value: str | None) -> str | None:
 
     ``None``/``""`` mean "not set" / "clear the server default". Otherwise the
     value must be an ``https://`` or ``git://`` repository URL, optionally with
-    a ``:ref`` suffix. Every failure mode gets one message that names the field
-    and never echoes the input.
+    a ``:ref`` suffix, and may not carry whitespace or a control character
+    anywhere — the ref reaches ``git clone --branch`` and ``urlsplit`` would
+    silently drop a tab or newline. Every failure mode gets one message that
+    names the field and never echoes the input.
     """
     if value is None:
         return None
@@ -258,6 +274,8 @@ def validate_tests_repo_url(value: str | None) -> str | None:
         clean_url, _ref = parse_repo_ref(raw)
         if not clean_url:
             raise ValueError("empty repository URL")
+        if has_whitespace_or_control(raw):
+            raise ValueError("value contains whitespace or control characters")
         validate_http_url(
             clean_url, field_name="tests_repo_url", allowed_schemes=("https", "git")
         )
@@ -686,7 +704,7 @@ class Settings(BaseSettings):
             # line) instead of invalidating startup, settings import, or every
             # ``get_settings()`` refresh.
             logger.warning(
-                "Ignoring malformed stored PROW_URL: %s", mask_url_value(str(v))
+                "Ignoring malformed stored PROW_URL: %s", mask_stored_url(str(v))
             )
             return ""
 
