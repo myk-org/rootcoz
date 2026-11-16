@@ -72,7 +72,11 @@ _LABELS: tuple[tuple[tuple[str, ...], str], ...] = (
     (
         (
             "not our ref",
+            # The same absent object, two spellings: git 2.39 says "reference is
+            # not a tree", git 2.56 says "unable to read tree". Both listed so
+            # the label does not depend on which git runs the clone.
             "unable to read tree",
+            "reference is not a tree",
             "could not get object",
             "couldn't find remote ref",
             "does not allow request for unadvertised object",
@@ -450,9 +454,10 @@ def _checkout_ref(target_dir: Path, ref: str, deadline: float | None) -> None:
     does not resolve, ``git checkout --detach origin/<ref>`` answers "--detach
     does not take a path argument", which matches no label and would be reported
     as the useless "Git command failed". Re-raising keeps the message that does
-    label it: an absent object gives ``unable to read tree`` ("Commit or ref not
-    found"), an abbreviated id gives ``pathspec ... did not match`` ("Branch or
-    ref not found").
+    label it: an absent object gives ``unable to read tree`` (git 2.56) or
+    ``reference is not a tree`` (git 2.39), both "Commit or ref not found"; an
+    abbreviated id gives ``pathspec ... did not match`` ("Branch or ref
+    not found").
     """
     git = Repo(target_dir).git
     try:
