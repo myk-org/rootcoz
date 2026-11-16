@@ -263,6 +263,16 @@ class TestStripSensitiveFromResponse:
         assert key not in stripped["request_params"]
         assert stripped["request_params"]["safe_key"] == "keep"
 
+    def test_masks_credentials_in_url_valued_fields(self) -> None:
+        """An ``@<token>`` in the URL *path* is masked, storage untouched."""
+        url = "https://github.com/org/repo@ghp_secret?foo=1"  # pragma: allowlist secret
+        result_data = {"request_params": {"tests_repo_url": url, "build_url": url}}
+        stripped = strip_sensitive_from_response(result_data)
+        masked = "https://github.com/org/repo@***?***"
+        for key in ("tests_repo_url", "build_url"):
+            assert stripped["request_params"][key] == masked
+            assert result_data["request_params"][key] == url
+
 
 @pytest.mark.usefixtures("_stable_encryption_key")
 class TestAdditionalReposTokenEncryption:

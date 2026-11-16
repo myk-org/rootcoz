@@ -1854,6 +1854,60 @@ class TestResultsEndpoints:
         assert response.status_code == 404
         assert "not found" in response.json()["detail"].lower()
 
+    async def test_results_echo_masks_token_in_repo_url_path(
+        self, test_client, temp_db_path: Path
+    ) -> None:
+        """A stored ``@<token>`` in a repo URL path never reaches an API reader.
+
+        The token must survive in storage (a re-run may need it), so only the
+        echo is masked -- by the same helper the log maskers already use.
+        """
+        token = "ghp_secret"  # pragma: allowlist secret
+        repo_url = f"https://github.com/org/repo@{token}?foo=1"
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.save_result(
+                job_id="job-masked-url",
+                jenkins_url="https://jenkins.example.com/job/test/1/",
+                status="completed",
+                result={
+                    "request_params": {
+                        "tests_repo_url": repo_url,
+                        "feedback_repo_url": repo_url,
+                        "additional_repos": [
+                            {"name": "repo", "url": repo_url, "ref": "main"}
+                        ],
+                    },
+                    # The clone-progress log keeps the URL the clone used, and
+                    # it is part of the same GET /results payload.
+                    "progress_log": [
+                        {
+                            "phase": "cloning",
+                            "repo": "repo",
+                            "state": "cloned",
+                            "url": f"https://github.com/org/repo@{token}",
+                        }
+                    ],
+                },
+            )
+
+            echo = test_client.get("/results/job-masked-url")
+            assert echo.status_code == 200
+            assert token not in echo.text
+            assert "repo@***" in echo.text
+            # The /full payload shapes its own fields; it must not carry the
+            # token either, whichever way it grows.
+            full = test_client.get("/api/results/job-masked-url/full")
+            assert full.status_code == 200
+            assert token not in full.text
+
+            stored = await storage.get_result("job-masked-url", strip_sensitive=False)
+        params = stored["result"]["request_params"]
+        assert params["tests_repo_url"] == repo_url
+        assert params["feedback_repo_url"] == repo_url
+        assert params["additional_repos"][0]["url"] == repo_url
+        assert stored["result"]["progress_log"][0]["url"].endswith(f"@{token}")
+
     async def test_list_results(self, test_client, temp_db_path: Path) -> None:
         """Test listing results."""
         with patch.object(storage, "DB_PATH", temp_db_path):

@@ -12273,7 +12273,9 @@ def _job_issue_repo_slugs(
 
 async def _chat_issue_repo_slugs(job_id: str) -> tuple[str, frozenset[str]]:
     """The allow-list of the run a chat issue names (see _job_issue_repo_slugs)."""
-    stored = await storage.get_result(job_id)
+    # The raw stored value: an API response masks credentials inside a repo URL,
+    # and a masked URL no longer parses back to an ``owner/name`` slug.
+    stored = await storage.get_result(job_id, strip_sensitive=False)
     params = ((stored or {}).get("result") or {}).get("request_params") or {}
     if not params:
         raise HTTPException(
