@@ -1185,7 +1185,9 @@ async def test_resumed_chat_lost_session_still_retries(monkeypatch):
         storage, "can_user_use_server_providers", AsyncMock(return_value=True)
     )
     monkeypatch.setattr(
-        storage, "get_ai_session_source", AsyncMock(return_value="server")
+        storage,
+        "get_ai_session_source_with_generation",
+        AsyncMock(return_value=("server", None)),
     )
     monkeypatch.setattr(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))

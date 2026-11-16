@@ -385,6 +385,34 @@ async def test_stream_prompt_task_cancel_aborts_the_upstream_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_prompt_error_frame_keeps_an_accepted_answer() -> None:
+    """A terminal error frame never undoes the prompt's accepted-turn verdict."""
+    client = FakeSidecar(
+        prompt_payload={
+            "text": "the whole answer",
+            "error": "503 Service Unavailable",
+        },
+        feed=FakeFeed(
+            [
+                frame({"type": "turn_start", "turnId": "t1"}),
+                frame(
+                    {"type": "error", "turnId": "t1", "message": "provider exploded"}
+                ),
+            ]
+        ),
+    )
+    _seen, on_delta = deltas()
+
+    result = await ai_client._stream_prompt_safely(
+        client, "s1", "hi", None, on_delta, None, lambda text: bool(text.strip())
+    )
+
+    assert result.success is True
+    assert result.text == "the whole answer"
+    assert result.error == "503 Service Unavailable"
+
+
+@pytest.mark.asyncio
 async def test_stream_prompt_error_frame_reports_the_sidecar_error() -> None:
     client = FakeSidecar(
         feed=FakeFeed(
@@ -740,7 +768,11 @@ async def test_resumed_server_credential_turn_streams_through_one_prompt_path(
     )
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
-    monkeypatch.setattr(ai_client, "server_provider_key", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        ai_client,
+        "server_provider_key_with_generation",
+        AsyncMock(return_value=(None, None)),
+    )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
     token = ai_client.ai_username.set("alice")
     seen: list[str] = []

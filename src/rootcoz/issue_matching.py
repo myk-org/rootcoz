@@ -404,21 +404,22 @@ def _parse_issue_evaluations(text: str) -> list[Any] | None:
     the validator rejected can never be parsed differently afterwards.
     """
     stripped = text.strip()
-    # Strip markdown code block if present
-    if "```json" in stripped:
-        start = stripped.index("```json") + len("```json")
-        end = stripped.index("```", start)
-        stripped = stripped[start:end].strip()
-    elif "```" in stripped:
-        start = stripped.index("```") + len("```")
-        end = stripped.index("```", start)
-        stripped = stripped[start:end].strip()
-
-    json_start = stripped.find("[")
-    json_end = stripped.rfind("]")
-    if json_start != -1 and json_end != -1:
-        stripped = stripped[json_start : json_end + 1]
     try:
+        # Strip markdown code block if present. An opening fence with no closing
+        # one raises ValueError here, which is a malformed reply, not a crash.
+        if "```json" in stripped:
+            start = stripped.index("```json") + len("```json")
+            end = stripped.index("```", start)
+            stripped = stripped[start:end].strip()
+        elif "```" in stripped:
+            start = stripped.index("```") + len("```")
+            end = stripped.index("```", start)
+            stripped = stripped[start:end].strip()
+
+        json_start = stripped.find("[")
+        json_end = stripped.rfind("]")
+        if json_start != -1 and json_end != -1:
+            stripped = stripped[json_start : json_end + 1]
         evaluations = json.loads(stripped)
     except json.JSONDecodeError, ValueError:
         return None

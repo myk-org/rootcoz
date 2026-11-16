@@ -6078,8 +6078,13 @@ async def _chat_turn(monkeypatch, tmp_path, handler, session_id=None):
 
 
 @pytest.mark.asyncio
-async def test_chat_error_bearing_turn_without_stop_reason_fails(monkeypatch, tmp_path):
-    """A mid-turn error with no stop reason never becomes a chat reply."""
+async def test_chat_error_bearing_turn_keeps_its_answer(monkeypatch, tmp_path):
+    """A free-form answer survives a mid-turn error.
+
+    pi-config's prompt response carries no ``stop_reason``, so a chat turn that
+    recorded an error can never prove completion; dropping its answer loses a
+    finished reply, so free-form chat accepts any non-empty text.
+    """
 
     def handle(request):
         import httpx
@@ -6088,14 +6093,43 @@ async def test_chat_error_bearing_turn_without_stop_reason_fails(monkeypatch, tm
             return httpx.Response(200, json={"session_id": "s-chat"})
         if request.url.path.endswith("/prompt"):
             return httpx.Response(
-                200, json={"text": "half sentence", "error": "503 Service Unavailable"}
+                200,
+                json={"text": "complete reply", "error": "503 Service Unavailable"},
             )
         return httpx.Response(204)
 
-    (success, _text, session_id), requests = await _chat_turn(
+    (success, text, session_id), requests = await _chat_turn(
+        monkeypatch, tmp_path, handle
+    )
+    assert success is True
+    assert text == "complete reply"
+    assert session_id == "s-chat"
+    assert [r.method for r in requests] == ["POST", "POST"]
+
+
+@pytest.mark.asyncio
+async def test_chat_turn_with_no_answer_still_fails_and_drops_the_session(
+    monkeypatch, tmp_path
+):
+    """An error-bearing turn with no text is a failure, not an empty reply."""
+
+    def handle(request):
+        import httpx
+
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s-chat-fail"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(
+                200, json={"text": "", "error": "Incorrect API key provided"}
+            )
+        return httpx.Response(204)
+
+    (success, text, session_id), requests = await _chat_turn(
         monkeypatch, tmp_path, handle
     )
     assert success is False
+    # A user-keyed failure never echoes the provider body: the fixed signal does.
+    assert text == "AI call failed"
     assert session_id is None
     # The freshly created session is deleted: nothing is left to resume.
     assert [r.method for r in requests] == ["POST", "POST", "DELETE"]

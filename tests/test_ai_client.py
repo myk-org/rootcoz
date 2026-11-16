@@ -1503,6 +1503,26 @@ def test_sanitize_diagnostic_bounds_before_scrubbing() -> None:
     assert ai_client._sanitize_diagnostic(None) is None
 
 
+@pytest.mark.asyncio
+async def test_server_source_exception_keeps_a_sanitized_cause_without_keys() -> None:
+    """A server call with no known key still reports its sanitized cause."""
+
+    async def _failing_call(**_kwargs: Any) -> AIResult:
+        raise RuntimeError(
+            "connect failed to https://user:hunter2@sidecar.test/v1"  # pragma: allowlist secret
+        )
+
+    with pytest.raises(RuntimeError) as raised:
+        await ai_client._call_with_safe_error(
+            _failing_call,
+            credential_source="server",
+            ai_provider="openai",
+            ai_model="model",
+        )
+    assert "connect failed to" in str(raised.value)
+    assert "hunter2" not in str(raised.value)
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -1682,6 +1702,48 @@ async def test_server_key_rotated_mid_turn_fails_closed(
 
 
 @pytest.mark.asyncio
+async def test_create_session_safely_binds_the_callers_key_generation(
+    initialized_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The generation the caller read WITH the key is the insert-time baseline."""
+    old_key = "old-key-" + "o" * 20  # pragma: allowlist secret
+    await storage.set_server_ai_credential("openai", old_key, "admin")
+    old_generation = await storage.get_server_credential_generation("openai")
+    # The store moved on after the caller's read: its key is the previous generation.
+    await storage.set_server_ai_credential(
+        "openai",
+        "new-key-" + "n" * 20,
+        "admin",  # pragma: allowlist secret
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "created-under-old-key"})
+        return httpx.Response(204)
+
+    client, requests = _make_sidecar(handle)
+    token = ai_client.ai_username.set("admin")
+    try:
+        with pytest.raises(ValueError, match="AI credential changed"):
+            await ai_client.create_session_safely(
+                client,
+                provider="openai",
+                model="model",
+                system_prompt="sys",
+                server_api_key=old_key,
+                server_generation=old_generation,
+            )
+    finally:
+        ai_client.ai_username.reset(token)
+        await client.close()
+    assert [r.method for r in requests] == ["POST", "DELETE"]
+    assert (
+        await storage.get_ai_session_source("created-under-old-key", "admin", "openai")
+        == "unknown"
+    )
+
+
+@pytest.mark.asyncio
 async def test_server_session_rotated_during_creation_is_deleted(
     initialized_db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1722,6 +1784,130 @@ async def test_server_session_rotated_during_creation_is_deleted(
         await storage.get_ai_session_source("created-under-old-key", "admin", "openai")
         == "unknown"
     )
+
+
+@pytest.mark.asyncio
+async def test_unreadable_credential_store_does_not_fail_the_turn(
+    initialized_db, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """An undecryptable store is untracked, never a mid-turn rotation (#569)."""
+    await storage.set_server_ai_credential(
+        "openai",
+        "stored-key-" + "s" * 20,
+        "admin",  # pragma: allowlist secret
+    )
+    # Break the Fernet token: the store is unreadable, so the turn falls back to
+    # the deployment credential and can never be bound to the stored generation.
+    async with storage._connect_db() as db:
+        await db.execute(
+            "UPDATE server_ai_providers SET api_key_enc ="
+            " substr(api_key_enc, 1, 20)"
+            " || CASE substr(api_key_enc, 21, 1) WHEN 'X' THEN 'Y' ELSE 'X' END"
+            " || substr(api_key_enc, 22)"
+        )
+        await db.commit()
+    deployment_key = "deployment-key-" + "d" * 20  # pragma: allowlist secret
+    monkeypatch.setattr(
+        ai_client, "deployment_provider_credentials", lambda: {"openai": deployment_key}
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s-unreadable"})
+        return httpx.Response(200, json={"text": "the answer"})
+
+    client, requests = _make_sidecar(handle)
+    try:
+        _bind_internal_call_ai(monkeypatch, client)
+        monkeypatch.setattr(
+            ai_client,
+            "resolve_catalog_pair",
+            AsyncMock(return_value=("openai", "model")),
+        )
+        monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+        token = ai_client.ai_username.set("admin")
+        try:
+            with capture_main_logs(
+                caplog,
+                logging.DEBUG,
+                logger="rootcoz.ai_client",
+                bypass_duplicate_filter=True,
+            ):
+                result = await call_ai_under_test(
+                    "prompt", ai_provider="openai", ai_model="model"
+                )
+        finally:
+            ai_client.ai_username.reset(token)
+    finally:
+        await client.close()
+    # The completed turn keeps its answer and its session: a read failure is not
+    # a rotation, so nothing is collapsed or deleted.
+    assert result.success is True
+    assert result.text == "the answer"
+    assert [r.method for r in requests] == ["POST", "POST"]
+    assert "rotated mid-turn" not in caplog.text
+    assert caplog.text.count("credential store unreadable") == 1
+    # The generation still rides along, so the session is tracked as usual.
+    assert (
+        await storage.get_ai_session_source("s-unreadable", "admin", "openai")
+        == "server"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rotation_after_session_validation_fails_closed(
+    initialized_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The generation validated on resume is the baseline, not a later read."""
+    old_key = "server-key-" + "o" * 20  # pragma: allowlist secret
+    await storage.set_server_ai_credential("openai", old_key, "admin")
+    generation = await storage.get_server_credential_generation("openai")
+    await storage.save_ai_session_source(
+        "s-race", "admin", "openai", "server", expected_generation=generation
+    )
+    real_key_read = ai_client.server_provider_key_with_generation
+
+    async def rotate_while_reading_the_key(provider: str):
+        # The rotation lands between the session check and the prompt: the
+        # resumed sidecar session still answers with the pre-rotation key.
+        await storage.set_server_ai_credential(
+            provider,
+            "rotated-" + "n" * 20,
+            "admin",  # pragma: allowlist secret
+        )
+        return await real_key_read(provider)
+
+    monkeypatch.setattr(
+        ai_client, "server_provider_key_with_generation", rotate_while_reading_the_key
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(200, json={"text": "the old-key answer"})
+        return httpx.Response(204)
+
+    client, requests = _make_sidecar(handle)
+    token = ai_client.ai_username.set("admin")
+    try:
+        _bind_internal_call_ai(monkeypatch, client)
+        monkeypatch.setattr(
+            ai_client,
+            "resolve_catalog_pair",
+            AsyncMock(return_value=("openai", "model")),
+        )
+        monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+        result = await call_ai_under_test(
+            "next turn",
+            ai_provider="openai",
+            ai_model="model",
+            session_id="s-race",
+        )
+    finally:
+        ai_client.ai_username.reset(token)
+        await client.close()
+    # The old-keyed session is deleted and its id never reaches the caller.
+    assert [r.method for r in requests] == ["POST", "DELETE"]
+    assert result.session_id is None
 
 
 @pytest.mark.asyncio

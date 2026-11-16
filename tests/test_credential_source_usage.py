@@ -391,7 +391,9 @@ async def test_lookup_failure_never_prompts(tmp_path, monkeypatch):
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
     monkeypatch.setattr(
-        storage, "get_ai_session_source", AsyncMock(side_effect=OSError("db down"))
+        storage,
+        "get_ai_session_source_with_generation",
+        AsyncMock(side_effect=OSError("db down")),
     )
     prompt = AsyncMock()
     monkeypatch.setattr(ai_client, "_call_user_session", prompt)

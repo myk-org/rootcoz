@@ -11,6 +11,7 @@ from pi_sidecar_client import AIResult
 from rootcoz.issue_matching import (
     MAX_FILTER_PROMPT_CHARS,
     TrackerSearchSpec,
+    _parse_issue_evaluations,
     collect_product_bug_reports,
     filter_issue_matches_with_ai,
     group_targets_by_keywords,
@@ -393,6 +394,7 @@ class TestFilterIssueMatchesWithAi:
 
     async def test_records_token_usage_when_job_id(self) -> None:
         """Token usage is recorded when job_id is provided."""
+        """Token usage is recorded when job_id is provided."""
         candidates = [
             {"key": "X-1", "summary": "Bug", "description": "d", "status": "Open"}
         ]
@@ -765,6 +767,22 @@ class TestRunTrackerSearch:
         assert fake.searches == [(("kw",), "")]
         assert record["scope"] == ["PROJ"]
         assert record["keyword_sets"] == 1
+
+
+class TestParseIssueEvaluations:
+    """The one parser is total: any malformed reply is ``None``, never a raise."""
+
+    def test_unclosed_code_fence_returns_none(self) -> None:
+        """An opening fence with no closing fence is unparseable, not fatal."""
+        assert _parse_issue_evaluations('```json\n[{"key": "X-1"}') is None
+        assert _parse_issue_evaluations('```\n[{"key": "X-1"}') is None
+
+    def test_well_formed_fence_returns_the_evaluations(self) -> None:
+        """The control: a closed fence still parses to its array."""
+        evaluations = _parse_issue_evaluations(
+            '```json\n[{"key": "X-1", "relevant": true}]\n```'
+        )
+        assert evaluations == [{"key": "X-1", "relevant": True}]
 
 
 class TestOneLoopDrivesBothTrackers:

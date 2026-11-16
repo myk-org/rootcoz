@@ -123,7 +123,9 @@ async def test_deactivated_provider_mid_chat_gets_deactivation_message(
         ),
     )
     monkeypatch.setattr(
-        storage, "get_ai_session_source", AsyncMock(return_value="server")
+        storage,
+        "get_ai_session_source_with_generation",
+        AsyncMock(return_value=("server", None)),
     )
     token = ai_client.chat_session_source.set("server")
     try:

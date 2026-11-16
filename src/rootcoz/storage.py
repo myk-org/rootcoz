@@ -10958,6 +10958,16 @@ def _generation_rotated(
 
 
 async def get_ai_session_source(session_id: str, username: str, provider: str) -> str:
+    """The session's credential source; see :func:`..._with_generation`."""
+    source, _generation = await get_ai_session_source_with_generation(
+        session_id, username, provider
+    )
+    return source
+
+
+async def get_ai_session_source_with_generation(
+    session_id: str, username: str, provider: str
+) -> tuple[str, int | None]:
     """Reject a known session owned by another user or provider.
 
     Provider IDs are compared case-insensitively: a custom agent-dir provider
@@ -10971,6 +10981,10 @@ async def get_ai_session_source(session_id: str, username: str, provider: str) -
     that generation moves (rotation or deletion). A ``NULL`` generation is an
     untracked session — every pre-change row and every ambient session — and is
     never rejected by generation, so an upgrade cannot kill a live session.
+
+    The returned generation is the one THIS check validated, so a caller never
+    has to re-read it: a rotation between the two reads would hand the turn a
+    baseline the session was never checked against (#569).
     """
     async with _connect_db() as db:
         row = await (
@@ -11007,7 +11021,7 @@ async def get_ai_session_source(session_id: str, username: str, provider: str) -
             "AI session belongs to another user or provider, or was revoked"
         )
     if not row:
-        return "unknown"
+        return "unknown", None
     if row[2] == "server":
         if row[4] is None:
             # Untracked by design: no backfill exists, so this stays the case for
@@ -11025,7 +11039,7 @@ async def get_ai_session_source(session_id: str, username: str, provider: str) -
                 row[1],
             )
             raise ValueError("AI session unavailable")
-    return row[2]
+    return row[2], row[4]
 
 
 # --- Job Metadata ---

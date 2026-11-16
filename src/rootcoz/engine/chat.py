@@ -1923,17 +1923,22 @@ async def _create_chat_session(
         else:
             from rootcoz.ai_client import (
                 require_server_provider_grant,
-                server_provider_key,
+                server_provider_key_with_generation,
             )
 
             await require_server_provider_grant(sidecar_provider, sidecar_model)
             # A stored server provider key (#347) reaches chat sessions too:
             # pass it as the session apiKey while keeping the server
             # credential-source classification (create_session_safely records
-            # server_api_key sessions as server-owned).
-            server_key = await server_provider_key(sidecar_provider)
+            # server_api_key sessions as server-owned). The generation is read
+            # WITH the key, so the session row can only ever record the state
+            # that key came from (#569).
+            server_key, server_generation = await server_provider_key_with_generation(
+                sidecar_provider
+            )
             if server_key is not None:
                 create_kwargs["server_api_key"] = server_key
+                create_kwargs["server_generation"] = server_generation
         session_id = await create_session_safely(client, **create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
@@ -2010,6 +2015,11 @@ async def init_admin_chat_session(
     )
 
 
+def _chat_turn_usable(text: str) -> bool:
+    """A free-form chat turn is usable when it produced any answer at all."""
+    return bool(text.strip())
+
+
 async def _chat_with_ai_impl(
     *,
     message: str,
@@ -2067,9 +2077,11 @@ async def _chat_with_ai_impl(
         call_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
     if install_mcp:
         await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
-    # `accept_turn=None`: a free-form chat turn with no stop reason counts as
-    # unusable, so a partial mid-turn fragment never reaches the chat history.
-    result = await call_ai(prompt, accept_turn=None, **call_kwargs)
+    # Free-form chat has no schema to check, so its rule is "a non-empty
+    # answer": pi-config's prompt response carries no stop_reason, and dropping
+    # a finished reply because the turn also recorded an error loses work the
+    # user cannot recover (#569).
+    result = await call_ai(prompt, accept_turn=_chat_turn_usable, **call_kwargs)
 
     # A revoked or switched chat source must never be rebuilt under another identity.
     from rootcoz.ai_client import chat_session_source
@@ -2111,7 +2123,7 @@ async def _chat_with_ai_impl(
             await install_http_tools_mcp_best_effort_async(
                 repo_path, custom_tools or []
             )
-        result = await call_ai(prompt, accept_turn=None, **retry_kwargs)
+        result = await call_ai(prompt, accept_turn=_chat_turn_usable, **retry_kwargs)
 
     await result.record_usage(
         request_id=request_id,
@@ -2128,6 +2140,12 @@ async def _chat_with_ai_impl(
             single_line_diagnostic(format_ai_diagnostic(result)),
         )
         return False, result.text, None
+    if result.error:
+        logger.warning(
+            "%s: AI turn completed with a warning: %s",
+            log_prefix,
+            single_line_diagnostic(result.error),
+        )
 
     return True, result.text, result.session_id
 

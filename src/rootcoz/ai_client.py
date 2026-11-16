@@ -54,6 +54,9 @@ _LINE_BREAK_RE = re.compile(r"\r\n|[\r\x85\u2028\u2029]")
 # Below this length a key cannot be safely replaced inside model output, so a
 # fragment could leak it: such a turn never streams (see `_redact_key_echo`).
 _MIN_SAFE_REDACT_KEY = 8
+# Marks "the caller did not supply a generation" in `create_session_safely`,
+# where a real `None` (no stored key) must never trigger a re-read.
+_GENERATION_UNREAD: Any = object()
 # How long to keep reading the events feed after the prompt answered. The feed's
 # keepalives reset httpx's per-read timeout, so without this bound a lost
 # `turn_end` frame would park the turn — and the per-user chat lock — forever.
@@ -571,6 +574,24 @@ async def server_provider_key(provider: str) -> str | None:
     return key
 
 
+async def _server_credential_generation(provider: str) -> int | None:
+    """The row's generation without decrypting its key; None when unreadable.
+
+    A key that cannot be decrypted must still keep the generation the turn is
+    compared against, or the post-turn check would read a read failure as a
+    rotation (#569).
+    """
+    from rootcoz.storage import get_server_credential_generation
+
+    try:
+        return await get_server_credential_generation(provider)
+    except sqlite3.Error, OSError, RuntimeError:
+        logger.warning(
+            "Unable to read server AI credential generation for provider=%s", provider
+        )
+        return None
+
+
 async def server_provider_key_with_generation(
     provider: str,
 ) -> tuple[str | None, int | None]:
@@ -592,10 +613,16 @@ async def server_provider_key_with_generation(
             "using deployment credentials",
             provider,
         )
-        return _deployment_provider_key(provider), None
+        return (
+            _deployment_provider_key(provider),
+            await _server_credential_generation(provider),
+        )
     except sqlite3.Error, OSError, RuntimeError:
         logger.warning("Unable to read server AI credential for provider=%s", provider)
-        return _deployment_provider_key(provider), None
+        return (
+            _deployment_provider_key(provider),
+            await _server_credential_generation(provider),
+        )
     return (key if key is not None else _deployment_provider_key(provider)), generation
 
 
@@ -2321,9 +2348,12 @@ async def _call_with_safe_error(
             if type(exc) in (ValueError, RuntimeError, OSError, TimeoutError, TypeError)
             else RuntimeError
         )
+        # Server: keep the (bounded, redacted, printable) cause even when no key
+        # is known — sanitizing needs no key, and withholding it only hides why
+        # the call failed (#569).
         safe_detail = (
             _sanitize_diagnostic(str(exc), all_keys)
-            if effective_source == "server" and all_keys
+            if effective_source == "server"
             else None
         )
         safe_text = f"{type(exc).__name__}: sidecar call failed"
@@ -2386,9 +2416,13 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
     ``server_api_key`` passes an admin-stored server provider key (#347)
     while keeping the session classified as server-owned — the chat flow
     uses it so stored provider keys reach chat sessions exactly like they
-    reach one-shot AI calls.
+    reach one-shot AI calls. ``server_generation`` is the generation of THAT
+    key, read with it in one go: re-reading here would let a rotation land
+    between the key's read and this write, tagging the session with a
+    generation its key never had (#569).
     """
     server_key = kwargs.pop("server_api_key", None)
+    server_generation = kwargs.pop("server_generation", _GENERATION_UNREAD)
     key = kwargs.get("api_key")
     if server_key is not None and key is not None:
         raise ValueError("Session cannot carry both user and server API keys")
@@ -2409,9 +2443,12 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
     if server_key is not None:
         # Snapshot the generation BEFORE the sidecar creates the session: a
         # rotation during creation must not leave a row bound to the new key.
-        server_generation = await get_server_credential_generation(
-            create_kwargs["provider"]
-        )
+        # The caller that read the key supplies it; the fallback read is for a
+        # caller that has no key of its own in hand.
+        if server_generation is _GENERATION_UNREAD:
+            server_generation = await get_server_credential_generation(
+                create_kwargs["provider"]
+            )
         return await create_ai_session_with_source(
             lambda: _create_sidecar_session_raw(
                 client, api_key=server_key, **create_kwargs
@@ -2522,8 +2559,10 @@ async def _prompt_safely(
     ``accept_turn`` is the ONE turn-usability owner: an HTTP 200 that also records an
     error is usable only when the answer is non-empty and the turn provably finished
     (``stop_reason`` normal, or no stop reason and the caller's schema check accepts
-    the text). Everything downstream — session cleanup, source persistence, usage —
-    therefore sees a single verdict.
+    the text). A lost-session error is never usable: its text is a fragment from
+    before the session vanished, and the caller rebuilds instead. Everything
+    downstream — session cleanup, source persistence, usage — therefore sees a
+    single verdict.
     """
     if on_delta is not None:
         return await _stream_prompt_safely(
@@ -2571,9 +2610,12 @@ async def _prompt_safely(
     )
     if error is None:
         result = AIResult(success=True, text=text, usage=usage, status_code=status_code)
-    elif _turn_usable(text, stop_reason, accept_turn):
+    elif not _is_lost_session_error(error.lower()) and _turn_usable(
+        text, stop_reason, accept_turn
+    ):
         # A completed answer survives the mid-turn error; the error is kept as the
-        # (sanitized) turn warning the caller reports.
+        # (sanitized) turn warning the caller reports. A lost session never gets
+        # here: its text is a fragment from before the session vanished.
         result = AIResult(
             success=True,
             text=text,
@@ -2756,6 +2798,12 @@ async def _stream_prompt_safely(
         return result
     if terminal.get("type") == "error":
         detail = str(terminal.get("message") or "AI call failed")
+        if result.success and result.error:
+            # The prompt verdict already accepted this error-bearing turn (a
+            # completed answer the sidecar also flagged): the frame is a
+            # diagnostic, and dropping the answer here would undo that verdict
+            # (#569).
+            return result
         return AIResult(
             success=False,
             text=detail,
@@ -3021,10 +3069,15 @@ async def call_ai(
     sidecar_call = _call_user_session if user_key is not None else _call_ai
     session_id = kwargs.get("session_id")
     if session_id:
-        from rootcoz.storage import get_ai_session_source
+        from rootcoz.storage import (
+            get_ai_session_source,
+            get_ai_session_source_with_generation,
+        )
 
         try:
-            source = await get_ai_session_source(session_id, username, provider)
+            source, pre_server_gen = await get_ai_session_source_with_generation(
+                session_id, username, provider
+            )
         except ValueError:
             return AIResult(
                 success=False,
@@ -3087,11 +3140,10 @@ async def call_ai(
         sidecar_call = _call_user_session
     if session_id and source == "server" and server_key is None:
         # A resumed server session keeps its creation-time key in the
-        # sidecar; fetch the stored one so error redaction can strip it.
+        # sidecar; fetch the stored one so error redaction can strip it. Its
+        # baseline generation is the one the session check above validated —
+        # never a later read, which a rotation could have moved on (#569).
         server_key, _ = await server_provider_key_with_generation(provider)
-        from rootcoz.storage import get_server_credential_generation
-
-        pre_server_gen = await get_server_credential_generation(provider)
         if key is None:
             key = server_key
     # Computed once, here, where the credential is final: the same values feed the
@@ -3124,7 +3176,10 @@ async def call_ai(
         ai_model=model,
         **kwargs,
     )
-    if source == "server":
+    if source == "server" and pre_server_gen is not None:
+        # None means this turn's key was not a stored credential (no row, or an
+        # unreadable store): there is no stored generation it could have rotated
+        # away from, so a read failure is never read as a rotation (#569).
         from rootcoz.storage import get_server_credential_generation
 
         if await get_server_credential_generation(provider) != pre_server_gen:
@@ -3211,7 +3266,8 @@ async def call_ai_once(
             result.session_id = None
         except httpx.HTTPError, OSError, RuntimeError, ValueError:
             logger.warning("Unable to clean up one-shot AI session")
-    if user_key is None:
+    if user_key is None and pre_server_gen is not None:
+        # Same rule as `call_ai`: an untracked baseline cannot rotate (#569).
         from rootcoz.storage import get_server_credential_generation
 
         if await get_server_credential_generation(provider) != pre_server_gen:

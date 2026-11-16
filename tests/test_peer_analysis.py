@@ -4139,6 +4139,45 @@ class TestPeerTurnDiagnostics:
         assert peer_round.error.startswith("Returned unsupported classification:")
 
     @pytest.mark.asyncio
+    async def test_unsupported_classification_is_kept_whole_where_it_is_read(
+        self, monkeypatch, tmp_path: Path, caplog
+    ) -> None:
+        """Only the classification field is bounded; the error and log keep it all."""
+        import logging
+
+        from rootcoz import peer_analysis
+        from tests.conftest import capture_main_logs
+
+        orchestrator_json = _make_ai_json_response(classification="CODE ISSUE")
+        unsupported = "MAYBE " + "z" * 300
+        peer_json = json.dumps(
+            {"agrees": True, "classification": unsupported, "reasoning": "because"}
+        )
+        call_count = 0
+
+        async def cli_side_effect(prompt, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return AIResult(success=True, text=orchestrator_json)
+            return AIResult(success=True, text=peer_json)
+
+        with capture_main_logs(caplog, logging.WARNING, logger="rootcoz.peer_analysis"):
+            results = await _run_peer_analysis(
+                monkeypatch,
+                tmp_path=tmp_path,
+                cli_side_effect=cli_side_effect,
+                peer_configs=[AiConfigEntry(ai_provider="gemini", ai_model="pro")],
+                max_rounds=1,
+            )
+        peer_round = next(r for r in results[0].peer_debate.rounds if r.role == "peer")
+        assert "z" * 300 in (peer_round.error or "")
+        assert "z" * 300 in caplog.text
+        assert len(peer_round.classification) == (
+            peer_analysis.MAX_PEER_CLASSIFICATION_LENGTH
+        )
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "peer_answer",
         [

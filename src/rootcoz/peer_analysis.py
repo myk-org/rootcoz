@@ -111,6 +111,11 @@ _PEER_RESPONSE_SCHEMA = (
 )
 _PEER_RESPONSE_KEYS = frozenset({"agrees", "classification", "reasoning"})
 
+# A rejected classification is stored and shown in the report's classification
+# column, so it is bounded like a field rather than a diagnostic. The rejected
+# value is kept whole in the round's error and in the log.
+MAX_PEER_CLASSIFICATION_LENGTH = 120
+
 
 def _is_peer_response_dict(data: object) -> bool:
     """Check whether *data* contains ALL core peer-response keys with correct types."""
@@ -915,9 +920,10 @@ async def analyze_failure_group_with_peers(
                         normalized = _normalize_classification(raw_peer_classification)
                         if normalized not in _VALID_CLASSIFICATIONS:
                             # Invalid classification -- exclude from consensus
-                            safe_cls = (
+                            rejected_cls = (
                                 _sanitize_diagnostic(raw_peer_classification) or ""
-                            )[:120]
+                            )
+                            safe_cls = rejected_cls[:MAX_PEER_CLASSIFICATION_LENGTH]
                             logger.warning(
                                 "Peer %d (%s/%s) round %d returned invalid "
                                 "classification: %r",
@@ -925,7 +931,7 @@ async def analyze_failure_group_with_peers(
                                 config.ai_provider,
                                 config.ai_model,
                                 round_num,
-                                safe_cls,
+                                rejected_cls,
                             )
                             entry = PeerRound(
                                 round=round_num,
@@ -935,7 +941,8 @@ async def analyze_failure_group_with_peers(
                                 classification=safe_cls,
                                 details=_scrub_answer(peer_details),
                                 error=(
-                                    f"Returned unsupported classification: {safe_cls!r}"
+                                    "Returned unsupported classification: "
+                                    f"{rejected_cls!r}"
                                 ),
                                 warning=_sanitize_diagnostic(ai_result.error, ()),
                                 agrees_with_orchestrator=None,

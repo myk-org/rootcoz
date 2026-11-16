@@ -1437,7 +1437,9 @@ async def test_chat_session_creation_rejects_deselected_model(monkeypatch, tmp_p
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
     monkeypatch.setattr(
-        ai_client, "server_provider_key", AsyncMock(return_value=SECRET)
+        ai_client,
+        "server_provider_key_with_generation",
+        AsyncMock(return_value=(SECRET, None)),
     )
     monkeypatch.setattr(chat, "create_session_safely", create)
     monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
@@ -1762,7 +1764,9 @@ async def test_chat_session_passes_stored_server_key(monkeypatch, tmp_path):
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
     monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
     monkeypatch.setattr(
-        ai_client, "server_provider_key", AsyncMock(return_value=SECRET)
+        ai_client,
+        "server_provider_key_with_generation",
+        AsyncMock(return_value=(SECRET, 5)),
     )
     monkeypatch.setattr(chat, "create_session_safely", create)
     monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
@@ -1780,6 +1784,8 @@ async def test_chat_session_passes_stored_server_key(monkeypatch, tmp_path):
         )
         kwargs = create.call_args.kwargs
         assert kwargs["server_api_key"] == SECRET
+        # The generation rides along from the SAME read as the key (#569).
+        assert kwargs["server_generation"] == 5
         assert "api_key" not in kwargs  # never classified as a user key
     finally:
         ai_client._selected_credential_source.reset(choice)

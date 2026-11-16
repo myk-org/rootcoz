@@ -518,7 +518,9 @@ async def test_chat_init_maps_unkeyed_and_user_keyed_refusals_to_a_message(
         # No stored server key: create_session_safely takes the library path,
         # which re-raises the raw httpx error.
         monkeypatch.setattr(
-            ai_client, "server_provider_key", AsyncMock(return_value=None)
+            ai_client,
+            "server_provider_key_with_generation",
+            AsyncMock(return_value=(None, None)),
         )
     response = await main.init_chat(
         job_id,

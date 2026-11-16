@@ -815,7 +815,9 @@ def install_start_rig(monkeypatch, tmp_path):
                 "alice", "openai", REFUSAL_SECRET_KEY
             )
             monkeypatch.setattr(
-                ai_client, "server_provider_key", AsyncMock(return_value=None)
+                ai_client,
+                "server_provider_key_with_generation",
+                AsyncMock(return_value=(None, None)),
             )
             monkeypatch.setattr(
                 ai_client,
@@ -825,8 +827,8 @@ def install_start_rig(monkeypatch, tmp_path):
         else:
             monkeypatch.setattr(
                 ai_client,
-                "server_provider_key",
-                AsyncMock(return_value=REFUSAL_SECRET_KEY),
+                "server_provider_key_with_generation",
+                AsyncMock(return_value=(REFUSAL_SECRET_KEY, None)),
             )
 
     return _install
