@@ -1,6 +1,7 @@
 """Tests for FastAPI main application."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -264,6 +265,26 @@ async def _tracker_user(name: str, **tokens: str) -> dict[str, str]:
     if tokens:
         await storage.save_user_tokens(name, **tokens)
     return {"Authorization": f"Bearer {api_key}"}
+
+
+def _mock_releases_response(releases):
+    from rootcoz import main
+
+    return httpx.Response(
+        200, json=releases, request=httpx.Request("GET", main._RELEASES_LIST_URL)
+    )
+
+
+def _mock_async_client(MockClient, response=None, error=None):
+    """Wire a patched ``httpx.AsyncClient`` to one canned response or error."""
+    instance = AsyncMock()
+    if error is not None:
+        instance.get.side_effect = error
+    else:
+        instance.get.return_value = response
+    MockClient.return_value.__aenter__ = AsyncMock(return_value=instance)
+    MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+    return instance
 
 
 def _gh_release(version: str, name: str = "", body: str = "body") -> dict[str, Any]:
@@ -862,6 +883,341 @@ class TestHealthEndpoint:
         data = response.json()
         assert data["version"] == ""
         assert data["releases"] == []
+
+    def test_releases_latest_sends_bearer_token_when_configured(
+        self, test_client
+    ) -> None:
+        """#568: a configured server token authenticates the upstream read."""
+        from rootcoz import main
+
+        with (
+            patch.dict(main._release_cache, {}, clear=True),
+            patch.object(main, "_get_app_version", return_value="4.7.0"),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+            patch("rootcoz.main.get_settings") as mock_settings,
+        ):
+            mock_settings.return_value.github_token = SecretStr(
+                "  ghp_srv_tok  "
+            )  # gitleaks:allow
+            mock_client_instance = _mock_async_client(
+                MockClient, _mock_releases_response([_gh_release("v4.7.2")])
+            )
+            response = test_client.get("/api/releases/latest")
+
+        assert response.status_code == 200
+        assert mock_client_instance.get.call_args.kwargs["headers"] == {
+            "Accept": "application/vnd.github.v3+json",
+            "Authorization": "Bearer ghp_srv_tok",  # gitleaks:allow
+        }
+        assert "ghp_srv_tok" not in response.text
+
+    def test_releases_latest_omits_auth_header_when_token_unset_or_blank(
+        self, test_client
+    ) -> None:
+        """Unset/blank GITHUB_TOKEN keeps the unauthenticated read."""
+        from rootcoz import main
+
+        for token in (None, "   "):
+            with (
+                patch.dict(main._release_cache, {}, clear=True),
+                patch.object(main, "_get_app_version", return_value="4.7.0"),
+                patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+                patch("rootcoz.main.get_settings") as mock_settings,
+            ):
+                mock_settings.return_value.github_token = (
+                    None if token is None else SecretStr(token)
+                )
+                mock_client_instance = _mock_async_client(
+                    MockClient, _mock_releases_response([_gh_release("v4.7.2")])
+                )
+                test_client.get("/api/releases/latest")
+
+            assert mock_client_instance.get.call_args.kwargs["headers"] == {
+                "Accept": "application/vnd.github.v3+json",
+            }
+
+    def test_releases_latest_cold_failure_caches_for_short_ttl_then_retries(
+        self, test_client
+    ) -> None:
+        """Cold upstream failure is cached for the cooldown, then retried."""
+        from rootcoz import main
+
+        forbidden = httpx.Response(
+            403, json={}, request=httpx.Request("GET", main._RELEASES_LIST_URL)
+        )
+        with (
+            patch.dict(main._release_cache, {}, clear=True),
+            patch.object(main, "_get_app_version", return_value="4.7.0"),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+            patch("rootcoz.main._time") as mock_time,
+            patch("rootcoz.main.get_settings") as mock_settings,
+        ):
+            mock_settings.return_value.github_token = SecretStr(
+                "ghp_srv_tok"
+            )  # gitleaks:allow
+            mock_client_instance = _mock_async_client(MockClient, forbidden)
+            mock_time.monotonic.return_value = 100.0
+            first = test_client.get("/api/releases/latest")
+            assert first.json()["version"] == ""
+            assert main._release_cache["failed_at"] == 100.0
+            assert (
+                main._release_cache["failed_token_digest"]
+                == hashlib.sha256(b"ghp_srv_tok").hexdigest()
+            )
+            assert "ghp_srv_tok" not in repr(main._release_cache)
+
+            mock_time.monotonic.return_value = 130.0
+            assert test_client.get("/api/releases/latest").json()["version"] == ""
+            assert mock_client_instance.get.call_count == 1
+
+            mock_client_instance.get.return_value = _mock_releases_response(
+                [_gh_release("v4.7.2")]
+            )
+            mock_time.monotonic.return_value = 100.0 + main._RELEASE_FAILURE_TTL + 1.0
+            recovered = test_client.get("/api/releases/latest")
+            assert mock_client_instance.get.call_count == 2
+            assert recovered.json()["version"] == "4.7.2"
+            assert "failed_at" not in main._release_cache
+            assert "failed_token_digest" not in main._release_cache
+
+    def test_releases_latest_stale_cache_failure_serves_stale_per_since_without_retrying(
+        self, test_client
+    ) -> None:
+        """Stale releases are re-filtered per ``since`` during the cooldown."""
+        from rootcoz import main
+
+        with (
+            patch.dict(
+                main._release_cache,
+                {
+                    "releases": [_gh_release("v4.7.2"), _gh_release("v4.7.1")],
+                    "fetched_at": 100.0,
+                },
+                clear=True,
+            ),
+            patch.object(main, "_get_app_version", return_value="4.7.2"),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+            patch("rootcoz.main._time") as mock_time,
+        ):
+            mock_client_instance = _mock_async_client(
+                MockClient, error=httpx.ConnectError("boom")
+            )
+            mock_time.monotonic.return_value = 4000.0
+            first = test_client.get("/api/releases/latest?since=4.7.0")
+            assert [r["version"] for r in first.json()["releases"]] == [
+                "4.7.1",
+                "4.7.2",
+            ]
+            mock_time.monotonic.return_value = 4010.0
+            second = test_client.get("/api/releases/latest?since=4.7.1")
+            assert [r["version"] for r in second.json()["releases"]] == ["4.7.2"]
+            assert mock_client_instance.get.call_count == 1
+
+    def test_releases_latest_token_change_invalidates_failure_cooldown_immediately(
+        self, test_client
+    ) -> None:
+        """Setting/clearing GITHUB_TOKEN bypasses an active failure cooldown."""
+        from rootcoz import main
+
+        failure = httpx.ConnectError("boom")
+        healthy = _mock_releases_response([_gh_release("v4.7.2")])
+        with (
+            patch.dict(main._release_cache, {}, clear=True),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+            patch("rootcoz.main._time") as mock_time,
+            patch("rootcoz.main.get_settings") as mock_settings,
+        ):
+            mock_client_instance = _mock_async_client(MockClient, error=failure)
+            mock_settings.return_value.github_token = None
+            mock_time.monotonic.return_value = 100.0
+            test_client.get("/api/releases/latest")
+            assert mock_client_instance.get.call_count == 1
+
+            # Setting a token inside the cooldown retries immediately, with auth
+            mock_settings.return_value.github_token = SecretStr(
+                "ghp_rotated"
+            )  # gitleaks:allow
+            mock_client_instance.get.side_effect = None
+            mock_client_instance.get.return_value = healthy
+            mock_time.monotonic.return_value = 105.0
+            rotated = test_client.get("/api/releases/latest")
+            assert rotated.json()["version"] == "4.7.2"
+            assert mock_client_instance.get.call_count == 2
+            assert (
+                mock_client_instance.get.call_args.kwargs["headers"]["Authorization"]
+                == "Bearer ghp_rotated"  # gitleaks:allow
+            )
+
+            # A failing rotated token cools down again; clearing it retries
+            main._release_cache.clear()  # simulate the positive cache expiring
+            mock_settings.return_value.github_token = SecretStr(
+                "ghp_bad"
+            )  # gitleaks:allow
+            mock_client_instance.get.side_effect = failure
+            mock_time.monotonic.return_value = 200.0
+            test_client.get("/api/releases/latest")
+            assert mock_client_instance.get.call_count == 3
+
+            mock_settings.return_value.github_token = None
+            mock_client_instance.get.side_effect = None
+            mock_client_instance.get.return_value = healthy
+            mock_time.monotonic.return_value = 205.0
+            assert test_client.get("/api/releases/latest").json()["version"] == "4.7.2"
+            assert mock_client_instance.get.call_count == 4
+            assert (
+                "Authorization"
+                not in mock_client_instance.get.call_args.kwargs["headers"]
+            )
+
+    @pytest.mark.parametrize(
+        "bad_token",
+        [
+            "ghp_part1\nghp_part2",
+            "ghp_part1\udc80ghp_part2",
+        ],
+    )
+    def test_releases_latest_malformed_token_never_leaks_secret_to_logs_or_cache(
+        self, test_client, caplog, bad_token: str
+    ) -> None:
+        """Control bytes / lone surrogates in GITHUB_TOKEN never reach logs."""
+        from rootcoz import main
+
+        with (
+            patch.dict(main._release_cache, {}, clear=True),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+            patch("rootcoz.main._time") as mock_time,
+            patch("rootcoz.main.get_settings") as mock_settings,
+            capture_main_logs(
+                caplog, level=logging.DEBUG, bypass_duplicate_filter=True
+            ),
+        ):
+            mock_settings.return_value.github_token = SecretStr(bad_token)
+            mock_client_instance = _mock_async_client(
+                MockClient, _mock_releases_response([_gh_release("v4.7.2")])
+            )
+            mock_time.monotonic.return_value = 100.0
+            response = test_client.get("/api/releases/latest")
+            assert response.status_code == 200
+            assert response.json()["version"] == ""
+            assert mock_client_instance.get.call_count == 0
+            assert "Failed to fetch GitHub releases" in caplog.text
+            assert "ghp_part1" not in caplog.text
+            assert "ghp_part1" not in repr(main._release_cache)
+
+            # The rejection is inside the failure cooldown, so no retry storm
+            mock_time.monotonic.return_value = 110.0
+            assert test_client.get("/api/releases/latest").status_code == 200
+            assert mock_client_instance.get.call_count == 0
+
+    def test_releases_latest_non_list_upstream_json_preserves_stale_cache(
+        self, test_client
+    ) -> None:
+        """Unexpected 200 payloads never poison the cached release list."""
+        from rootcoz import main
+
+        stale = [_gh_release("v4.7.2")]
+        for bad_payload in (
+            {},
+            [{"tag_name": 123}],
+            [{"tag_name": "v9.9.9", "body": 123}],
+        ):
+            with (
+                patch.dict(
+                    main._release_cache,
+                    {"releases": stale, "fetched_at": 0},
+                    clear=True,
+                ),
+                patch.object(main, "_get_app_version", return_value="4.7.0"),
+                patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+                patch("rootcoz.main._time") as mock_time,
+            ):
+                _mock_async_client(
+                    MockClient,
+                    httpx.Response(
+                        200,
+                        json=bad_payload,
+                        request=httpx.Request("GET", main._RELEASES_LIST_URL),
+                    ),
+                )
+                mock_time.monotonic.return_value = 5000.0
+                data = test_client.get("/api/releases/latest").json()
+                assert data["version"] == "4.7.2"
+                assert main._release_cache["releases"] == stale
+                assert main._release_cache["failed_at"] == 5000.0
+
+        # Hostile ?since= values must never poison the failure cooldown; the
+        # 100k-character variant cannot traverse an HTTP client URL, so the
+        # endpoint is awaited directly.
+        async def _hostile_since() -> tuple[httpx.Response, httpx.Response]:
+            return (
+                await main.get_latest_release(since="9" * 5000),
+                await main.get_latest_release(since="1." * 50000 + "1"),
+            )
+
+        with (
+            patch.dict(main._release_cache, {}, clear=True),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+            patch("rootcoz.main._time") as mock_time,
+        ):
+            _mock_async_client(
+                MockClient, _mock_releases_response([_gh_release("v4.7.2")])
+            )
+            mock_time.monotonic.return_value = 6000.0
+            long_since, huge_since = asyncio.run(_hostile_since())
+            assert long_since.status_code == 200
+            assert huge_since.status_code == 200
+            assert "failed_at" not in main._release_cache
+
+    def test_releases_latest_concurrent_cold_failures_coalesce_under_lock(
+        self, test_client
+    ) -> None:
+        """Concurrent cold-cache callers make one upstream attempt."""
+        from rootcoz import main
+
+        # The AsyncClient patch replaces the class on the httpx module itself,
+        # so keep the real one for the ASGI transport client.
+        real_async_client = httpx.AsyncClient
+
+        async def _run() -> None:
+            gate = asyncio.Event()
+            entered = asyncio.Event()
+
+            async def _gated_failure(*args: Any, **kwargs: Any) -> None:
+                # Hold the first upstream call open so the overlapping callers
+                # really contend for the lock instead of racing a finished fetch.
+                entered.set()
+                await gate.wait()
+                raise httpx.ConnectError("boom")
+
+            with (
+                patch.dict(main._release_cache, {}, clear=True),
+                patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+            ):
+                mock_client_instance = _mock_async_client(MockClient)
+                mock_client_instance.get.side_effect = _gated_failure
+                transport = httpx.ASGITransport(app=main.app)
+                async with real_async_client(
+                    transport=transport, base_url="http://test"
+                ) as client:
+                    tasks = [
+                        asyncio.create_task(client.get("/api/releases/latest"))
+                        for _ in range(5)
+                    ]
+                    # One caller is parked inside the upstream fetch...
+                    await asyncio.wait_for(entered.wait(), 5)
+                    # ...while the fetch is still pending, no other caller may
+                    # finish or fire an upstream attempt of its own.
+                    done, _pending = await asyncio.wait(tasks, timeout=0.2)
+                    assert done == set()
+                    assert mock_client_instance.get.call_count == 1
+                    gate.set()
+                    responses = await asyncio.gather(*tasks)
+                for response in responses:
+                    assert response.status_code == 200
+                    assert response.json()["version"] == ""
+                assert mock_client_instance.get.call_count == 1
+
+        asyncio.run(_run())
 
     @pytest.mark.parametrize(
         ("newer", "older"),

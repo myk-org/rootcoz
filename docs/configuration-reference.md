@@ -153,6 +153,8 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    With `ENABLE_GITHUB_ISSUES` unset, GitHub issue creation auto-enables when both `TESTS_REPO_URL` and `GITHUB_TOKEN` are configured. The user-facing feedback dialog stays available whenever the toggle is not explicitly `false`. `FEEDBACK_REPO_URL` sets the GitHub repository URL where user feedback issues from `POST /api/feedback/create` and `rootcoz feedback-create` are filed. A blank or whitespace-only value coerces back to `https://github.com/myk-org/rootcoz` and never falls through to `TESTS_REPO_URL`. Embedded URL userinfo is stripped in `GET /api/default-server-settings`, and an invalid URL fails feedback creation with `400` naming `FEEDBACK_REPO_URL` without echoing its value.
 
+   When `GITHUB_TOKEN` is set on the server, RootCoz also sends it on read-only release-metadata lookups (`GET /api/releases/latest`, independent of `ENABLE_GITHUB_ISSUES`) to avoid unauthenticated GitHub rate limits; when unset, release lookups stay unauthenticated, and failed upstream lookups are cached for 60 seconds (cleared immediately if `GITHUB_TOKEN` changes).
+
    The toggle also governs the read-only GitHub duplicate search that runs during analysis, and there it means only *creation*: an explicit `false` disables the duplicate search too, but leaving it unset keeps that search available on a deployment that cannot file issues (no `TESTS_REPO_URL`) as long as `GITHUB_TOKEN` is set and the run has a GitHub repository in scope. The search uses the deployment token only — never a user's.
 
 7. **Report Portal category.**
