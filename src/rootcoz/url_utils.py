@@ -188,8 +188,11 @@ def redact_urls_in_text(text: str) -> str:
 
 _SCHEME = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://")
 _AT_TOKEN_SUFFIX = re.compile(
-    r"@[^@/?#\s]+$"
-)  # anchored at the end of the pre-?/# head
+    r"@[^@/?#\s]+"
+)  # any `@<run>`, not only one at the end of the pre-?/# head: a value with
+# trailing prose ("repo@TOKEN and more") kept its token when the pattern was
+# `$`-anchored, and masking over-reach in a malformed stored value is safer
+# than a leaked credential in the log that reports it.
 
 
 def _mask_one_url_value(segment: str) -> str:
@@ -276,7 +279,10 @@ def mask_stored_url(text: str) -> str:
     head = text[:head_end]
     if _SCHEME.match(head) is None:
         head = _mask_schemeless_userinfo(head)
-    # No path means not URL-shaped (a bare address), so no suffix to mask.
+    # Only the text after the last ``/`` may carry a repo-spec token. Masking
+    # the whole head would eat the host of an authority userinfo that this
+    # function has just rewritten to ``***@host``.
     if "/" in head:
-        head = _AT_TOKEN_SUFFIX.sub("@***", head)
+        tail_start = head.rfind("/") + 1
+        head = head[:tail_start] + _AT_TOKEN_SUFFIX.sub("@***", head[tail_start:])
     return mask_url_value(head if head_end == len(text) else f"{head}?***")

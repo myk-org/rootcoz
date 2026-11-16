@@ -211,3 +211,43 @@ class TestMaskStoredUrl:
 
     def test_control_bytes_never_survive(self) -> None:
         assert mask_stored_url("ab\x00cd\n[AUDIT] forged") == ("abcd[AUDIT] forged")
+
+
+class TestAtTokenNotAtTheEnd:
+    """A token followed by prose must still be masked (#562, Qodo 2a8e9efa)."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("github.com/org/repo@SECRET extra", "github.com/org/repo@*** extra"),
+            (
+                "https://github.com/org/repo@SECRET extra",
+                "https://github.com/org/repo@*** extra",
+            ),
+            ("github.com/org/repo@SECRET", "github.com/org/repo@***"),
+            (
+                "see github.com/org/repo@SECRET and more",
+                "see github.com/org/repo@*** and more",
+            ),
+        ],
+    )
+    def test_a_trailing_token_is_masked_before_the_prose(
+        self, value: str, expected: str
+    ) -> None:
+        assert mask_stored_url(value) == expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "user:sec@git.internal/org/repo",
+            "user:pw@host:8443/org/repo",
+            "https://user:pw@host/repo",  # pragma: allowlist secret
+        ],
+    )
+    def test_the_host_is_never_mistaken_for_a_token(self, value: str) -> None:
+        masked = mask_stored_url(value)
+        assert "***@***" not in masked, masked
+        assert "git.internal" in masked or "host" in masked, masked
+
+    def test_an_email_shaped_value_is_left_alone(self) -> None:
+        assert mask_stored_url("user@example.com") == "user@example.com"
