@@ -244,18 +244,39 @@ def mask_url_value(text: str) -> str:
     return "".join(parts)
 
 
+def _mask_schemeless_userinfo(head: str) -> str:
+    """Mask the authority userinfo of a schemeless value head (``user:pw@host/x``).
+
+    Only a head with a path is touched, so a bare e-mail address is not
+    rewritten. Fail closed on the ambiguity: anything before the first ``@``
+    in the authority position is treated as credentials.
+    """
+    slash = head.find("/")
+    if slash == -1:  # No path: not URL-shaped, so not userinfo either.
+        return head
+    authority = head[:slash]
+    if "@" not in authority:
+        return head
+    return "***@" + authority.rsplit("@", 1)[1] + head[slash:]
+
+
 def mask_stored_url(text: str) -> str:
     """``mask_url_value`` for a stored URL value whose scheme may be missing.
 
     ``mask_url_value`` leaves a schemeless value unchanged, so a stored
-    ``github.com/org/repo?token=SECRET`` reached the debug log verbatim. Both
-    credential carriers are masked here — the ``@<token>`` suffix and the
-    query/fragment — and a schemed value is masked exactly as before (this is
-    display only: what the app does with the stored value is unchanged).
+    ``github.com/org/repo?token=SECRET`` — or a schemeless ``user:pw@host/repo``
+    — reached the debug log and the malformed-value WARNINGs verbatim. All
+    three credential carriers are masked here — authority userinfo, the
+    ``@<token>`` suffix and the query/fragment — and a schemed value is masked
+    exactly as before (display only: what the app does with the stored value is
+    unchanged).
     """
     text = strip_nonprintable(text)
     head_end = _query_start(text)
     head = text[:head_end]
+    if _SCHEME.match(head) is None:
+        head = _mask_schemeless_userinfo(head)
+    # No path means not URL-shaped (a bare address), so no suffix to mask.
     if "/" in head:
         head = _AT_TOKEN_SUFFIX.sub("@***", head)
     return mask_url_value(head if head_end == len(text) else f"{head}?***")

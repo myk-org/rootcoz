@@ -21489,6 +21489,28 @@ class TestRequestBoundaryUrlValidation:
         assert response.status_code == 422, response.text
         assert field in response.text
 
+    @pytest.mark.parametrize("path", ["/analyze", "/submit"])
+    def test_tests_repo_ref_with_a_space_is_refused_with_no_job_row(
+        self, test_client, path: str
+    ) -> None:
+        """Only ``validate_tests_repo_url`` refuses this value: it parses fine.
+
+        Rule 1 of #562: the ref reaches ``git clone --branch``, so the request
+        boundary is the only thing standing between it and git.
+        """
+        before = len(test_client.get("/results").json())
+        # A ref with a space parses fine; only the boundary check refuses it.
+        value = (
+            "https://user:pw@github.com/org/repo:bad ref"  # pragma: allowlist secret
+        )
+        response = test_client.post(path, json=_raw_body(tests_repo_url=value))
+        assert response.status_code == 422, response.text
+        assert "tests_repo_url" in response.text
+        assert "pw" not in response.text, "the rejected value echoed its userinfo"
+        assert len(test_client.get("/results").json()) == before, (
+            "a rejected tests_repo_url created a job row"
+        )
+
     @pytest.mark.parametrize(
         "field", ["tests_repo_url", "jenkins_url", "jira_site_url", "additional_repos"]
     )

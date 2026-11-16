@@ -173,6 +173,35 @@ class TestMaskStoredUrl:
         masked = mask_stored_url("github.com/org/repo@ghp_secret")
         assert masked == "github.com/org/repo@***"
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            # Schemeless userinfo: the authority, and the same with a port.
+            ("user:sec@git.internal/org/repo", "***@git.internal/org/repo"),
+            ("user:pw@host:8443/org/repo", "***@host:8443/org/repo"),
+            ("user:pw@host/org/repo?token=SECRET", "***@host/org/repo?***"),
+        ],
+    )
+    def test_schemeless_userinfo_is_masked(self, value: str, expected: str) -> None:
+        masked = mask_stored_url(value)
+        assert masked == expected
+        assert "sec" not in masked.removeprefix("***@")
+        assert "pw" not in masked
+        assert "SECRET" not in masked
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            # Not URL-shaped at all: a plain path, and a bare e-mail address.
+            # Neither carries userinfo, so neither is rewritten.
+            "https://github.com/org/repo",
+            "github.com/org/repo",
+            "user@example.com",
+        ],
+    )
+    def test_values_without_credentials_are_unchanged(self, value: str) -> None:
+        assert mask_stored_url(value) == value
+
     def test_schemed_value_masked_like_mask_url_value(self) -> None:
         credential_url = "https://user:pw@h/r?token=tok"  # pragma: allowlist secret
         assert mask_stored_url(credential_url) == mask_url_value(credential_url)

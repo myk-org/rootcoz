@@ -1182,6 +1182,21 @@ class TestValidateTestsRepoUrl:
         assert "tests_repo_url" in str(excinfo.value)
         assert "bad" not in str(excinfo.value)
 
+    def test_plain_http_is_refused_like_the_clone_refuses_it(self) -> None:
+        """http is refused at the boundary because main's clone refuses it too.
+
+        ``RepositoryManager._validate_repo_url`` (unchanged by #562) raises
+        ``Invalid repository URL scheme. Only https:// and git://`` for an
+        ``http://`` URL, so on main an http ``tests_repo_url`` was accepted by
+        the untyped field and then failed the job at clone time. Refusing it at
+        the request boundary is the same product rule, reported earlier.
+        """
+        with pytest.raises(ValueError) as excinfo:
+            validate_tests_repo_url("http://host/org/repo")
+        assert "tests_repo_url" in str(excinfo.value)
+        assert "https:// or git://" in str(excinfo.value)
+        assert "host" not in str(excinfo.value)
+
 
 class TestPeerSettingsFields:
     """Tests for peer_ai_configs and peer_analysis_max_rounds Settings fields."""
