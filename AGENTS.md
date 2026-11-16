@@ -420,7 +420,7 @@ When adding an endpoint, a setting, a background action or a permission change:
 
 1. Write the row with `record_audit(...)` — one row per attempt, `success`/`failure`/`denied`, a short reason code on failure, and details that name the subject (what was cleared, which field changed, which provider, which reason). A row whose details say nothing is a defect.
 2. Never store a credential value, a message body, a comment text or SQL text — names, ids, keys and reasons only. Identity (actor, target, message) is stored verbatim, never redacted.
-3. Add the action id to the coverage contract in issue #379, and let `tests/test_audit_coverage.py` enforce it: a mutating route that is neither audited nor exempt-with-a-reason fails the build.
+3. Add the action id to the coverage contract in issue #379, and let `tests/test_audit_coverage.py` enforce it by **control flow**: every non-raising branch of a mutating route must call `record_audit` (directly or through a helper that always does), or the route must be in the full (`AUDIT_EXEMPT`) or partial-branch (`AUDIT_BRANCH_EXEMPT`) list with a written reason. A route that audits one branch and returns 200 on another fails the build.
 4. Extend `.pi/tmp/e2e-audit-plan.md` and its runners **before writing the code**, with an ID that triggers the new behaviour against a running server and asserts it (success **and** refusal path). An ID in the plan that does not run fails the run; a behaviour without an ID is an incomplete change.
 5. Update `docs/` (`manage-users-and-server-settings.md` for behaviour, `api-reference.md` for fields, `cli-reference.md` for commands) — edit the `.md` only; CI builds the site.
 
@@ -441,8 +441,11 @@ as `simple_logger` builds it.
 
 The server enables **one** shared file handler (`logging_context.enable_log_file()`, called once
 from `rootcoz.main`'s module body); every module logger receives that same instance, so a module's
-records reach both the console (stderr) and `<data dir>/logs/rootcoz.log`, with identical text and
-the `[job_id=…]` prefix. Never pass `filename=` to a module logger, never create a second handler,
+records reach both the console (stderr), `<data dir>/logs/rootcoz.log` and the
+`/api/admin/logs/stream` SSE feed, with identical text and the `[job_id=…][user=…]` prefix
+(`[user=…]` alone on authenticated non-job requests; no tag on unauthenticated or background
+lines). Both filters strip `[`, `]`, whitespace and control characters from the tag text when the
+line is rendered, so a job id or username cannot forge a tag or split a line. Never pass `filename=` to a module logger, never create a second handler,
 and never install a second formatter — the file is not a parallel logging pipeline. The CLI and the
 test suite never enable it.
 

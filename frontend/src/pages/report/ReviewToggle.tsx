@@ -4,7 +4,7 @@ import { reviewKey } from '@/lib/reviewKey'
 import { putReviewed, notifyReviewChanged, scopedReviewState } from './failureUpdates'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { CheckCircle2 } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { cn, formatTimestamp, INVALID_DATE_FALLBACK } from '@/lib/utils'
 
 interface ReviewToggleProps {
   jobId: string
@@ -24,6 +24,12 @@ export function ReviewToggle({ jobId, testName, childJobName, childBuildNumber, 
   const reviewState = reviews[key]
   const reviewed = reviewState?.reviewed ?? false
   const reviewedBy = reviewState?.username ?? ''
+  // The immutable first-review moment; absent on reviews recorded before #566.
+  const reviewedAt = reviewState?.reviewed_at ? formatTimestamp(reviewState.reviewed_at) : ''
+  // Labelled, never "by <who> on <when>": the marker can be a later user, so the
+  // moment is the first review's, not theirs.
+  const firstReviewed =
+    reviewedAt && reviewedAt !== INVALID_DATE_FALLBACK ? ` · first reviewed ${reviewedAt}` : ''
 
   async function toggle() {
     setLoading(true)
@@ -32,7 +38,7 @@ export function ReviewToggle({ jobId, testName, childJobName, childBuildNumber, 
       const res = await putReviewed(jobId, { testName, childJobName, childBuildNumber }, !reviewed)
       dispatch({
         type: 'SET_REVIEW',
-        payload: { key, state: scopedReviewState(!reviewed, res.reviewed_by) },
+        payload: { key, state: scopedReviewState(!reviewed, res.reviewed_by, res.reviewed_at) },
       })
       // Notify AllReviewedPrompt to check if all failures are now reviewed.
       if (!reviewed) notifyReviewChanged(jobId)
@@ -45,7 +51,7 @@ export function ReviewToggle({ jobId, testName, childJobName, childBuildNumber, 
 
   const tooltipText = reviewed
     ? reviewedBy
-      ? `Reviewed by ${reviewedBy} — click to unmark`
+      ? `Reviewed by ${reviewedBy}${firstReviewed} — click to unmark`
       : 'Mark as unreviewed'
     : 'Mark as reviewed'
 
@@ -71,7 +77,7 @@ export function ReviewToggle({ jobId, testName, childJobName, childBuildNumber, 
             <CheckCircle2 className="h-3.5 w-3.5" />
             {reviewed ? 'Reviewed' : 'Review'}
             {reviewed && reviewedBy && (
-              <span className="text-signal-green/70">by {reviewedBy}</span>
+              <span className="text-signal-green/70">by {reviewedBy}{firstReviewed}</span>
             )}
           </button>
         </TooltipTrigger>

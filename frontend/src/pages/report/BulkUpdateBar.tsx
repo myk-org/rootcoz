@@ -151,7 +151,7 @@ export function BulkUpdateBar() {
                 type: 'SET_REVIEW',
                 payload: {
                   key: reviewKey(scope.testName, scope.childJobName, scope.childBuildNumber),
-                  state: scopedReviewState(request.next, res.reviewed_by),
+                  state: scopedReviewState(request.next, res.reviewed_by, res.reviewed_at),
                 },
               })
             }, BULK_BATCH_SIZE)

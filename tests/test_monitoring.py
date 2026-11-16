@@ -31,7 +31,7 @@ from rootcoz.monitoring import (
     server_error_share,
     validate_startup_config,
 )
-from tests.conftest import host_env
+from tests.conftest import host_env, make_app_client
 
 # ---------------------------------------------------------------------------
 # Rolling counter
@@ -1282,3 +1282,39 @@ async def test_the_instantaneous_trigger_is_untouched(monkeypatch) -> None:
     assert event_type == "high_error_rate"
     assert "75%" in message
     assert "(18/24 requests" in message, "the trigger's own 5xx/total wording survives"
+
+
+class TestAuthRefusalsAreCounted:
+    """Error tracking stays outermost: auth refusals are still request traffic."""
+
+    def test_a_401_is_counted_by_the_error_tracker(self, temp_db_path, monkeypatch):
+        from rootcoz import main as main_module
+
+        tracker = ErrorRateTracker(window_seconds=300.0)
+        monkeypatch.setattr(main_module, "error_tracker", tracker)
+
+        for client in make_app_client(temp_db_path):
+            assert client.get("/api/results").status_code == 401
+
+            assert tracker.snapshot()["error_counts"].get("4xx", 0) == 1
+
+    def test_a_non_admin_403_is_counted_by_the_error_tracker(
+        self, temp_db_path, monkeypatch
+    ):
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        tracker = ErrorRateTracker(window_seconds=300.0)
+        monkeypatch.setattr(main_module, "error_tracker", tracker)
+
+        for client in make_app_client(temp_db_path):
+            _, viewer_key = asyncio.run(
+                storage.create_user("mon-viewer", role="viewer")
+            )
+            response = client.get(
+                "/api/admin/component-versions",
+                headers={"Authorization": f"Bearer {viewer_key}"},
+            )
+            assert response.status_code == 403
+
+            assert tracker.snapshot()["error_counts"].get("4xx", 0) == 1

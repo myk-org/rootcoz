@@ -70,6 +70,10 @@ RESULT_FIELD_PATHS: frozenset[str] = frozenset(
         "result.failures.affected_tests",
         "result.failures.artifacts_evidence",
         "result.failures.peer_debate",
+        # The review projection attached by GET /results/{job_id} (#566).
+        "result.failures.reviewed",
+        "result.failures.reviewed_by",
+        "result.failures.reviewed_at",
     }
 )
 

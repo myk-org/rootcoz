@@ -78,7 +78,7 @@ export function scopeKey({ childJobName, childBuildNumber }: Pick<SelectedGroup,
 /* -- Per-failure endpoints (shared by the single-row controls and bulk bar) -- */
 
 export function putReviewed(jobId: string, scope: FailureScope, reviewed: boolean) {
-  return api.put<{ status: string; reviewed_by: string }>(`/results/${jobId}/reviewed`, {
+  return api.put<{ status: string; reviewed_by: string; reviewed_at?: string | null }>(`/results/${jobId}/reviewed`, {
     test_name: scope.testName,
     reviewed,
     ...scopeBody(scope),
@@ -142,8 +142,13 @@ function reviewActor(reviewedBy?: string) {
 }
 
 /** Optimistic review state after a successful /reviewed call. */
-export function scopedReviewState(reviewed: boolean, reviewedBy?: string): ReviewState {
-  return { reviewed, username: reviewActor(reviewedBy), updated_at: new Date().toISOString() }
+export function scopedReviewState(reviewed: boolean, reviewedBy?: string, reviewedAt?: string | null): ReviewState {
+  return {
+    reviewed,
+    username: reviewActor(reviewedBy),
+    updated_at: new Date().toISOString(),
+    reviewed_at: reviewed ? (reviewedAt ?? null) : null,
+  }
 }
 
 /** Flatten selected groups into one scope per affected test. */

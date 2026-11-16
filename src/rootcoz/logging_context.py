@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextvars
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -37,6 +38,25 @@ if TYPE_CHECKING:
     from typing import Any
 
 job_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("job_id", default="")
+# The authenticated actor, for the ``[user=<actor>]`` tag. Logging only: it is
+# deliberately not ``ai_client.ai_username``, which selects AI credentials and
+# is bound/reset per call site.
+user_var: contextvars.ContextVar[str] = contextvars.ContextVar("user", default="")
+
+#: Characters that could close a bracketed tag (``[``/``]``), split a log line
+#: (control chars) or make a tag ambiguous (whitespace).
+_TAG_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\[\]\s]")
+
+
+def sanitize_log_tag(value: str) -> str:
+    """The text a ``[job_id=…]``/``[user=…]`` tag may render.
+
+    Applied when the line is rendered (in both filters), so a value cannot
+    close its bracket, inject a fake tag or split a log line — whatever set the
+    variable.
+    """
+    return _TAG_UNSAFE_RE.sub("", value)
+
 
 # The server-enabled application log file. ``_ENABLED_LOG_FILE`` is the cache
 # key: when it is set, ``_FILE_HANDLER`` is the one handler every module logger
@@ -75,17 +95,27 @@ _FREE_SPACE_PROBE_SECONDS = 30.0
 
 
 class JobIdFilter(logging.Filter):
-    """Logging filter that prepends ``[job_id=<value>]`` to log messages.
+    """Logging filter that prepends ``[job_id=<value>][user=<value>]``.
 
-    When ``job_id`` is set in the current context, prepends the prefix.
-    When empty (e.g. startup, health checks), the message is unchanged.
-    Guards against duplicate prefixes when multiple handlers share this filter.
+    Each tag appears only when its context variable is set, in that order:
+    ``[job_id=j][user=u] ``, ``[user=u] ``, ``[job_id=j] `` or nothing. When
+    empty (e.g. startup, health checks, background work), the message is
+    unchanged. Guards against duplicate prefixes when multiple handlers share
+    this filter.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        jid = job_id_var.get("")
-        if jid:
-            prefix = f"[job_id={jid}] "
+        jid = sanitize_log_tag(job_id_var.get(""))
+        user = sanitize_log_tag(user_var.get(""))
+        raw_prefix = (f"[job_id={jid}]" if jid else "") + (
+            f"[user={user}]" if user else ""
+        )
+        if raw_prefix:
+            # A '%' left live in the prefix would become a format spec for a
+            # record whose args are rendered later.
+            prefix = (
+                raw_prefix.replace("%", "%%") if record.args else raw_prefix
+            ) + " "
             if not isinstance(record.msg, str) or not record.msg.startswith(prefix):
                 record.msg = f"{prefix}{record.msg}"
         return True
@@ -103,7 +133,7 @@ class RootcozDuplicateFilter(DuplicateFilter):
     cannot consume a repeat or mask one (#489).
     """
 
-    last_log: tuple[str, int, str, str] | None = None
+    last_log: tuple[str, int, str, str, str] | None = None
     repeated_number = 0
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -117,18 +147,24 @@ class RootcozDuplicateFilter(DuplicateFilter):
             # logs before it writes its row, so that would lose an audit row. A
             # record we cannot render is not a duplicate.
             return True
-        current = (record.module, record.levelno, job_id_var.get(""), rendered)
+        current = (
+            record.module,
+            record.levelno,
+            sanitize_log_tag(job_id_var.get("")),
+            sanitize_log_tag(user_var.get("")),
+            rendered,
+        )
         previous = getattr(self, "last_log", None)
         repeated = getattr(self, "repeated_number", 0)
         if current == previous:
             self.repeated_number = repeated + 1
             return False
         # The note is only ever quoted inside one originating context: the same
-        # module, level and job. A run ended by a job or level change says
-        # nothing on a record that belongs to another job — quoting it would move
-        # one job's rendered arguments onto another's line (today only the bare
+        # module, level, job and user. A run ended by a context change says
+        # nothing on a record that belongs to another one — quoting it would move
+        # one user's rendered arguments onto another's line (today only the bare
         # template moves), and a DEBUG run's text onto a WARNING.
-        if repeated > 1 and previous is not None and previous[:3] == current[:3]:
+        if repeated > 1 and previous is not None and previous[:4] == current[:4]:
             # ``record.args = None``: the note is appended to the *rendered* text,
             # so there is nothing left to format and no '%' to escape (the parent
             # escapes a template it is about to format again).

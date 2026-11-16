@@ -1,10 +1,10 @@
 import { useState, useCallback, useRef } from 'react'
 import { api } from '@/lib/api'
 import { completeAiPairOverride } from '@/lib/analysisAi'
-import { getUsername } from '@/lib/cookies'
 import { useReportState, useReportDispatch } from '@/pages/report/reportState'
 import { reviewKey } from '@/lib/reviewKey'
 import { useAiSelection } from '@/lib/useAiSelection'
+import { putReviewed, scopedReviewState } from './failureUpdates'
 
 /* ------------------------------------------------------------------ */
 /*  Hook                                                               */
@@ -71,16 +71,10 @@ export function useReviewSuggestion({ jobId, testName, childJobName, childBuildN
     setLoading(true)
     setError(null)
     try {
-      const res = await api.put<{ status: string; reviewed_by: string }>(`/results/${jobId}/reviewed`, {
-        test_name: testName,
-        reviewed: true,
-        child_job_name: childJobName ?? '',
-        child_build_number: childBuildNumber ?? 0,
-      })
-      const username = res.reviewed_by ?? getUsername()
+      const res = await putReviewed(jobId, { testName, childJobName, childBuildNumber }, true)
       dispatch({
         type: 'SET_REVIEW',
-        payload: { key, state: { reviewed: true, username, updated_at: new Date().toISOString() } },
+        payload: { key, state: scopedReviewState(true, res.reviewed_by, res.reviewed_at) },
       })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to mark as reviewed')
