@@ -1034,6 +1034,28 @@ class TestIsFullCommitSha:
         assert _is_full_commit_sha("main") is False
 
 
+class TestCloneFailureReasonAcrossGitVersions:
+    """git versions word an absent ref differently; the label must not follow git.
+
+    Measured on the same failing checkout: git 2.39.5 (the container) says
+    ``fatal: reference is not a tree``, git 2.56 (the host) says ``fatal: unable
+    to read tree``. Matching only the newer wording labelled that failure "Git
+    command failed", so the by-id rung lost its fallback and the user saw the
+    generic label -- green on the host, wrong on the image.
+    """
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            pytest.param(f"fatal: reference is not a tree: {'a' * 40}", id="git-2.39"),
+            pytest.param(f"fatal: unable to read tree ({'a' * 40})", id="git-2.56"),
+        ],
+    )
+    def test_an_absent_ref_is_commit_or_ref_not_found(self, stderr: str) -> None:
+        exc = GitCommandError("git checkout", 128, stderr=stderr)
+        assert clone_failure_reason(exc) == "Commit or ref not found"
+
+
 class TestCloneShaFlow:
     """A commit ref is fetched by id; the full clone is the fallback, not the first move."""
 
