@@ -2755,3 +2755,214 @@ describe('ServerSettingsPage inline editors (E2E-F28..F30)', () => {
     )
   })
 })
+
+// ---------------------------------------------------------------------------
+// #570 — sidecar transcript retention budgets and live directory usage
+// ---------------------------------------------------------------------------
+
+const AGE_KEY = 'pi_sidecar_transcripts_max_age_days'
+const SIZE_KEY = 'pi_sidecar_transcripts_max_size_mb'
+const AGE_ENV = 'PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS'
+const SIZE_ENV = 'PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB'
+const AGE_LABEL = 'Pi sidecar transcripts max age (days)'
+const SIZE_LABEL = 'Pi sidecar transcripts max size (MB)'
+
+function retentionSettings(): TestSetting[] {
+  return [
+    ...baseSettings(),
+    mk('pi_sidecar_transcripts_dir', 'Sidecar', '/data/pi-sidecar/transcripts', {
+      restart_required: true,
+    }),
+    mk(AGE_KEY, 'Sidecar', '0', {
+      type: 'integer',
+      restart_required: true,
+      label: AGE_LABEL,
+      description:
+        'Delete recorded pi-sidecar session transcripts older than this many days. ' +
+        '0 disables age-based pruning. Active sessions are never deleted. Restart required.',
+    }),
+    mk(SIZE_KEY, 'Sidecar', '0', {
+      type: 'integer',
+      restart_required: true,
+      label: SIZE_LABEL,
+      description:
+        'Maximum total size in MB for the pi-sidecar transcripts directory; oldest ' +
+        'files are deleted first when exceeded. 0 disables size-based pruning. ' +
+        'Active sessions are never deleted. Restart required.',
+    }),
+  ]
+}
+
+/** GET returns settings, except the server-status probe the usage card asks for. */
+function mockWithDisk(disk: Record<string, unknown> | 'fail') {
+  get.mockImplementation(async (url: unknown) => {
+    if (String(url) === '/api/admin/server-status') {
+      if (disk === 'fail') throw new Error('probe failed')
+      return { disk } as never
+    }
+    return retentionSettings() as never
+  })
+}
+
+const statusProbeCalls = () =>
+  get.mock.calls.filter(([url]) => String(url) === '/api/admin/server-status').length
+
+async function openSidecarTab() {
+  renderPage()
+  fireEvent.click(await screen.findByRole('tab', { name: 'Sidecar' }))
+  await waitForRow(AGE_KEY)
+}
+
+describe('ServerSettingsPage transcript retention (#570)', () => {
+  it('renders both budgets as restart rows with the 0-disables copy and no env var in row text', async () => {
+    get.mockResolvedValue(retentionSettings() as never)
+    await openSidecarTab()
+
+    for (const [key, envVar] of [[AGE_KEY, AGE_ENV], [SIZE_KEY, SIZE_ENV]] as const) {
+      const settingRow = row(key)!
+      expect(within(settingRow).getByLabelText('Restart required')).toBeInTheDocument()
+      expect(settingRow.textContent).toContain('0 disables')
+      // The env var lives in the label tooltip, never in permanent row text.
+      expect(settingRow.textContent).not.toContain(envVar)
+    }
+
+    // The label tooltip carries the identifier (the operator's link to .env).
+    expect(await envVarTooltip(AGE_LABEL)).toBe(AGE_ENV)
+    expect(await envVarTooltip(SIZE_LABEL)).toBe(SIZE_ENV)
+  })
+
+  it('saves a budget, and resets the DB override it became', async () => {
+    let stored: { value: string; source: 'default' | 'db' } = { value: '0', source: 'default' }
+    get.mockImplementation(async (url: unknown) => {
+      if (String(url) === '/api/admin/server-status') {
+        return { disk: { available: true, transcripts_bytes: 0, transcripts_files: 0 } } as never
+      }
+      return retentionSettings().map((s) =>
+        s.key === AGE_KEY ? { ...s, ...stored } : s,
+      ) as never
+    })
+    put.mockImplementation(async () => {
+      stored = { value: '14', source: 'db' }
+      return {} as never
+    })
+    await openSidecarTab()
+
+    fireEvent.click(screen.getByRole('button', { name: `Edit ${AGE_ENV}` }))
+    fireEvent.change(screen.getByLabelText(`Edit ${AGE_ENV}`), { target: { value: '14' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { [AGE_KEY]: '14' } }),
+    )
+    // The refetched row is a DB override: shown as saved, with the db badge.
+    await waitFor(() => expect(row(AGE_KEY)!.textContent).toContain('14'))
+    expect(within(row(AGE_KEY)!).getByText('db')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: `Edit ${AGE_ENV}` }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reset to default' }))
+    await waitFor(() =>
+      expect(vi.mocked(api.delete)).toHaveBeenCalledWith(`/api/admin/settings/${AGE_KEY}`),
+    )
+  })
+
+  it('shows the server refusal of a negative budget', async () => {
+    get.mockResolvedValue(retentionSettings() as never)
+    const err = new ApiError(0, '', null)
+    err.status = 400
+    err.body = { detail: `${AGE_KEY}: must be >= 0` }
+    put.mockRejectedValueOnce(err as never)
+    await openSidecarTab()
+
+    fireEvent.click(screen.getByRole('button', { name: `Edit ${AGE_ENV}` }))
+    fireEvent.change(screen.getByLabelText(`Edit ${AGE_ENV}`), { target: { value: '-1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('must be >= 0')
+    // The editor keeps the refused draft: nothing was saved over the row.
+    expect(screen.getByLabelText(`Edit ${AGE_ENV}`)).toHaveValue(-1)
+  })
+
+  it('fetches the transcript usage only while the Sidecar rows are visible', async () => {
+    mockWithDisk({
+      available: true,
+      transcripts_bytes: 2048,
+      transcripts_files: 3,
+      transcripts_oldest_age_seconds: 172800,
+    })
+    renderPage()
+    await waitForRow('public_base_url')
+    expect(statusProbeCalls()).toBe(0)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Jenkins' }))
+    await waitForRow('jenkins_url')
+    expect(statusProbeCalls()).toBe(0)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Sidecar' }))
+    expect(await screen.findByText('2.0 KiB · 3 files · oldest: 2d 0h')).toBeInTheDocument()
+    expect(statusProbeCalls()).toBe(1)
+
+    // The manual Refresh button re-probes without leaving the tab.
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(statusProbeCalls()).toBe(2))
+  })
+
+  it('re-probes when the tab is reopened while an earlier probe is pending', async () => {
+    let resolveFirst: (value: unknown) => void = () => {}
+    const firstProbe = new Promise((resolve) => { resolveFirst = resolve })
+    let probes = 0
+    get.mockImplementation(async (url: unknown) => {
+      if (String(url) === '/api/admin/server-status') {
+        probes += 1
+        if (probes === 1) return firstProbe as never
+        return {
+          disk: { available: true, transcripts_bytes: 1024, transcripts_files: 1, transcripts_oldest_age_seconds: 60 },
+        } as never
+      }
+      return retentionSettings() as never
+    })
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Sidecar' }))
+    await waitForRow(AGE_KEY)
+    await waitFor(() => expect(statusProbeCalls()).toBe(1))
+
+    // Leave and come straight back before the first probe resolves: the card is
+    // visible again, so it must ask again instead of waiting for a manual refresh.
+    fireEvent.click(screen.getByRole('tab', { name: 'Jenkins' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Sidecar' }))
+    await waitFor(() => expect(statusProbeCalls()).toBe(2))
+    expect(await screen.findByText('1.0 KiB · 1 file · oldest: 1m 0s')).toBeInTheDocument()
+
+    // The abandoned request resolving late must not overwrite the fresh answer.
+    await act(async () => {
+      resolveFirst({ disk: { available: true, transcripts_bytes: 0, transcripts_files: 0 } })
+    })
+    expect(screen.getByText('1.0 KiB · 1 file · oldest: 1m 0s')).toBeInTheDocument()
+  })
+
+  it('shows an empty transcripts directory as 0 B, 0 files and no oldest age', async () => {
+    mockWithDisk({
+      available: true,
+      transcripts_bytes: 0,
+      transcripts_files: 0,
+      transcripts_oldest_age_seconds: null,
+    })
+    await openSidecarTab()
+    expect(await screen.findByText('0 B · 0 files · oldest: none')).toBeInTheDocument()
+  })
+
+  it('says the probe is not visible instead of fabricating 0 B', async () => {
+    mockWithDisk({
+      available: true,
+      transcripts_bytes: null,
+      transcripts_files: null,
+      transcripts_oldest_age_seconds: null,
+    })
+    await openSidecarTab()
+    expect(await screen.findByText('not visible in this container')).toBeInTheDocument()
+  })
+
+  it('says the probe is not visible when the status request fails', async () => {
+    mockWithDisk('fail')
+    await openSidecarTab()
+    expect(await screen.findByText('not visible in this container')).toBeInTheDocument()
+  })
+})

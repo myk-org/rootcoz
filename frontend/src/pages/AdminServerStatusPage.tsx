@@ -19,30 +19,18 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table'
 import { formatBytes, formatUptime } from '@/lib/format'
 import { formatRelativeTime } from '@/lib/utils'
+import type { ServerStatusDisk, ServerStatusProbeBlock } from '@/types'
 
 /**
  * Payload of GET /api/admin/server-status (src/rootcoz/server_status.py).
  *
+ * The disk and probe-block shapes are shared with the Server Settings page's
+ * transcript usage card — they live in `@/types` so there is one definition.
  * Every probe block carries its own `available` flag and a `reason` when it
  * could not read what it needs — those blocks must render as "not visible",
  * never as zeroes that look healthy.
  */
-interface ProbeBlock {
-  available: boolean
-  reason?: string
-}
-
-interface DiskBlock extends ProbeBlock {
-  used_bytes?: number
-  capacity_bytes?: number
-  used_ratio?: number | null
-  filesystem_note?: string
-  database_bytes?: number | null
-  transcripts_bytes?: number | null
-  logs_bytes?: number | null
-}
-
-interface CpuBlock extends ProbeBlock {
+interface CpuBlock extends ServerStatusProbeBlock {
   process_percent?: number
   quota_cores?: number | null
   /** "unknown" is a cpu.max that could not be read — never "unlimited". */
@@ -50,7 +38,7 @@ interface CpuBlock extends ProbeBlock {
   period_us?: number | null
 }
 
-interface MemoryBlock extends ProbeBlock {
+interface MemoryBlock extends ServerStatusProbeBlock {
   rss_bytes?: number | null
   current_bytes?: number
   working_set_bytes?: number | null
@@ -61,7 +49,7 @@ interface MemoryBlock extends ProbeBlock {
   percent_of_limit?: number | null
 }
 
-interface DatabaseBlock extends ProbeBlock {
+interface DatabaseBlock extends ServerStatusProbeBlock {
   size_bytes?: number | null
   results?: number
   failures?: number
@@ -116,7 +104,7 @@ interface HealthMonitorCondition {
   age_known: boolean
 }
 
-interface HealthMonitorBlock extends ProbeBlock {
+interface HealthMonitorBlock extends ServerStatusProbeBlock {
   enabled?: boolean
   interval_seconds?: number
   /** null means it has not sampled yet — not "just sampled". */
@@ -131,7 +119,7 @@ interface ServerWarning {
 }
 
 export interface ServerStatus {
-  disk: DiskBlock
+  disk: ServerStatusDisk
   cpu: CpuBlock
   memory: MemoryBlock
   process: ProcessBlock

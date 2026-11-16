@@ -135,6 +135,8 @@ spec:
             {{- end }}
             - name: PI_SIDECAR_TRANSCRIPTS_DIR
               value: {{ .Values.env.sidecarTranscriptsDir | default (printf "%s/pi-sidecar/transcripts" .Values.env.xdgDataHome) | quote }}
+            {{- include "rootcoz.retentionEnv" (dict "name" "PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS" "value" .Values.env.sidecarTranscriptsMaxAgeDays) }}
+            {{- include "rootcoz.retentionEnv" (dict "name" "PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB" "value" .Values.env.sidecarTranscriptsMaxSizeMb) }}
             {{- if $ephemeralLimit }}
             # Clones and graph indexes land under /tmp; TMPDIR keeps tempfile on the
             # capped volume instead of assuming the interpreter default.

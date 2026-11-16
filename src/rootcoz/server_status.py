@@ -155,33 +155,76 @@ def _tree_size(path: pathlib.Path) -> int | None:
     None when it is absent *or* when any part of it could not be read: a
     partial total would be shown as a real size.
     """
+    return _walk_tree_stats(path)[0]
+
+
+def _walk_tree_stats(
+    path: pathlib.Path,
+    *,
+    count_top_jsonl: bool = False,
+    now: float | None = None,
+) -> tuple[int | None, int | None, int | None]:
+    """One stat-only pass over ``path``: (bytes, files, oldest age seconds).
+
+    ``None`` for the total when the directory is absent or any part of it
+    could not be read: a partial total would be shown as a real size. The
+    file count and oldest-file age are collected only with
+    ``count_top_jsonl``, and mirror the sidecar's pruning scope: top-level
+    ``*.jsonl`` regular files, never the contents of a file (a large
+    transcript directory must not stall a status poll).
+
+    Symlinks are skipped: an entry inside the directory must not report the
+    size or mtime of a file outside it.
+    """
     if path.is_file():
         try:
-            return path.stat().st_size
+            return path.stat().st_size, None, None
         except OSError:
-            return None
+            return None, None, None
     if not path.is_dir():
-        return None
+        return None, None, None
     total = 0
+    files: int | None = 0 if count_top_jsonl else None
+    oldest_mtime: float | None = None
     errors: list[OSError] = []
-    for root, _dirs, files in os.walk(path, onerror=errors.append):
-        for name in files:
+    for root, _dirs, names in os.walk(path, onerror=errors.append):
+        at_top = pathlib.Path(root) == path
+        for name in names:
+            full = os.path.join(root, name)
+            if os.path.islink(full):
+                continue
             try:
-                total += os.path.getsize(os.path.join(root, name))
+                size = os.path.getsize(full)
+                mtime = None
+                if count_top_jsonl and at_top and name.endswith(".jsonl"):
+                    mtime = os.path.getmtime(full)
             except FileNotFoundError:
                 # Cleanup or rotation removed it between the walk listing it
                 # and the stat: a vanished file is not an unreadable subtree.
                 continue
             except OSError as exc:
                 errors.append(exc)
+                continue
+            # Counted only once both stats landed, so a file pruned between
+            # them contributes neither bytes nor a file entry.
+            total += size
+            if mtime is not None and files is not None:
+                files += 1
+                oldest_mtime = (
+                    mtime if oldest_mtime is None else min(oldest_mtime, mtime)
+                )
     if errors:
         logger.debug(
-            "Server status: %d unreadable path(s) under %s, size unknown",
+            "Server status: %d unreadable path(s) under %s, stats unknown",
             len(errors),
             path,
         )
-        return None
-    return total
+        return None, None, None
+    oldest_age = None
+    if files and oldest_mtime is not None:
+        sampled_at = time.time() if now is None else now
+        oldest_age = max(0, int(sampled_at - oldest_mtime))
+    return total, files, oldest_age
 
 
 # ---------------------------------------------------------------------------
@@ -406,9 +449,12 @@ def read_disk(
     Reuses the ``read_data_usage`` probe /metrics already relies on, so the two
     surfaces can never disagree about the same filesystem.
     """
+    transcripts_stats = _walk_tree_stats(transcripts_dir, count_top_jsonl=True)
     breakdown = {
         "database_bytes": _db_size_bytes(pathlib.Path(db_path)),
-        "transcripts_bytes": _tree_size(transcripts_dir),
+        "transcripts_bytes": transcripts_stats[0],
+        "transcripts_files": transcripts_stats[1],
+        "transcripts_oldest_age_seconds": transcripts_stats[2],
         "logs_bytes": _tree_size(log_dir) if log_dir else None,
     }
     usage = read_data_usage(str(db_path))

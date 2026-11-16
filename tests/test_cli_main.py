@@ -5216,9 +5216,53 @@ class TestAdminServerStatusCommand:
         assert "Data directory is 75% full" in result.output
         # The breakdown label names the database, not the whole data dir.
         assert "(database 1.0 KiB" in result.output
+        # A server that reports no file count keeps the plain byte total.
+        assert "transcripts 2.0 KiB," in result.output
         # Each running analysis is listed with its own elapsed time.
         assert "nightly #7 running for 3600s" in result.output
         assert "2 chat turns in flight" in result.output
+
+    def test_server_status_transcript_file_count_and_oldest_age(self, mock_client):
+        disk = {**self._PAYLOAD["disk"]}
+        mock_client.server_status.return_value = {
+            **self._PAYLOAD,
+            "disk": {
+                **disk,
+                "transcripts_files": 0,
+                "transcripts_oldest_age_seconds": None,
+            },
+            "warnings": [],
+        }
+        result = runner.invoke(app, ["admin", "server-status"])
+        assert result.exit_code == 0
+        assert "transcripts 2.0 KiB (0 files)" in result.output
+
+        mock_client.server_status.return_value = {
+            **self._PAYLOAD,
+            "disk": {
+                **disk,
+                "transcripts_files": 3,
+                "transcripts_oldest_age_seconds": 172800,
+            },
+            "warnings": [],
+        }
+        result = runner.invoke(app, ["admin", "server-status"])
+        assert result.exit_code == 0
+        assert "transcripts 2.0 KiB (3 files, oldest 2d 0h)" in result.output
+
+        # One file is singular; a count without an age keeps the count only.
+        mock_client.server_status.return_value = {
+            **self._PAYLOAD,
+            "disk": {
+                **disk,
+                "transcripts_files": 1,
+                "transcripts_oldest_age_seconds": None,
+            },
+            "warnings": [],
+        }
+        result = runner.invoke(app, ["admin", "server-status"])
+        assert result.exit_code == 0
+        assert "transcripts 2.0 KiB (1 file)" in result.output
 
     def _monitor_payload(self, **overrides) -> dict:
         block: dict = {

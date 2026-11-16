@@ -327,7 +327,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
 14. **Sidecar category** (added with #347 — restart required).
 
-    The pi-sidecar starts **once** at container boot and reads these from its process environment. A value saved here is persisted to `/data/pi-sidecar/env`, which the container entrypoint sources before starting the sidecar — the same bridge `RECORD_TRANSCRIPTS` uses. An empty field means "no override": the deployment environment governs.
+    The pi-sidecar starts **once** at container boot and reads these from its process environment. A value saved here is persisted to `/data/pi-sidecar/env`, which the container entrypoint sources before starting the sidecar — the same bridge `RECORD_TRANSCRIPTS` uses. Having no database override lets the deployment environment govern, and `Reset` (or `DELETE /api/admin/settings/{key}`) removes the override and falls back to it. Saving `""` is a different thing: on the string fields above it stores an explicit blank override that beats the deployment environment (that is how you clear, say, `CLI_AGENTS`), while the integer fields (`PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS`, `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB`, `SIDECAR_PORT`) and `sidecar_host`/`sidecar_port` reject an empty save with `400`. On both retention budgets `0` disables that budget.
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -339,8 +339,10 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     | `PI_SIDECAR_LOG_LEVEL` | empty | string | no | **yes** | yes (restart) |
     | `NODE_BINARY` | empty | string | no | **yes** | yes (restart) |
     | `PI_SIDECAR_TRANSCRIPTS_DIR` | empty | string | no | **yes** | yes (restart) |
+    | `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` | `0` | integer 0–999999 | no | **yes** | yes (restart) |
+    | `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB` | `0` | integer 0–999999999 | no | **yes** | yes (restart) |
 
-    `SIDECAR_HOST` accepts only values the container's loopback health probe can still reach: loopback addresses, `0.0.0.0`/`::` (wildcard binds that also answer on `127.0.0.1`), or empty. A specific non-loopback address is rejected with a `400` on save — the entrypoint probes `http://127.0.0.1:$SIDECAR_PORT` before every boot and aborts when it fails, so such a value would brick every restart. `0.0.0.0` is accepted with a trust warning: the sidecar will listen on an external interface, the same trust class as `TRUST_PROXY_HEADERS` — only do it on a network you control. `SIDECAR_PORT` must be an integer between 1 and 65535. When `SIDECAR_PORT` is overridden and `SIDECAR_URL` is not set, rootcoz derives `SIDECAR_URL=http://127.0.0.1:<port>` so the Python client follows the listener; an explicit `SIDECAR_URL` always wins. Because the derived value is exported into the process environment, `SIDECAR_URL` shows as env-sourced in Server Settings, but the persist path rejects it — persisting the derived URL would pin it and silently beat the port derivation after a later `sidecar_port` change. Persist `sidecar_port` instead.
+    `SIDECAR_HOST` accepts only values the container's loopback health probe can still reach: loopback addresses, `0.0.0.0`/`::` (wildcard binds that also answer on `127.0.0.1`), or empty. A specific non-loopback address is rejected with a `400` on save — the entrypoint probes `http://127.0.0.1:$SIDECAR_PORT` before every boot and aborts when it fails, so such a value would brick every restart. `0.0.0.0` is accepted with a trust warning: the sidecar will listen on an external interface, the same trust class as `TRUST_PROXY_HEADERS` — only do it on a network you control. `SIDECAR_PORT` must be an integer between 1 and 65535. When `SIDECAR_PORT` is overridden and `SIDECAR_URL` is not set, rootcoz derives `SIDECAR_URL=http://127.0.0.1:<port>` so the Python client follows the listener; an explicit `SIDECAR_URL` always wins. Because the derived value is exported into the process environment, `SIDECAR_URL` shows as env-sourced in Server Settings, but the persist path rejects it — persisting the derived URL would pin it and silently beat the port derivation after a later `sidecar_port` change. Persist `sidecar_port` instead. The two transcript retention budgets have no runtime toggle in the sidecar — unlike `RECORD_TRANSCRIPTS` — so a saved budget applies at the next restart; see [Transcript retention](#transcript-retention).
 
 15. **Storage category** (added with #455).
 
@@ -478,6 +480,8 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `PI_SIDECAR_LOG_LEVEL` | `pi_sidecar_log_level` | Sidecar | restart (env bridge) |
 | `NODE_BINARY` | `node_binary` | Sidecar | restart (env bridge) |
 | `PI_SIDECAR_TRANSCRIPTS_DIR` | `pi_sidecar_transcripts_dir` | Sidecar | restart (env bridge) |
+| `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` | `pi_sidecar_transcripts_max_age_days` | Sidecar | restart (env bridge) |
+| `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB` | `pi_sidecar_transcripts_max_size_mb` | Sidecar | restart (env bridge) |
 | `RESULTS_RETENTION_DAYS` | `results_retention_days` | Storage | runtime |
 | `RESULTS_MAX_ROWS` | `results_max_rows` | Storage | runtime |
 | `DB_PATH` | — (no setting) | excluded | env-only |
@@ -494,8 +498,6 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `GOOGLE_APPLICATION_CREDENTIALS` | — (no setting) | excluded | env-only (Vertex gcloud credential mount) |
 | `CLOUDSDK_CONFIG` | — (no setting) | excluded | env-only (Vertex gcloud config mount) |
 | `PI_SIDECAR_AGENT_DIR` | — (no setting) | excluded | env-only (sidecar agent dir) |
-| `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` | — (no setting) | excluded | env-only (sidecar pruning) |
-| `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB` | — (no setting) | excluded | env-only (sidecar pruning) |
 | `ROOTCOZ_BUILD_COMMIT` | — (no setting) | Build | restart (image build) |
 | `ROOTCOZ_BUILD_REF` | — (no setting) | Build | restart (image build) |
 | `ROOTCOZ_BUILD_BUILT_AT` | — (no setting) | Build | restart (image build) |
@@ -544,22 +546,30 @@ They reach the image through whatever builds it:
 
 The footer reads `v<version> · <ref>@<commit>` whenever the ref is not the release itself; a ref equal to the version (a release build) and an image with no args both render the bare `v<version>`.
 
-#### Transcript retention
-
-Recording is **off by default** — an administrator must enable it (Server Settings → AI or `RECORD_TRANSCRIPTS`), and rootcoz never deletes transcript files. Retention is the sidecar's pruning job, controlled by two env vars it reads at container start:
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` | `0` (disabled) | Delete transcript files older than this many days |
-| `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB` | `0` (disabled) | Keep the transcripts directory under this total size |
-
-Both defaults mean **no pruning**: every recorded session stays until an operator sets a budget or cleans the directory manually. The pruning is best-effort and runs from the sidecar's session activity — at most one scan per minute, only when sessions are created or turns are written — and **active sessions are never pruned**, so a long-running session (or an idle sidecar) can exceed the age or size budget temporarily. Plan disk usage accordingly — a transcript stores the full redacted turn history of its session.
-
 `gemini` resolves to the `google` provider, and `GEMINI_API_KEY` is the credential RootCoz documents and charts for it (`ai.provider=gemini` pairs with `ai.geminiApiKey`). `gemini auth login` is a host-side login for the standalone Gemini CLI; the sidecar exposes that agent under its own provider id — `cli-gemini`, the canonical form of the legacy `gemini-cli` name — not under `google`, so it is not a substitute for `GEMINI_API_KEY` on the `gemini` alias. For `claude`, see the resolution rules above: the alias maps to `google-vertex-claude`, so `ANTHROPIC_API_KEY` on its own is not the credential that provider uses — the Vertex path is. RootCoz passes the environment through to the sidecar and cannot say which credentials a provider accepts, so confirm the requirement in that provider's own documentation.
 
 RootCoz does not read the Vertex trio itself — `config.py` documents them as variables the Claude CLI consumes, and the server only passes them through the process environment to the sidecar. What this repo guarantees is limited to that pass-through. The Helm chart is the more useful reference, because it treats Vertex as a unit: setting `ai.vertex.enabled` writes `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`, and `ANTHROPIC_VERTEX_PROJECT_ID`, and separately mounts `ai.vertex.serviceAccountKey` and points `GOOGLE_APPLICATION_CREDENTIALS` at the mounted `application_default_credentials.json`. Install fails outright if `ai.vertex.enabled` is set without `ai.vertex.projectId` or `ai.vertex.serviceAccountKey`, so the chart's own definition of "Vertex enabled" includes a credential file, not just the three variables above.
 
 Whether the provider ends up registered and usable, and what credentials it actually requires, is decided inside the Pi-sidecar and the Anthropic Vertex tooling, not here. For the authoritative credential requirements, follow the Anthropic Claude Code on Vertex AI documentation rather than treating the trio as self-sufficient. This matters for `AI_PROVIDER=claude` in particular, because that alias resolves to the `google-vertex-claude` provider — so Vertex is the path on which `claude` is expected to resolve at all.
+
+### Transcript retention
+
+Recording is **off by default** — an administrator must enable it (Server Settings → AI or `RECORD_TRANSCRIPTS`), and rootcoz never deletes transcript files. Retention is the sidecar's pruning job, controlled by two budgets it reads at container start:
+
+| Setting | Variable | Default | Bounds | Meaning |
+| --- | --- | --- | --- | --- |
+| `pi_sidecar_transcripts_max_age_days` | `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` | `0` (disabled) | `0`–`999999` | Delete transcript files older than this many days |
+| `pi_sidecar_transcripts_max_size_mb` | `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB` | `0` (disabled) | `0`–`999999999` | Keep the transcripts directory under this total size |
+
+Both defaults mean **no pruning**: every recorded session stays until an operator sets a budget or cleans the directory manually. Set them wherever the deployment is configured:
+
+- **Server Settings → `Sidecar`** — saved to the database and written to `/data/pi-sidecar/env`, which the entrypoint sources at the next container start. This is the way to override a value the Compose file or chart already set (`0` disables a budget a deployment env enabled).
+- **Docker Compose** — `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` / `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB` in the shell or in `.env`; the bundled `docker-compose.yaml` passes both through when they are set and leaves them unset otherwise.
+- **Helm** — `env.sidecarTranscriptsMaxAgeDays` / `env.sidecarTranscriptsMaxSizeMb`; the template renders the env var only when the value is set, so the default pod template stays unchanged on upgrade. While the chart value is empty the env name stays available to `sidecar.agentDir.env` (and to a value an earlier release preserved in the credentials Secret), so an upgrade never silently stops pruning; setting the chart value takes the name over and rejects an `sidecar.agentDir.env` entry for it.
+
+A value that is **not a whole number in range never blocks startup**. Both variables were env-only before they became server settings, and the sidecar parses them with `Number()`, so a deployment may already hold `0.5` or `1500.5`. RootCoz reads such a value as unusable: it logs one warning at boot and treats that budget as `0` (disabled) — an existing deployment env still governs the sidecar until a Server Settings override is saved, and the server always comes up. The write paths (Server Settings, `rootcoz admin settings set`, import) stay strict and refuse a fractional or out-of-range value with `400`.
+
+A budget needs a **restart** in every one of those surfaces: unlike `RECORD_TRANSCRIPTS`, the sidecar exposes no runtime toggle for it, which is why the Server Settings rows carry the ⚠️ badge. The pruning itself is best-effort and runs from the sidecar's session activity — at most one scan per minute, only when sessions are created or turns are written — and **active sessions are never pruned**, so a long-running session (or an idle sidecar) can exceed the age or size budget temporarily. Plan disk usage accordingly — a transcript stores the full redacted turn history of its session. `GET /api/admin/server-status` (and `rootcoz admin server-status`) reports the live directory usage: total bytes, the top-level `.jsonl` file count, and the oldest file's age.
 
 ### Sidecar custom providers (agent dir)
 
@@ -692,7 +702,7 @@ The chart stores the files in a Secret, copies them into a writable agent dir at
 
 ### Helm chart coverage
 
-The Helm chart exists for the bootstrap-only variables, since those cannot be set after login:
+The Helm chart exists for the bootstrap-only variables, since those cannot be set after login, plus the integration settings `chart/values.yaml` documents (Jenkins, Jira, GitHub, Report Portal, notifications and feature toggles):
 
 | Chart value | Variable |
 | --- | --- |
@@ -707,10 +717,11 @@ The Helm chart exists for the bootstrap-only variables, since those cannot be se
 | `env.xdgDataHome`, `env.xdgConfigHome` | `XDG_DATA_HOME`, `XDG_CONFIG_HOME` |
 | `env.secureCookies`, `env.publicBaseUrl` | `SECURE_COOKIES`, `PUBLIC_BASE_URL`; both auto-derived when left empty, as described below |
 | `env.metadataRulesFile` | `METADATA_RULES_FILE` |
+| `env.recordTranscripts`, `env.sidecarTranscriptsDir`, `env.sidecarTranscriptsMaxAgeDays`, `env.sidecarTranscriptsMaxSizeMb` | `RECORD_TRANSCRIPTS`, `PI_SIDECAR_TRANSCRIPTS_DIR`, `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS`, `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB`; the two budgets render only when set, and empty means "no env var", not "disabled" (which is `0`) |
 | `tuning.logLevel` | `LOG_LEVEL` |
 | `route.*`, `ingress.*` | Routing for the deployment, including the derived `PUBLIC_BASE_URL` origin |
 
-`admin.key` and `encryptionKey` are auto-generated on first install when empty. Database-configurable fields deliberately have no chart values — the chart comment says so explicitly, and you set those from Server Settings after the first login.
+`admin.key` and `encryptionKey` are auto-generated on first install when empty. Database-configurable fields outside the table have no chart values — the chart comment says so explicitly — and you set those from Server Settings after the first login.
 
 When `env.secureCookies` and `env.publicBaseUrl` are left empty, the chart derives them in `_helpers.tpl`, and the two do not follow the same rule:
 

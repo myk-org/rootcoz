@@ -7,7 +7,7 @@ import time
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -50,6 +50,13 @@ SQLITE_INT_MAX = 2**63 - 1
 # Ceiling for the results-retention age limit (100 years), the same order of
 # magnitude the audit settings accept.
 RESULTS_RETENTION_DAYS_MAX = 36500
+
+# Ceilings for the pi-sidecar transcript retention budgets. The sidecar
+# multiplies them by 86_400_000 and 1_048_576, so these keep its arithmetic
+# inside Number.MAX_SAFE_INTEGER, and they match the Helm schema's digit
+# limits one to one.
+SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS = 999_999
+SIDECAR_TRANSCRIPTS_MAX_SIZE_MB = 999_999_999
 
 
 def _split_outside_brackets(raw: str) -> list[str]:
@@ -905,6 +912,70 @@ class Settings(BaseSettings):
             "(PI_SIDECAR_TRANSCRIPTS_DIR). Restart required."
         ),
     )
+    pi_sidecar_transcripts_max_age_days: int = Field(
+        default=0,
+        ge=0,
+        le=SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS,
+        description=(
+            "Delete recorded pi-sidecar session transcripts older than this "
+            "many days. 0 disables age-based pruning. Active sessions are "
+            "never deleted. A deployment env value that is not a whole number "
+            "in range is ignored with a warning and reads as 0. Restart required."
+        ),
+    )
+    pi_sidecar_transcripts_max_size_mb: int = Field(
+        default=0,
+        ge=0,
+        le=SIDECAR_TRANSCRIPTS_MAX_SIZE_MB,
+        description=(
+            "Maximum total size in MB for the pi-sidecar transcripts "
+            "directory; oldest files are deleted first when exceeded. "
+            "0 disables size-based pruning. Active sessions are never "
+            "deleted. A deployment env value that is not a whole number "
+            "in range is ignored with a warning and reads as 0. Restart required."
+        ),
+    )
+
+    @field_validator(
+        "pi_sidecar_transcripts_max_age_days",
+        "pi_sidecar_transcripts_max_size_mb",
+        mode="before",
+    )
+    @classmethod
+    def _unusable_retention_budget_disables(
+        cls, v: object, info: ValidationInfo
+    ) -> object:
+        """A blank, fractional or out-of-range value means 0 (disabled).
+
+        Both budgets were env-only before #570 and the sidecar reads them with
+        ``Number()``, so a deployment may already hold ``0.5``: a pre-existing
+        env value must never keep ``Settings()`` (and the app) from booting.
+        Anything that is not a whole number within the field's own bounds
+        disables that budget with one warning. The admin-typed write paths stay
+        strict — they check the same bounds first and answer 400, so a form
+        value never reaches this validator.
+        """
+        if v == "":
+            return 0
+        try:
+            number = None if isinstance(v, bool) else int(str(v).strip())
+        except ValueError:
+            number = None
+        field = cls.model_fields[info.field_name]
+        low = next(
+            (m.ge for m in field.metadata if getattr(m, "ge", None) is not None), 0
+        )
+        high = next(
+            (m.le for m in field.metadata if getattr(m, "le", None) is not None), None
+        )
+        if number is None or number < low or (high is not None and number > high):
+            logger.warning(
+                "Ignoring unusable %s value %r; using 0 (disabled)",
+                info.field_name,
+                v,
+            )
+            return 0
+        return number
 
     # --- Notifications (#347) ---
     smtp_host: str = Field(default="", description="SMTP server host for email alerts.")

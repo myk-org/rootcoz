@@ -773,3 +773,30 @@ export interface DefaultServerSettings {
   prow_url: string
   gcs_bucket: string
 }
+
+/**
+ * Shared shape of one GET /api/admin/server-status probe block.
+ *
+ * Every probe block carries its own `available` flag and a `reason` when it
+ * could not read what it needs — those blocks must render as "not visible",
+ * never as zeroes that look healthy.
+ */
+export interface ServerStatusProbeBlock {
+  available: boolean
+  reason?: string
+}
+
+/** The `disk` block: filesystem usage plus the pieces under the data dir. */
+export interface ServerStatusDisk extends ServerStatusProbeBlock {
+  used_bytes?: number
+  capacity_bytes?: number
+  used_ratio?: number | null
+  filesystem_note?: string
+  database_bytes?: number | null
+  transcripts_bytes?: number | null
+  /** Top-level `*.jsonl` files — the sidecar's pruning scope; null if unknown. */
+  transcripts_files?: number | null
+  /** Age of the oldest counted file; null when there are none or it is unknown. */
+  transcripts_oldest_age_seconds?: number | null
+  logs_bytes?: number | null
+}

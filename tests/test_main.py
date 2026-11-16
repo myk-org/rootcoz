@@ -16706,6 +16706,21 @@ class TestAdminSettingsExportImport:
         assert detail.count("jenkins_timeout") == 1
         assert "must be an integer" in detail
 
+    def test_put_integer_persists_the_validated_value(self, test_client) -> None:
+        """A float field value is persisted as the model validated it.
+
+        ``1.5`` passes the manual bound check as ``int(1.5) == 1``, then the
+        before-validators fall back (720 hours, port 587). Persisting the raw
+        integer stored ``1`` hour and ``1`` SMTP port instead (#570 Qodo).
+        """
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"session_ttl_hours": 1.5, "smtp_port": 1.5}},
+        )
+        assert response.status_code == 200, response.text
+        assert _settings_item(test_client, "session_ttl_hours")["value"] == "720"
+        assert _settings_item(test_client, "smtp_port")["value"] == "587"
+
     def test_import_bad_integer_reports_single_error(self, test_client) -> None:
         """Same dedupe guarantee on the import (422) path."""
         response = test_client.post(

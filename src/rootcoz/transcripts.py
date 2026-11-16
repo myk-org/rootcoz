@@ -113,6 +113,12 @@ def write_sidecar_env_bridge(values: dict[str, str | None]) -> None:
         ENV_BRIDGE_PATH.write_text(
             "\n".join(lines) + "\n" if lines else "# no DB overrides for the sidecar\n"
         )
+        # Variable names only — values can be credentials.
+        logger.debug(
+            "Wrote sidecar env bridge at %s (overridden keys=%s)",
+            ENV_BRIDGE_PATH,
+            sorted(var for var, value in values.items() if value is not None),
+        )
     except OSError:
         logger.warning("Unable to write sidecar env bridge at %s", ENV_BRIDGE_PATH)
 

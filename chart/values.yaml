@@ -196,6 +196,12 @@ env:
   recordTranscripts: false
   # Override the transcripts directory (default: <xdgDataHome>/pi-sidecar/transcripts)
   sidecarTranscriptsDir: ""
+  # pi-sidecar transcript retention budgets (restart required — the sidecar
+  # reads them at process start; Server Settings → Sidecar manages the same
+  # values through the /data/pi-sidecar/env bridge). 0 disables a budget.
+  # Empty renders no env var, so an upgrade never rolls the pod for them.
+  sidecarTranscriptsMaxAgeDays: ""
+  sidecarTranscriptsMaxSizeMb: ""
 
 tuning:
   # → LOG_LEVEL (omit for app default INFO)

@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 from rootcoz import main, monitoring, storage, transcripts
 from rootcoz.config import (
     RESULTS_RETENTION_DAYS_MAX,
+    SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS,
+    SIDECAR_TRANSCRIPTS_MAX_SIZE_MB,
     SQLITE_INT_MAX,
     Settings,
     clear_db_settings_cache,
@@ -1217,3 +1219,158 @@ def test_feedback_repo_url_is_a_github_setting_with_blank_coercion_and_userinfo_
         }["feedback_repo_url"]
         assert round_trip["source"] == "db"
         assert round_trip["value"] == "https://github.com/myk-org/rootcoz"
+
+
+# --- Sidecar transcript retention (#570) -----------------------------------
+
+
+def _audit_events(client, action: str) -> list[dict]:
+    response = client.get(
+        "/api/admin/audit", headers=_admin_headers(), params={"action": action}
+    )
+    assert response.status_code == 200
+    return response.json()["events"]
+
+
+def test_sidecar_transcript_retention_metadata_and_defaults_exclusion(client):
+    response = client.get("/api/admin/settings", headers=_admin_headers())
+    assert response.status_code == 200
+    by_key = {item["key"]: item for item in response.json()}
+    for key, env_var in (
+        ("pi_sidecar_transcripts_max_age_days", "PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS"),
+        ("pi_sidecar_transcripts_max_size_mb", "PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB"),
+    ):
+        item = by_key[key]
+        assert item["category"] == "Sidecar", key
+        assert item["type"] == "integer", key
+        assert item["default"] == "0", key
+        assert item["restart_required"] is True, key
+        assert item["sensitive"] is False, key
+        assert item["server_only"] is False, key
+        assert item["derived"] is False, key
+        assert item["persistable"] is True, key
+        assert "0 disables" in item["description"], key
+        assert "Restart required" in item["description"], key
+        # The env var lives in the label tooltip, never in permanent row text.
+        assert env_var not in item["description"], key
+        assert item["env_var"] == env_var, key
+        assert item["label"] == main._humanize_setting_key(key), key
+
+    defaults = client.get("/api/default-server-settings", headers=_admin_headers())
+    assert defaults.status_code == 200
+    payload = defaults.json()
+    assert "pi_sidecar_transcripts_max_age_days" not in payload
+    assert "pi_sidecar_transcripts_max_size_mb" not in payload
+
+
+def test_sidecar_transcript_retention_validation_bridge_and_audit(
+    client, bridge, monkeypatch
+):
+    before = len(_audit_events(client, "settings.update"))
+    for payload in (
+        {"pi_sidecar_transcripts_max_age_days": -1},
+        {"pi_sidecar_transcripts_max_age_days": SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS + 1},
+        {"pi_sidecar_transcripts_max_size_mb": SIDECAR_TRANSCRIPTS_MAX_SIZE_MB + 1},
+        {"pi_sidecar_transcripts_max_age_days": True},
+        {"pi_sidecar_transcripts_max_age_days": "1.5"},
+        # A JSON float truncates past the manual bound check and lands on the
+        # validator fallback 0 — persisting that would disable pruning.
+        {"pi_sidecar_transcripts_max_age_days": 1.5},
+        {"pi_sidecar_transcripts_max_size_mb": 1500.5},
+        {"pi_sidecar_transcripts_max_age_days": "abc"},
+        {"pi_sidecar_transcripts_max_age_days": ""},
+    ):
+        refused = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": payload},
+        )
+        assert refused.status_code == 400, payload
+        assert not db_setting_is_set(next(iter(payload))), payload
+    # A refusal never writes the bridge assignment nor an audit row.
+    assert not bridge.exists() or "PI_SIDECAR_TRANSCRIPTS_MAX" not in bridge.read_text()
+    assert len(_audit_events(client, "settings.update")) == before
+
+    saved = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={
+            "settings": {
+                "pi_sidecar_transcripts_max_age_days": 14,
+                "pi_sidecar_transcripts_max_size_mb": " 256 ",
+            }
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    content = bridge.read_text()
+    assert "PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS=14" in content
+    assert "PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB=256" in content
+    update_event = _audit_events(client, "settings.update")[0]
+    assert set(update_event["details"]["changed_keys"]) == {
+        "pi_sidecar_transcripts_max_age_days",
+        "pi_sidecar_transcripts_max_size_mb",
+    }
+    assert update_event["details"]["redacted_keys"] == []
+
+    # A whole JSON float is the integer the admin meant, never the "30.0"
+    # string the validator cannot parse (which would read as 0 = disabled).
+    whole_float = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"pi_sidecar_transcripts_max_size_mb": 30.0}},
+    )
+    assert whole_float.status_code == 200, whole_float.text
+    assert "PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB=30" in bridge.read_text()
+
+    # 0 is a real override (disabled), not "no override".
+    zeroed = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"pi_sidecar_transcripts_max_age_days": 0}},
+    )
+    assert zeroed.status_code == 200, zeroed.text
+    assert "PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS=0" in bridge.read_text()
+
+    reset = client.delete(
+        "/api/admin/settings/pi_sidecar_transcripts_max_age_days",
+        headers=_admin_headers(),
+    )
+    assert reset.status_code == 200
+    assert "PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS" not in bridge.read_text()
+    reset_event = _audit_events(client, "settings.reset")[0]
+    assert reset_event["target_id"] == "pi_sidecar_transcripts_max_age_days"
+
+    # A blank env line is "disabled" (the sidecar's Number("")), and reports
+    # the default source so no Save to DB is offered for a value a save rejects.
+    monkeypatch.setenv("PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS", "")
+    clear_settings_cache()
+    assert Settings().pi_sidecar_transcripts_max_age_days == 0
+    metadata = client.get("/api/admin/settings", headers=_admin_headers()).json()
+    by_key = {item["key"]: item for item in metadata}
+    assert by_key["pi_sidecar_transcripts_max_age_days"]["source"] == "default"
+
+
+def test_retention_budget_env_values_the_sidecar_accepted_do_not_block_boot(
+    monkeypatch,
+) -> None:
+    """A pre-#570 deployment may hold ``0.5`` (the sidecar parses Number()).
+
+    ``_build_settings()`` builds ``Settings()`` with no fallback, so anything
+    that is not a whole number in range must read as 0 (disabled) instead of
+    keeping the container from starting.
+    """
+    monkeypatch.setenv("PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS", "0.5")
+    monkeypatch.setenv("PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB", "1500.5")
+    clear_settings_cache()
+    try:
+        settings = Settings()
+        assert settings.pi_sidecar_transcripts_max_age_days == 0
+        assert settings.pi_sidecar_transcripts_max_size_mb == 0
+        # Out of range is the same class of typo, and still boots.
+        monkeypatch.setenv("PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS", str(10**9))
+        clear_settings_cache()
+        assert Settings().pi_sidecar_transcripts_max_age_days == 0
+    finally:
+        monkeypatch.delenv("PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS")
+        monkeypatch.delenv("PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB")
+        clear_settings_cache()

@@ -287,6 +287,88 @@ class TestDisk:
         monkeypatch.setattr(server_status.os.path, "getsize", _getsize)
         block = server_status.read_disk(tmp_path / "results.db", transcripts, None)
         assert block["transcripts_bytes"] == 40
+        # The vanished file is not counted as a file either.
+        assert block["transcripts_files"] == 1
+
+    def test_a_file_pruned_between_size_and_mtime_counts_nothing(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A transcript removed after its size read but before its mtime read
+        must contribute neither bytes nor a file entry: reporting its size
+        while excluding it from the count and oldest age inflated the card."""
+        transcripts = tmp_path / "transcripts"
+        _write(transcripts / "a.jsonl", "y" * 40)
+        _write(transcripts / "b.jsonl", "y" * 10)
+        real_getmtime = os.path.getmtime
+
+        def _getmtime(path):
+            if str(path).endswith("b.jsonl"):
+                raise FileNotFoundError(str(path))
+            return real_getmtime(path)
+
+        monkeypatch.setattr(server_status.os.path, "getmtime", _getmtime)
+        block = server_status.read_disk(tmp_path / "results.db", transcripts, None)
+        assert block["transcripts_bytes"] == 40
+        assert block["transcripts_files"] == 1
+
+    def test_transcript_telemetry_counts_top_level_jsonl_only(self, tmp_path) -> None:
+        """File count and oldest age mirror the sidecar's pruning scope."""
+        transcripts = tmp_path / "transcripts"
+        _write(transcripts / "a.jsonl", "y" * 40)
+        _write(transcripts / "b.jsonl", "y" * 10)
+        _write(transcripts / "nested" / "c.jsonl", "z" * 5)
+        _write(transcripts / "notes.txt", "n" * 3)
+        now = time.time()
+        os.utime(transcripts / "a.jsonl", (now - 7200, now - 7200))
+        os.utime(transcripts / "b.jsonl", (now - 60, now - 60))
+        # A symlink must not report a file outside the directory — neither its
+        # bytes nor its much older mtime.
+        outside = _write(tmp_path / "outside.jsonl", "o" * 9000)
+        os.utime(outside, (now - 999_999, now - 999_999))
+        (transcripts / "link.jsonl").symlink_to(outside)
+
+        block = server_status.read_disk(tmp_path / "results.db", transcripts, None)
+
+        assert block["transcripts_bytes"] == 40 + 10 + 5 + 3
+        assert block["transcripts_files"] == 2
+        assert 7195 <= block["transcripts_oldest_age_seconds"] <= 7205
+
+    def test_empty_transcripts_dir_reports_zero_files_and_no_age(
+        self, tmp_path
+    ) -> None:
+        transcripts = tmp_path / "transcripts"
+        transcripts.mkdir()
+        assert server_status._walk_tree_stats(transcripts, count_top_jsonl=True) == (
+            0,
+            0,
+            None,
+        )
+
+    def test_absent_transcripts_dir_reports_none(self, tmp_path) -> None:
+        block = server_status.read_disk(
+            tmp_path / "results.db", tmp_path / "no-transcripts", None
+        )
+        assert block["transcripts_bytes"] is None
+        assert block["transcripts_files"] is None
+        assert block["transcripts_oldest_age_seconds"] is None
+
+    def test_unreadable_transcripts_dir_reports_none(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A partial count must not be shown as the directory's real one."""
+        transcripts = tmp_path / "transcripts"
+        _write(transcripts / "a.jsonl", "y" * 40)
+
+        def _walk(_path, onerror=None):
+            if onerror is not None:
+                onerror(OSError("permission denied"))
+            return []
+
+        monkeypatch.setattr(server_status.os, "walk", _walk)
+        block = server_status.read_disk(tmp_path / "results.db", transcripts, None)
+        assert block["transcripts_bytes"] is None
+        assert block["transcripts_files"] is None
+        assert block["transcripts_oldest_age_seconds"] is None
 
     def test_database_size_includes_the_wal(self, tmp_path) -> None:
         """Committed pages can live in -wal until a checkpoint."""

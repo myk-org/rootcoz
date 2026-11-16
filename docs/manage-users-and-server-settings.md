@@ -128,6 +128,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | `Server` | `public_base_url`, `additional_repos`, `max_concurrent_repo_clones`, `max_concurrent_analyses`, `chat_clone_depth`, `repo_clone_timeout_seconds`, `wait_for_completion`, `poll_interval_minutes`, `max_wait_minutes`, `metadata_rules_file`, `enable_auto_review`, `auto_push_exporters` |
    | `Web Push` | `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
    | `Notifications` | `smtp_host`, `smtp_port`, `smtp_user`, `smtp_password`, `smtp_from`, `alert_email_to`, `slack_webhook_url`, `enable_health_monitor`, `health_monitor_interval_seconds`, `health_alert_unhealthy_seconds`, `health_alert_error_rate_percent`, `health_alert_error_rate_seconds`, `health_alert_stuck_analysis_seconds` |
+   | `Sidecar` | `sidecar_host`, `sidecar_port`, `sidecar_url`, `acpx_agents`, `cli_agents`, `pi_sidecar_log_level`, `node_binary`, `pi_sidecar_transcripts_dir`, `pi_sidecar_transcripts_max_age_days`, `pi_sidecar_transcripts_max_size_mb`. The last three carry the recorded-transcripts usage card (total size, file count, oldest file age) below them. |
    | `Storage` | `results_retention_days`, `results_max_rows` |
 
    Each row shows the environment variable name, a source badge, and where relevant three other signals:
@@ -147,7 +148,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | Group | Settings |
    | --- | --- |
    | Masked and encrypted (`_SENSITIVE_SETTINGS`) | `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `jira_oauth_client_secret`, `jira_atst_token`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `admin_key`, `vapid_private_key` |
-   | Requires a restart (`_RESTART_REQUIRED_SETTINGS`) | `default_user_role`, `secure_cookies`, `trust_proxy_headers`, `metadata_rules_file`, `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
+   | Requires a restart (`_RESTART_REQUIRED_SETTINGS`) | `default_user_role`, `secure_cookies`, `trust_proxy_headers`, `metadata_rules_file`, `vapid_public_key`, `vapid_private_key`, `vapid_claim_email`, `pi_sidecar_transcripts_max_age_days`, `pi_sidecar_transcripts_max_size_mb` |
 
    Masked settings are stored encrypted when you save them from this page. The one exception is `admin_key`: it displays masked but is read-only — it is a server-only bootstrap secret, and every write path rejects it.
 
@@ -173,7 +174,7 @@ That creates an active operator who can submit analyses, and one server setting 
 
    | Card | Shows |
    | --- | --- |
-   | Disk | Used / capacity / percentage of the filesystem holding the data directory, plus the sizes of the database, the sidecar transcripts and the logs. |
+   | Disk | Used / capacity / percentage of the filesystem holding the data directory, plus the sizes of the database, the sidecar transcripts and the logs. For the transcripts it also counts the top-level `.jsonl` files and reports the oldest one's age — the same numbers the `Sidecar` tab shows. |
    | CPU | Process CPU as a percentage of one core over the sampled window, and the cgroup quota (`cpu.max`) when one is set. |
    | Memory | Process RSS, container usage against `memory.max`, the working set, and the working set as a percentage of the limit. |
    | Process | Version, build git SHA, uptime, PID, restart count, and the worst event-loop stall in the last minute. |
@@ -193,6 +194,8 @@ That creates an active operator who can submit analyses, and one server setting 
    **Memory uses the working set.** `memory.current` includes reclaimable page cache, which a growing database and its logs can fill on a healthy container; the 90 % warning is therefore based on the working set (`memory.current` minus `inactive_file`), the number the kubelet evicts on, not on raw usage.
 
    **Row counts and sizes are snapshot numbers.** The counts are cached for five minutes on the server, so a card can lag the database; the size is read fresh. The compression ratio is `—` until the feature behind it lands, never a placeholder number.
+
+   **The `Sidecar` tab also reports transcript disk usage.** Below the three transcript rows, Server Settings → `Sidecar` shows the recorded transcripts' total size, their `.jsonl` file count and the oldest file's age — read from the same stat-only server-status probe (no transcript content is opened, no budget is echoed back). The card is fetched only while those rows are on screen and has its own `Refresh`. `not visible in this container` means the directory could not be read; an empty directory shows `0 B · 0 files · oldest: none`, which is a real answer and not the same thing.
 
 13. **Review the audit log.**
 
@@ -254,7 +257,9 @@ That creates an active operator who can submit analyses, and one server setting 
 
    **The two limits are alternatives, not a floor.** A job older than `results_retention_days` is deleted even when it is among the newest `results_max_rows`, so the cap is a size bound on a young population and never raises the age policy's floor. An ingest-only job (`analysis_state: submitted`) is **never** pruned: it exists to be analysed later, and `POST /results/{job_id}/analyze` or a manual delete are how it goes. A job that is still being analysed — or has a chat turn or a single-failure re-analysis in flight — is skipped, re-checked inside the deleting transaction, and is a candidate again on the next pass.
 
-   What **stays** when a job goes: the audit trail (that has its own retention), `job_metadata` / `job_metadata_labels` (they describe the Jenkins job, not one analysis), every other job's data, server settings, users, sessions and saved filter presets, and the sidecar session transcripts on disk — those are pruned only by the sidecar's own `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` / `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB`, and `rootcoz admin transcripts` is read-only. Retention of `test_entries` on its own is a separate decision and stays out of scope: an entry belongs to an analysis and is deleted with the job that owns it, never aged by itself.
+   What **stays** when a job goes: the audit trail (that has its own retention), `job_metadata` / `job_metadata_labels` (they describe the Jenkins job, not one analysis), every other job's data, server settings, users, sessions and saved filter presets, and the sidecar session transcripts on disk — those are pruned only by the sidecar's own transcript retention budgets, and `rootcoz admin transcripts` is read-only. Retention of `test_entries` on its own is a separate decision and stays out of scope: an entry belongs to an analysis and is deleted with the job that owns it, never aged by itself.
+
+   **Transcripts are the sidecar's own retention.** They are not analysis results: prune them from `Settings` → `Sidecar` with `pi_sidecar_transcripts_max_age_days` / `pi_sidecar_transcripts_max_size_mb` (`0` disables either budget, and a change needs a restart). Both are ordinary server settings, so saving one writes a `settings.update` audit row and a reset writes `settings.reset`, each naming the key. The contract — bounds, `/data/pi-sidecar/env` persistence, Compose and Helm values, and the live usage numbers — is in [Configuration Reference — Transcript retention](configuration-reference.html#transcript-retention).
 
    **What a user sees afterwards is a `404`, with no tombstone:** the report route loads and its results call answers `Job not found`, so the page shows its not-found state. That is the same end state an interactive delete produces — the origin's re-analysis links are unlinked, the job's chat workspace is removed, revoked AI sessions are swept — because the pass calls the same helper the delete endpoints do. **One link is not cleaned:** a surviving re-analysis whose *origin* was pruned keeps a backward `reanalyzed_from_job_id` that 404s. Clearing it would need a reverse JSON lookup across every surviving payload, which is not worth a full-table scan inside a delete path.
 

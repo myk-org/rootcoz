@@ -499,6 +499,19 @@ Things to know before turning it on:
 - **The disk check is the newest part.** When `/metrics` has no `rootcoz_data_used_ratio` (a failing filesystem probe) the disk check is skipped silently and the health and error checks still run. The gauges measure the filesystem holding the data directory, so they work unchanged for a PVC, a Docker volume, a bind mount or a plain directory. A body whose **class counts** cannot be read (a fork, or a renamed series) is different: it gets a 🔴 configuration line naming the series at fault, and the health and disk checks keep working — the job never exits early.
 - The job needs no cluster permissions: the pod sets `automountServiceAccountToken: false` and only curls the application Service.
 
+### Transcript retention
+
+The pi-sidecar prunes recorded session transcripts with two budgets it reads at process start, so a change needs a pod restart:
+
+| Value | Env var | Default | Meaning |
+| --- | --- | --- | --- |
+| `env.sidecarTranscriptsMaxAgeDays` | `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` | `""` | Delete transcripts older than this many days (`0`–`999999`); `0` disables age pruning |
+| `env.sidecarTranscriptsMaxSizeMb` | `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB` | `""` | Keep the transcripts directory under this total size in MB (`0`–`999999999`); `0` disables size pruning |
+
+Both default to `""`, which **renders no env var at all** — so a chart upgrade never rolls the pod and never starts pruning files that already exist. An explicit `0` is a value, not a default: it disables that budget in the sidecar and renders `"0"`. Recording is the separate `env.recordTranscripts` toggle, and the directory is `env.sidecarTranscriptsDir`. The same budgets are editable in Server Settings → `Sidecar` after login (saved to `/data/pi-sidecar/env`, applied at the next restart); the chart values exist for a deployment that should bound its transcript disk from the first boot, before anyone signs in.
+
+The env names are reserved **only while their chart value is set**. With the default empty value a `sidecar.agentDir.env` entry may still carry the budget, and a value an earlier release preserved in the credentials Secret keeps reaching the pod — an upgrade never silently stops pruning. Setting the new chart value takes the name over (an `sidecar.agentDir.env` entry for it then fails validation with `collides with a chart-managed environment variable`), so migrating is: read the value from your `sidecar.agentDir.env` (or from the release Secret), set `env.sidecarTranscriptsMaxAgeDays`/`env.sidecarTranscriptsMaxSizeMb` instead, and drop the old entry in the same `helm upgrade`. Background: [Configuration Reference — Transcript retention](https://myk-org.github.io/rootcoz/configuration-reference.html#transcript-retention).
+
 ## Validation
 
 ```bash
@@ -541,6 +554,15 @@ liveness must GET `/health` with no `api/health` between them, the startup probe
 exec `/api/health` wait, and the schema rejects `probes.readiness.timeoutSeconds=5s`, a typo'd
 `probes.readines.` key, liveness `successThreshold: 2` and readiness `successThreshold: 0`,
 while a raised readiness `successThreshold` (the wiring entry renders `25`) is accepted.
+
+The transcript retention values are covered end to end: the default render must carry neither
+`PI_SIDECAR_TRANSCRIPTS_MAX_*` env var, an explicit value must render quoted (`"30"`, `"512"`, and
+`0` as `"0"` rather than being dropped as falsy), a `-f` values file carrying the YAML integer
+`1048576` must render `value: "1048576"` (proving `int64` formatting, not Go's `1.048576e+06`
+scientific notation), a negative age, an above-ceiling age and a non-numeric size must fail
+validation, and the reservation of the two env names follows their chart value: empty leaves them
+to `sidecar.agentDir.env` (the upgrade path, rendered into the credentials Secret), while a set
+value rejects that override as a collision.
 
 ## Limitations
 
