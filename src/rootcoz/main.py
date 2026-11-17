@@ -18796,6 +18796,10 @@ _SSO_CONFLICT_DETAIL = "That sign-in is already connected to another account"
 #: Generic 400 for a rejected name; the rule that rejected it goes to the audit row.
 _SSO_NAME_DETAIL = "That name cannot be used"
 
+#: Generic 403 for an account that may not act; the state that blocked it goes to
+#: the audit row.
+_SSO_ACCOUNT_DETAIL = "Account cannot be used to sign in"
+
 #: Status per refusal reason for the two ticket endpoints, so a policy refusal
 #: (domain / verification) does not read as a bad request or a conflict.
 _SSO_ERROR_STATUS: dict[str, int] = {
@@ -18803,6 +18807,10 @@ _SSO_ERROR_STATUS: dict[str, int] = {
     "account_missing": 404,
     "domain_not_allowed": 403,
     "email_not_verified": 403,
+    "account_disabled": 403,
+    "account_locked": 403,
+    "account_pending": 403,
+    "account_rejected": 403,
 }
 
 
@@ -19823,13 +19831,13 @@ async def sso_link_account(request: Request) -> Response:
         await _audit_sso_refusal(
             request, record["provider"], f"account_{locked}", subject=username
         )
-        raise HTTPException(status_code=403, detail="Account cannot be used to sign in")
+        raise HTTPException(status_code=403, detail=_SSO_ACCOUNT_DETAIL)
     block_reason = auth_approval.account_block_reason(verified.account)
     if block_reason is not None:
         await _audit_sso_refusal(
             request, record["provider"], f"account_{block_reason}", subject=username
         )
-        raise HTTPException(status_code=403, detail="Account cannot be used to sign in")
+        raise HTTPException(status_code=403, detail=_SSO_ACCOUNT_DETAIL)
     # ``is_admin`` is also the role check below, so it is read once here. A
     # pending or rejected account may hold a valid key, but claiming a provider
     # identity is a write on that account, so it gets the same approval gate as
@@ -19842,9 +19850,7 @@ async def sso_link_account(request: Request) -> Response:
             await _audit_sso_refusal(
                 request, record["provider"], f"account_{status}", subject=username
             )
-            raise HTTPException(
-                status_code=403, detail="Account cannot be used to sign in"
-            )
+            raise HTTPException(status_code=403, detail=_SSO_ACCOUNT_DETAIL)
     # Linking is the mirror of unlinking, which needs a reviewer: a viewer who may
     # not remove a method must not be able to add one. Same rule as the link-start
     # route and the callback, applied to the account this credential proves.
@@ -19881,11 +19887,15 @@ async def sso_link_account(request: Request) -> Response:
             raise HTTPException(
                 status_code=404, detail="That account no longer exists"
             ) from exc
-        detail = (
-            _SSO_CONFLICT_DETAIL
-            if exc.reason == "identity_conflict"
-            else "That sign-in cannot be used"
-        )
+        if exc.reason == "identity_conflict":
+            detail = _SSO_CONFLICT_DETAIL
+        elif exc.reason.startswith("account_"):
+            # Storage's own eligibility verdict, from the row it re-read inside
+            # the write: answered exactly like the refusals above, which a block
+            # committed since then would otherwise have bypassed.
+            detail = _SSO_ACCOUNT_DETAIL
+        else:
+            detail = "That sign-in cannot be used"
         raise HTTPException(
             status_code=_sso_error_status(exc.reason), detail=detail
         ) from exc
@@ -24719,6 +24729,31 @@ async def _normalize_enumerated_value(key: str, value: str) -> tuple[str, str | 
     return value, None
 
 
+def _validate_effective_setting(updates: dict[str, Any]) -> Settings:
+    """Validate candidate setting values against the values in effect.
+
+    Every field not named in *updates* carries its currently effective value —
+    the DB override when one is stored, else the env/default — instead of its
+    model default. ``Settings`` holds cross-field rules (the device poll
+    interval must be shorter than the code TTL), and a candidate built from one
+    key alone compares against the *default* of the other: saving a TTL below a
+    stored interval was accepted, and the persisted pair then made
+    ``get_settings()`` refuse to load, so the server could not read its own
+    settings.
+
+    Args:
+        updates: Candidate values by Settings field name, in the form they will
+            be stored in.
+
+    Returns:
+        The Settings built from the effective values plus *updates*.
+
+    Raises:
+        pydantic.ValidationError: When the candidate settings are invalid.
+    """
+    return Settings.model_validate(get_settings().model_dump(mode="python") | updates)
+
+
 async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
     """Validate admin settings updates; return per-entry error messages.
 
@@ -24767,7 +24802,7 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
 
                 settings_updates[key] = normalize_prow_url(value)
             else:
-                validated = Settings.model_validate({key: value})
+                validated = _validate_effective_setting({key: value})
                 settings_updates[key] = getattr(validated, key)
         except ValidationError as exc:
             for err in exc.errors():
@@ -24803,6 +24838,11 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
     site_url = settings_updates.get("jira_site_url")
     if site_url and (site_error := jira_site_url_error(str(site_url))):
         raise HTTPException(status_code=422, detail=site_error)
+
+    # Values this batch already accepted. A later key is validated against
+    # them, not against their pre-save effective value: a batch that writes
+    # both sides of a cross-field rule must be judged as the pair it stores.
+    accepted: dict[str, Any] = {}
 
     for key, value in settings_updates.items():
         if key not in valid_keys:
@@ -24898,7 +24938,7 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
         # be persisted, and once get_settings() cannot validate the merged
         # overrides it silently falls back to the base env settings.
         try:
-            validated = Settings.model_validate({key: value})
+            validated = _validate_effective_setting({**accepted, key: value})
         except ValidationError as exc:
             for err in exc.errors():
                 ctx_err = err.get("ctx", {}).get("error")
@@ -24922,6 +24962,7 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
                 errors.append(f"{key}: must be an integer")
                 continue
             settings_updates[key] = str(validated_int)
+        accepted[key] = getattr(validated, key)
 
     return errors
 
@@ -25466,7 +25507,7 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         )
     # Same validation the PUT path applies to admin-typed values
     try:
-        validated = Settings.model_validate({key: env_value})
+        validated = _validate_effective_setting({key: env_value})
     except ValidationError as exc:
         raise HTTPException(
             status_code=400, detail=f"Invalid env value for '{key}'"

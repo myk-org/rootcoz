@@ -48,6 +48,37 @@ it('lists the connected providers', async () => {
   expect(screen.getByText('a@example.com')).toBeTruthy()
 })
 
+it('says no provider is connected when the list is empty', async () => {
+  mockState([], true)
+  render(<SignInMethodsCard />)
+
+  expect(
+    await screen.findByText(/no provider is connected yet/i),
+  ).toBeTruthy()
+  expect(screen.queryByText(/loading/i)).toBeNull()
+})
+
+it('reports a failed load without also claiming to be loading', async () => {
+  get.mockImplementation((path: string) =>
+    path === '/api/user/identities'
+      ? Promise.reject(new Error('network down'))
+      : Promise.resolve({
+          browser_login: true,
+          providers: [{ name: 'github', display_name: 'GitHub' }],
+        }),
+  )
+  render(<SignInMethodsCard />)
+
+  expect(
+    await screen.findByText(/could not load your sign-in methods/i),
+  ).toBeTruthy()
+  // "Loading…" promises something is still coming; after a failure nothing is.
+  expect(screen.queryByText(/loading/i)).toBeNull()
+  // Connect state is unknown until the list arrives.
+  expect(screen.queryByRole('button', { name: /connect/i })).toBeNull()
+  expect(screen.queryByText(/no provider is connected yet/i)).toBeNull()
+})
+
 it('offers to connect a provider that is not connected yet', async () => {
   mockState([{ provider: 'google', email: null, created_at: '' }], true)
   render(<SignInMethodsCard />)

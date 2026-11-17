@@ -16120,6 +16120,113 @@ class TestAdminSettingsEndpoints:
         assert response.status_code == 400
         assert "https://" in response.json()["detail"]
 
+    def test_lowering_the_ttl_below_a_saved_poll_interval_is_refused(
+        self, test_client
+    ) -> None:
+        """Qodo: a per-key save is judged against the values in effect, not defaults.
+
+        The interval saves first (100s, fine against the default 600s TTL).
+        Saving a 50s TTL used to be accepted because the candidate carried the
+        *default* interval (5s); the stored 100/50 pair then made
+        ``get_settings()`` refuse to load, so the server could not read its own
+        settings. The refused TTL must leave the stored pair loadable.
+        """
+        from rootcoz.config import db_setting_is_set, get_settings
+
+        saved = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sso_device_poll_interval_seconds": "100"}},
+        )
+        assert saved.status_code == 200, saved.json()
+
+        refused = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sso_device_code_ttl_seconds": "50"}},
+        )
+        assert refused.status_code == 400
+        detail = refused.json()["detail"]
+        assert "sso_device_poll_interval_seconds" in detail
+        assert "sso_device_code_ttl_seconds" in detail
+        # Nothing was written: the old (default) TTL is still the one in effect.
+        assert db_setting_is_set("sso_device_code_ttl_seconds") is False
+        effective = get_settings()
+        assert (
+            effective.sso_device_poll_interval_seconds,
+            effective.sso_device_code_ttl_seconds,
+        ) == (100, 600)
+
+    def test_raising_the_poll_interval_above_a_saved_ttl_is_refused(
+        self, test_client
+    ) -> None:
+        """The other save order: a 50s TTL is stored, so a 100s interval is out."""
+        from rootcoz.config import db_setting_is_set, get_db_setting, get_settings
+
+        saved = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sso_device_code_ttl_seconds": "50"}},
+        )
+        assert saved.status_code == 200, saved.json()
+
+        refused = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sso_device_poll_interval_seconds": "100"}},
+        )
+        assert refused.status_code == 400
+        detail = refused.json()["detail"]
+        assert "sso_device_poll_interval_seconds" in detail
+        assert "sso_device_code_ttl_seconds" in detail
+        # The stored TTL is untouched and the settings still load.
+        assert db_setting_is_set("sso_device_poll_interval_seconds") is False
+        assert get_db_setting("sso_device_code_ttl_seconds") == "50"
+        assert get_settings().sso_device_code_ttl_seconds == 50
+
+    def test_a_valid_device_poll_interval_and_ttl_pair_saves(self, test_client) -> None:
+        """The rule still lets a valid pair through the same route."""
+        from rootcoz.config import get_settings
+
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "sso_device_poll_interval_seconds": "5",
+                    "sso_device_code_ttl_seconds": "600",
+                }
+            },
+        )
+        assert response.status_code == 200, response.json()
+        assert set(response.json()["updated"]) == {
+            "sso_device_poll_interval_seconds",
+            "sso_device_code_ttl_seconds",
+        }
+        effective = get_settings()
+        assert (
+            effective.sso_device_poll_interval_seconds,
+            effective.sso_device_code_ttl_seconds,
+        ) == (5, 600)
+
+    def test_an_invalid_device_poll_interval_and_ttl_batch_is_refused(
+        self, test_client
+    ) -> None:
+        """One request writing both sides is judged as the pair it would store."""
+        from rootcoz.config import db_setting_is_set
+
+        refused = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "sso_device_poll_interval_seconds": "100",
+                    "sso_device_code_ttl_seconds": "50",
+                }
+            },
+        )
+        assert refused.status_code == 400
+        detail = refused.json()["detail"]
+        assert "sso_device_poll_interval_seconds" in detail
+        assert "sso_device_code_ttl_seconds" in detail
+        # A rejected save writes neither key.
+        assert db_setting_is_set("sso_device_poll_interval_seconds") is False
+        assert db_setting_is_set("sso_device_code_ttl_seconds") is False
+
     def test_put_settings_prow_url_with_credentials_rejected(self, test_client) -> None:
         response = test_client.put(
             "/api/admin/settings",

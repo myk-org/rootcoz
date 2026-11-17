@@ -243,8 +243,13 @@ this behind a proxy you control.
 The first request from a name with no account **provisions** it:
 `created_via='proxy'`, the role from `DEFAULT_USER_ROLE`, and the status every new
 account gets — `pending` while `REQUIRE_APPROVAL` is on, `active` when it is off.
-The proxy proves *who* someone is, not that they may act. Each provisioning is
-audited as `auth.proxy_provisioned`, `ALLOWED_USERS` bounds it like any other
+The proxy proves *who* someone is, not that they may act: `created_via` is
+provenance for operators and the audit trail — it records only how the row came to
+exist (`internal`, `admin`, `proxy`, or the SSO provider that created it) — while
+the role, the approval status, `can_view_reports`, `can_use_server_providers` and
+the admin bit are decided by other columns and settings, so `'proxy'` or `'sso'`
+is never a role, an approval, or a reason to trust an account. Each provisioning
+is audited as `auth.proxy_provisioned`, `ALLOWED_USERS` bounds it like any other
 creation, and reserved names (`admin`, `rootcoz*`) are never accepted from the
 header.
 
