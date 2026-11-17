@@ -109,17 +109,21 @@ def _mock_verify(monkeypatch, outcome):
     return verified
 
 
-def _mock_key_discovery(monkeypatch, models, *, listing_supported=True):
+def _mock_key_discovery(monkeypatch, models, *, listing_supported=True, on_call=None):
     """Mock key-scoped discovery; ``models`` may be an exception to raise.
 
     The mock returns the normalized shape the real ``models_for_api_key``
     produces (id/name/provider/source/capabilities entries). Entries may
     carry ``"source": "manifest"`` to exercise manifest filtering.
+    ``on_call`` runs a concurrent action while this discovery is in flight —
+    the window where another admin's add/rotate can land.
     """
     calls = []
 
     async def fake(provider, key):
         calls.append((provider, key))
+        if on_call is not None:
+            await on_call(provider, key)
         if isinstance(models, Exception):
             raise models
         return {
@@ -1010,8 +1014,8 @@ async def test_concurrent_rotation_supersedes_stale_capture(client, monkeypatch)
     # post-discovery key check.
     real_set = storage.set_server_ai_credential
 
-    async def set_then_rotate(provider, key, updated_by):
-        generation = await real_set(provider, key, updated_by)
+    async def set_then_rotate(provider, key, updated_by, **kwargs):
+        generation = await real_set(provider, key, updated_by, **kwargs)
         await real_set(provider, "newer-key-value-9", "admin")
         return generation
 
@@ -2103,8 +2107,8 @@ async def test_concurrent_same_key_rotation_supersedes_stale_capture(
     _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}])
     real_set = storage.set_server_ai_credential
 
-    async def set_then_restore(provider, key, updated_by):
-        generation = await real_set(provider, key, updated_by)
+    async def set_then_restore(provider, key, updated_by, **kwargs):
+        generation = await real_set(provider, key, updated_by, **kwargs)
         # Re-store the SAME key value right after this add's write.
         await real_set(provider, key, "admin")
         return generation
@@ -2315,8 +2319,8 @@ async def test_same_key_rotation_cannot_lend_its_generation(client, monkeypatch)
     _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}])
     real_set = storage.set_server_ai_credential
 
-    async def set_then_overlap(provider, key, updated_by):
-        generation = await real_set(provider, key, updated_by)
+    async def set_then_overlap(provider, key, updated_by, **kwargs):
+        generation = await real_set(provider, key, updated_by, **kwargs)
         # An overlapping rotation to the SAME key lands before the endpoint
         # could read the generation back.
         await real_set(provider, key, "other-admin")
@@ -2336,6 +2340,131 @@ async def test_same_key_rotation_cannot_lend_its_generation(client, monkeypatch)
     assert added.json()["ok"] is True
     # The older capture (bound to its own generation) was discarded.
     assert await storage.list_server_provider_key_models() == []
+
+
+async def test_credential_write_refuses_a_stale_expectation(tmp_path, monkeypatch):
+    """Storage: the credential write is a compare-and-swap (#350 r3).
+
+    ``expect_absent`` (a fresh add) and ``expected_generation`` (a rotate) are
+    both tested inside the write's transaction, so the older of two overlapping
+    writes refuses instead of overwriting the newer key.
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-cas.db")
+    await storage.init_db()
+    first = await storage.set_server_ai_credential("google", SECRET, "admin")
+    with pytest.raises(storage.ServerCredentialConflictError):
+        await storage.set_server_ai_credential(
+            "google", "fresh-add-key-value", "admin", expect_absent=True
+        )
+    newer = await storage.set_server_ai_credential("google", "newer-key-value", "admin")
+    with pytest.raises(storage.ServerCredentialConflictError):
+        await storage.set_server_ai_credential(
+            "google", "stale-rotation-key", "admin", expected_generation=first
+        )
+    # Neither refusal wrote anything.
+    assert await storage.get_server_ai_credential("google") == "newer-key-value"
+    assert await storage.get_server_credential_generation("google") == newer
+
+
+async def test_overlapping_rotations_keep_the_newer_key(client, monkeypatch):
+    """An older rotation loses the race instead of replacing a newer key.
+
+    The loser read the credential generation before it verified and
+    discovered; a rotation landing in that window must make its write refuse
+    (``409``) rather than settle last — and its capture must have written no
+    rows, since it never got that far.
+    """
+    winner = "winning-key-value-111"
+    _add_google_provider(client, monkeypatch, [{"id": "gemini-2.5-pro"}])
+    rows_before = await storage.list_server_provider_key_models()
+
+    # The newer rotation lands while the older one is still in discovery.
+    async def winner_lands(provider: str, key: str) -> None:
+        await storage.set_server_ai_credential(provider, winner, "other-admin")
+
+    _mock_key_discovery(monkeypatch, [{"id": "gemini-9-stale"}], on_call=winner_lands)
+    loser = client.post(
+        "/api/admin/server-providers/google/rotate-key",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": "older-rotation-key-value",  # pragma: allowlist secret
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+
+    assert loser.status_code == 409
+    assert "concurrently" in loser.json()["detail"]
+    # The newer key is what remains, and the losing capture stored nothing.
+    assert await storage.get_server_ai_credential("google") == winner
+    assert await storage.list_server_provider_key_models() == rows_before
+
+
+async def test_overlapping_fresh_adds_store_the_first_key_only(client, monkeypatch):
+    """Two racing adds: one stores and audits success, the other 409s.
+
+    The loser's duplicate re-check still saw no row (that is the race), so the
+    write itself has to refuse: exactly one credential row, one success row and
+    one failure row whose reason is the conflict.
+    """
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}])
+    # Both requests pass the pre-check and re-check before either writes.
+    monkeypatch.setattr(
+        rootcoz_main, "_has_stored_server_key", AsyncMock(return_value=False)
+    )
+
+    def add(api_key: str):
+        return client.post(
+            "/api/admin/server-providers",
+            headers=_admin_headers(),
+            json={
+                "provider": "google",
+                "api_key": api_key,
+                "verification_model": "gemini-2.5-pro",
+            },
+        )
+
+    stored = add(SECRET)
+    raced = add("second-admin-key-value")
+
+    assert stored.status_code == 200
+    assert raced.status_code == 409
+    assert "concurrently" in raced.json()["detail"]
+    assert len(await storage.list_server_ai_providers()) == 1
+    assert await storage.get_server_ai_credential("google") == SECRET
+    events = (await storage.list_audit_events(action="provider.key.store"))["events"]
+    assert sorted(event["outcome"] for event in events) == ["failure", "success"]
+    failed = next(event for event in events if event["outcome"] == "failure")
+    assert failed["details"] == {"reason": "conflict", "provider": "google"}
+    assert SECRET not in json.dumps(events)
+
+
+async def test_sequential_add_and_rotate_never_conflict(client, monkeypatch):
+    """The ordinary path is unchanged: no serialised admin ever sees a CAS error."""
+    rotated_key = "rotated-key-value-222"
+    _add_google_provider(client, monkeypatch, [{"id": "gemini-2.5-pro"}])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gemini-3-pro"}])
+
+    rotated = client.post(
+        "/api/admin/server-providers/google/rotate-key",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": rotated_key,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+
+    assert rotated.status_code == 200
+    assert rotated.json()["ok"] is True
+    assert await storage.get_server_ai_credential("google") == rotated_key
+    events = (await storage.list_audit_events(action="provider.key.rotate"))["events"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "success"
 
 
 async def test_readded_key_never_reuses_removed_generation(tmp_path, monkeypatch):

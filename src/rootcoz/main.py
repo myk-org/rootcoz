@@ -21422,6 +21422,19 @@ async def _verify_and_store_server_provider_key(
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider}' has no stored key"
         )
+    # Compare-and-swap expectation for the credential write below (#350 r3): a
+    # rotate expects the generation read here, a fresh add expects no row. Both
+    # are tested inside the write's own transaction, so an overlapping
+    # add/rotate landing after the re-check above is refused with a 409 instead
+    # of settling on whichever write runs last — an older rotation never
+    # replaces a newer key.
+    expected_generation: int | None = None
+    if replacing:
+        expected_generation = await storage.get_server_credential_generation(provider)
+        if expected_generation is None:
+            raise HTTPException(
+                status_code=404, detail=f"Provider '{provider}' has no stored key"
+            )
     # One action per attempt, named before the first mutation so a failure
     # after it still lands on the right action (#586 r7).
     action = (
@@ -21451,9 +21464,25 @@ async def _verify_and_store_server_provider_key(
         # transaction — never re-read: an overlapping rotation (even to the same
         # key) landing before a separate read would hand this capture the newer
         # credential's generation and let its stale snapshot through (#350 r3).
-        generation = await storage.set_server_ai_credential(
-            provider, key, request.state.username or "admin"
-        )
+        try:
+            generation = await storage.set_server_ai_credential(
+                provider,
+                key,
+                request.state.username or "admin",
+                expected_generation=expected_generation,
+                expect_absent=not replacing,
+            )
+        except storage.ServerCredentialConflictError as exc:
+            # Nothing was written: the newer credential stays exactly as the
+            # concurrent add/rotate left it. The refusal is audited once by the
+            # HTTPException handler below (reason ``conflict``).
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Provider '{provider}' changed concurrently (another add or"
+                    " rotate landed first); retry, or check the current key"
+                ),
+            ) from exc
         # Key-scoped capture (#350): after a successful verification, record the
         # models this key can actually access. A listing-unsupported provider or
         # a transient discovery failure never blocks the add — a failed
