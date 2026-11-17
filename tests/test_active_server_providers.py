@@ -6,7 +6,9 @@ pre-existing behavior). Enforcement rechecks on every server-credential use,
 so a direct API call cannot bypass the catalog filtering.
 """
 
+import asyncio
 import json
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -468,26 +470,97 @@ async def test_picker_options_resolve_ambient_credentials_on_a_cold_catalog(
 
     The ambient half of the deployment resolve reads the catalog snapshot, so
     ``get_admin_settings`` on a freshly started server used to offer an option
-    list silently missing every ambient provider. One discovery answers it, and
-    a warm snapshot answers the very same set without another pass.
+    list silently missing every ambient provider. One discovery pass answers
+    it, and a warm snapshot answers the very same set without fetching again.
+    Counted at the raw sidecar call: a warm load may still re-enter the catalog
+    lookup (that is what lets a caller override the catalog), but it must not
+    pay for another sidecar pass.
     """
     entries = [{"provider": "openai", "id": "openai-model", "name": "openai"}]
+    passes: list[int] = []
 
-    async def _discover() -> list[dict]:
-        ai_client.update_model_catalog(entries)
+    async def _discover(_path: str) -> list[dict]:
+        passes.append(1)
         return entries
 
     monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
-    discovery = AsyncMock(side_effect=_discover)
-    monkeypatch.setattr(ai_client, "_get_model_catalog", discovery)
+    monkeypatch.setattr(ai_client, "_cold_catalog_attempt", None)
+    monkeypatch.setattr(ai_client, "_cold_catalog_retry_at", 0.0)
+    monkeypatch.setattr(ai_client, "_list_models_raw", _discover)
     _stored_keys(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-ambient-cold-cache")
 
     cold = await ai_client.server_provider_options()
     assert cold == ["openai"]
-    assert discovery.await_count == 1
+    assert len(passes) == 1
     assert await ai_client.server_provider_options() == cold
-    assert discovery.await_count == 1
+    assert len(passes) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cold_catalog_loads_share_one_bounded_attempt(monkeypatch):
+    """#586 r6: a load arriving mid-discovery pays only the remainder.
+
+    A timed-out discovery released the catalog lock, so with no in-flight
+    marker a second settings load starting inside the first one's wait ran its
+    own full bound. Both await the same attempt now: one attempt, one bound.
+    """
+    attempts: list[int] = []
+
+    async def _hang(*_: object) -> list[dict]:
+        attempts.append(1)
+        await asyncio.sleep(1)
+        return []
+
+    monkeypatch.setattr(ai_client, "_COLD_CATALOG_TIMEOUT_SECONDS", 0.4)
+    monkeypatch.setattr(ai_client, "_cold_catalog_retry_at", 0.0)
+    monkeypatch.setattr(ai_client, "_cold_catalog_attempt", None)
+    monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+    monkeypatch.setattr(ai_client, "_list_models_raw", _hang)
+    monkeypatch.setattr(ai_client, "_agent_manifest", dict)
+    _stored_keys(monkeypatch, {"provider": "EnMaaS"})
+
+    started = time.monotonic()
+    first = asyncio.create_task(ai_client.server_provider_options())
+    await asyncio.sleep(0.3)
+    # Arrives while the first wait is still running.
+    second = await ai_client.server_provider_options()
+    results = [await first, second]
+    elapsed = time.monotonic() - started
+
+    assert results == [["EnMaaS"], ["EnMaaS"]]
+    assert len(attempts) == 1
+    # One bound (0.4), not the 0.7 two separate waits would take.
+    assert elapsed < 0.65
+
+
+@pytest.mark.asyncio
+async def test_bounded_model_catalog_answers_without_a_hanging_sidecar(monkeypatch):
+    """#586 r6: the one shared accessor never waits on the sidecar's own timeout.
+
+    Measured on the accessor, not through an endpoint: the app's startup
+    preload can fill the cache mid-test, which made an endpoint-level clock
+    assertion pass either way.
+    """
+
+    async def _hang(*_: object) -> list[dict]:
+        await asyncio.sleep(5)
+        return []
+
+    monkeypatch.setattr(ai_client, "_COLD_CATALOG_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(ai_client, "_cold_catalog_retry_at", 0.0)
+    monkeypatch.setattr(ai_client, "_cold_catalog_attempt", None)
+    monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+    monkeypatch.setattr(ai_client, "_list_models_raw", _hang)
+
+    started = time.monotonic()
+    assert await ai_client.bounded_model_catalog() is None
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    # The cooldown the timeout armed suppresses the next attempt.
+    assert await ai_client.bounded_model_catalog() is None
+    assert time.monotonic() - started < 0.5
 
 
 @pytest.mark.asyncio

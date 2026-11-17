@@ -6,6 +6,7 @@ delete warnings), the scoped-models server pool, and per-session apiKey
 injection with unchanged credential-source semantics.
 """
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -88,7 +89,6 @@ def _fake_catalog(monkeypatch, catalog):
         return catalog
 
     monkeypatch.setattr(ai_client, "_get_model_catalog", fake)
-    monkeypatch.setattr("rootcoz.main._get_model_catalog", fake, raising=False)
 
 
 def _mock_supported(monkeypatch, providers):
@@ -875,7 +875,6 @@ async def test_concurrent_rotation_supersedes_stale_capture(client, monkeypatch)
 
 def test_repeated_model_ids_dedupe_in_storage(tmp_path, monkeypatch):
     """A discovery response repeating an id must not fail the write (#350 r1)."""
-    import asyncio
 
     async def run():
         monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp.db")
@@ -3128,6 +3127,69 @@ async def test_card_never_lists_a_case_distinct_providers_models(
 
     assert list(listed) == ["Foo"]
     assert [m["id"] for m in listed["Foo"]["models"]] == ["Foo/upper-model"]
+
+
+async def test_card_never_guesses_between_case_variant_buckets(
+    client, monkeypatch, tmp_path
+):
+    """#586 r6: no exact bucket and two case-variants — no models, not a guess.
+
+    The manifest declares ``FOO`` while the catalog holds ``Foo`` and ``foo``.
+    Taking whichever bucket folds onto the same key would attach another
+    provider's models to this row, so it lists none until a spelling matches.
+    """
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {"FOO": {"apiKey": "foo-literal-key"}},  # pragma: allowlist secret
+    )
+    _fake_catalog(
+        monkeypatch,
+        [
+            {"provider": "Foo", "id": "Foo/upper-model"},
+            {"provider": "foo", "id": "foo/lower-model"},
+        ],
+    )
+    _mock_supported(monkeypatch, [])
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+
+    listed = _providers(client)
+
+    assert list(listed) == ["FOO"]
+    assert listed["FOO"]["models"] == []
+
+
+async def test_card_renders_when_no_catalog_is_available(client, monkeypatch, tmp_path):
+    """#586 r6: no catalog answer must not cost the card its row.
+
+    The settings load was bounded but ``/api/admin/server-providers`` awaited
+    the catalog bare, so a hung sidecar still held the page for the client's own
+    timeout. Every catalog surface goes through the one bounded accessor now,
+    and the card renders stored/registry/manifest rows without a catalog.
+    """
+    monkeypatch.setattr(
+        rootcoz_main, "bounded_model_catalog", AsyncMock(return_value=None)
+    )
+
+    async def _unreachable(*_: object) -> list[dict]:
+        raise RuntimeError("the card must ask the bounded accessor, not the catalog")
+
+    # Any surface that bypasses the accessor hits this and 500s the card. The
+    # cache is cleared last: another fixture helper would warm it.
+    monkeypatch.setattr(ai_client, "_list_models_raw", _unreachable)
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {"sidecaronly": {"apiKey": "sidecar-key"}},  # pragma: allowlist secret
+    )
+    _mock_supported(monkeypatch, [])
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+    monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+
+    listed = _providers(client)
+
+    assert listed["sidecaronly"]["holds_credential"] is True
+    assert listed["sidecaronly"]["models"] == []
 
 
 def test_page_load_reads_and_reports_the_manifest_once(

@@ -72,6 +72,9 @@ _COLD_CATALOG_TIMEOUT_SECONDS = 2.0
 _COLD_CATALOG_RETRY_SECONDS = 30.0
 # ``monotonic()`` deadline of that window; 0.0 = no timed-out attempt recorded.
 _cold_catalog_retry_at = 0.0
+# The one in-flight cold-cache discovery every concurrent waiter shares, holding
+# the catalog it fetched; ``None`` = no attempt running.
+_cold_catalog_attempt: asyncio.Task[list[dict[str, Any]] | None] | None = None
 
 # Only explicitly initiated AI tasks set this; unrelated request tasks never inherit credentials.
 ai_username: ContextVar[str] = ContextVar("ai_username", default="")
@@ -508,35 +511,13 @@ async def server_provider_options() -> list[str]:
     """
     from rootcoz.storage import list_server_ai_providers
 
-    global _cold_catalog_retry_at
-
-    # A cold cache normally means the background preload has not finished, but a
-    # hung sidecar never fills it: retry at most once per
-    # ``_COLD_CATALOG_RETRY_SECONDS`` instead of making every load wait for the
-    # same timeout.
-    if _model_catalog_cache is None and time.monotonic() >= _cold_catalog_retry_at:
-        # The ambient half of the resolve reads the catalog snapshot, so a cold
-        # cache would silently drop ambient providers from the picker (#586):
-        # one bounded discovery here, no caching of its own — the cache stays
-        # cold on a timeout, so a later load retries instead of baking in an
-        # outage, and everything resolvable without the catalog still answers.
-        # Only the timeout arms the cooldown: an error the sidecar answers with
-        # costs no wait, so it needs no suppression.
-        try:
-            await asyncio.wait_for(_get_model_catalog(), _COLD_CATALOG_TIMEOUT_SECONDS)
-        except TimeoutError:
-            _cold_catalog_retry_at = time.monotonic() + _COLD_CATALOG_RETRY_SECONDS
-            logger.warning(
-                "Sidecar model catalog did not answer within %.1fs for server"
-                " provider options; listing what resolves without it and not"
-                " retrying for %.0fs",
-                _COLD_CATALOG_TIMEOUT_SECONDS,
-                _COLD_CATALOG_RETRY_SECONDS,
-            )
-        except httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError:
-            logger.warning(
-                "Unable to load the sidecar model catalog for server provider options"
-            )
+    # The ambient half of the resolve reads the catalog snapshot, so a cold
+    # cache would silently drop ambient providers from the picker (#586): one
+    # bounded discovery, shared with every concurrent load and every other
+    # catalog surface, keeps them in without making each load wait for the
+    # sidecar client's own timeout. Everything resolvable without the catalog
+    # still answers while it stays cold.
+    await bounded_model_catalog()
     stored = await list_server_ai_providers()
     deployment, sidecar_declared = server_credential_sources()
     providers = server_credential_providers(
@@ -985,6 +966,74 @@ def build_friendly_catalog(
             }
         )
     return result
+
+
+async def _cold_catalog_discovery() -> list[dict[str, Any]] | None:
+    """One bounded cold-cache discovery, shared by every concurrent waiter.
+
+    A cold cache normally means the background preload has not finished, but a
+    hung sidecar never fills it. Only a timeout arms the cooldown: an error the
+    sidecar answers with costs no wait, so it needs no suppression. The cache is
+    left cold on both, so a recovered sidecar comes back on its own, and the
+    discovery's own result is what the waiters get — not a re-read of the cache.
+    """
+    global _cold_catalog_retry_at
+    try:
+        return await asyncio.wait_for(
+            _get_model_catalog(), _COLD_CATALOG_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
+        _cold_catalog_retry_at = time.monotonic() + _COLD_CATALOG_RETRY_SECONDS
+        logger.warning(
+            "Sidecar model catalog did not answer within %.1fs; answering without"
+            " it and not retrying for %.0fs",
+            _COLD_CATALOG_TIMEOUT_SECONDS,
+            _COLD_CATALOG_RETRY_SECONDS,
+        )
+    except httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError:
+        logger.warning("Unable to load the sidecar model catalog")
+    return None
+
+
+async def bounded_model_catalog() -> list[dict[str, Any]] | None:
+    """The sidecar model catalog, waiting at most one bounded cold discovery.
+
+    The one accessor for every surface that needs the catalog (the admin
+    settings load, the provider card, the pair validators), so a hung sidecar
+    cannot stall any of them on the sidecar client's own minutes-long timeout.
+
+    A warm cache answers through the normal lookup, which returns it without
+    awaiting anything. A cold one is discovered once: concurrent callers await
+    the same in-flight attempt, so the second load inside a discovery pays only
+    the remainder of that attempt, never a second bound. A follower awaits that
+    shared result instead of taking the bounded answer: a shorter wait would
+    serve it a different provider set than the load running beside it, and the
+    remainder it waits for is bounded by the same 2s the first waiter pays.
+
+    ``None`` = no answer: the attempt timed out (which also arms the cooldown)
+    or one timed out moments ago. The caller decides whether that means "render
+    without the catalog" or "refuse"; the cache is never filled with a
+    placeholder.
+    """
+    global _cold_catalog_attempt
+    if _model_catalog_cache is not None:
+        # Kept as a call, not the cache read: an overridden catalog still wins.
+        return await _get_model_catalog()
+    running_loop = asyncio.get_running_loop()
+    if _cold_catalog_attempt is not None and (
+        _cold_catalog_attempt.done()
+        # A task from another loop would never run here: drop it, retry below.
+        or _cold_catalog_attempt.get_loop() is not running_loop
+    ):
+        _cold_catalog_attempt = None
+    if _cold_catalog_attempt is None and time.monotonic() >= _cold_catalog_retry_at:
+        _cold_catalog_attempt = asyncio.create_task(_cold_catalog_discovery())
+    attempt = _cold_catalog_attempt
+    if attempt is None:
+        return None
+    # Shielded: one request's cancellation must not cancel the attempt every
+    # other waiter shares.
+    return await asyncio.shield(attempt)
 
 
 async def _get_model_catalog(*, refresh: bool = False) -> list[dict[str, Any]]:

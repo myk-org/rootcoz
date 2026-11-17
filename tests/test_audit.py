@@ -532,7 +532,7 @@ async def test_provider_selection_seed_records_the_request_ip(
         storage, "set_server_provider_models", AsyncMock(return_value=True)
     )
     monkeypatch.setattr(
-        main,
+        ai_client,
         "_get_model_catalog",
         AsyncMock(return_value=[{"provider": "openai", "id": "gpt-x"}]),
     )
@@ -8022,7 +8022,7 @@ def test_admin_user_key_rotate_says_the_sessions_were_invalidated(app_client) ->
 def test_provider_models_set_counts_the_whole_selection(app_client) -> None:
     admin_login(app_client)
     with patch.object(
-        main,
+        ai_client,
         "_get_model_catalog",
         AsyncMock(
             return_value=[

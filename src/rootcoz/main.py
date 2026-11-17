@@ -84,9 +84,9 @@ from rootcoz.ai_client import (
     SESSION_REFUSAL_MARKER,
     SessionCreationRefused,
     _cached_catalog_provider_ids,
-    _get_model_catalog,
     _setup_usage_recorder,
     ai_username,
+    bounded_model_catalog,
     build_friendly_catalog,
     call_ai_once,
     clear_cursor_auth_cache,
@@ -20539,7 +20539,11 @@ async def set_free_ai_models_endpoint(
         (row["provider"].lower(), row["model"])
         for row in await storage.list_free_ai_models()
     }
-    catalog = await _get_model_catalog()
+    catalog = await bounded_model_catalog()
+    if catalog is None:
+        raise HTTPException(
+            status_code=503, detail="AI model catalog is temporarily unavailable"
+        )
     catalog_pairs = {
         (str(entry.get("provider") or "").lower(), str(entry.get("id") or ""))
         for entry in catalog
@@ -20662,9 +20666,16 @@ async def _seed_server_provider_selection(
         # nothing: the key can access no models at all.
         base_models = [row["model"] for row in key_scoped_rows if row["model"]]
     else:
+        catalog = await bounded_model_catalog()
+        if catalog is None:
+            # Seeding nothing would withdraw every model of a now-managed
+            # provider; refuse instead of guessing.
+            raise HTTPException(
+                status_code=503, detail="AI model catalog is temporarily unavailable"
+            )
         base_models = [
             entry["id"]
-            for entry in await _get_model_catalog()
+            for entry in catalog
             if isinstance(entry.get("provider"), str)
             and entry["provider"].lower() == provider.lower()
             and isinstance(entry.get("id"), str)
@@ -21445,8 +21456,10 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     _require_admin(request)
     # Catalog first: ambient deployment credentials (#376) resolve against the
     # last-known catalog, so a cold cache would report a provider keyed from
-    # the environment as not refreshable on this page load.
-    catalog = await _get_model_catalog()
+    # the environment as not refreshable on this page load. Bounded like every
+    # catalog surface: a hung sidecar leaves the card to answer from stored,
+    # registry and manifest rows instead of holding the page.
+    catalog = await bounded_model_catalog() or []
     # Deployment-env credentials (#372) have no stored key whose add/rotate
     # would capture their key-scoped listing. Capture it here (TTL-cached) so
     # the offered set is the live listing, not the provider's static manifest.
@@ -21614,13 +21627,18 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
         managed = provider_lower in selections or normalize_provider(provider) in stored
         selected = selections.get(provider_lower, {})
         # The row's own spelling first, so a case-distinct provider lists exactly
-        # its own models; a row with no bucket of its own spelling still follows
-        # the lone case-variant of the same provider (manifest ``EnMaaS``,
-        # catalog ``enmaas`` — #586 r4).
+        # its own models. A row whose spelling no bucket carries takes the one
+        # bucket only when there is exactly one candidate — the manifest-declared
+        # ``EnMaaS`` beside a catalog ``enmaas`` (#586 r4). With more than one
+        # case-variant the row has no models of its own and guessing would serve
+        # another provider's models, so it lists none (#586 r6).
         catalog_buckets = catalog_models.get(provider_lower, {})
-        catalog_rows = catalog_buckets.get(provider)
-        if catalog_rows is None:
-            catalog_rows = next(iter(catalog_buckets.values()), [])
+        if provider in catalog_buckets:
+            catalog_rows = catalog_buckets[provider]
+        elif len(catalog_buckets) == 1:
+            catalog_rows = next(iter(catalog_buckets.values()))
+        else:
+            catalog_rows = []
         models = [
             {
                 "id": m["id"],
@@ -21991,12 +22009,17 @@ async def set_server_provider_models_endpoint(
         for row in await storage.list_free_ai_models()
         if row["provider"].lower() == provider.lower()
     }
+    catalog = await bounded_model_catalog()
+    if catalog is None:
+        raise HTTPException(
+            status_code=503, detail="AI model catalog is temporarily unavailable"
+        )
     catalog_pairs = {
         (
             str(entry.get("provider") or "").lower(),
             str(entry.get("id") or ""),
         )
-        for entry in await _get_model_catalog()
+        for entry in catalog
     }
     # Key-scoped pairs (#350): a keyed provider's captured listing is a
     # valid selection target even for models the static catalog lacks.
