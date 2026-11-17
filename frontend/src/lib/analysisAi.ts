@@ -60,7 +60,7 @@ export function isAnalysisAiAvailable(providers: Record<string, AiModel[]>, stat
 
 /**
  * Which part of a pair the loaded catalog cannot serve, so a notice can name it: the
- * provider when the catalog has never heard of it, the model when it lists the provider
+ * provider when the catalog does not list it, the model when it lists the provider
  * but not a usable model, and the session when the model is listed yet the sidecar
  * refuses to open a session for it.
  */
@@ -71,7 +71,10 @@ export function analysisAiUnavailablePart(
   provider: string, model: string, canUseServer = true, canUseFree = false,
 ): AnalysisAiUnavailablePart {
   const id = normalizeProvider(provider)
-  if (!(id in providers) && !(id in status)) return 'provider'
+  // `providers` is what the picker offers. A provider_status key is not enough: the
+  // backend synthesises a `cursor` entry whenever any Cursor-family provider is
+  // registered, so a stale `cursor` default would be blamed on its model (#591).
+  if (!(id in providers)) return 'provider'
   const listed = usableModels(providers, provider, false, status, canUseServer, canUseFree)
   return listed.some((option) => option.id === model && option.session_supported === false) ? 'session' : 'model'
 }

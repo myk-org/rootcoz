@@ -153,6 +153,30 @@ describe('useAiSelection', () => {
     expect(pair()).toBe('/')
   })
 
+  it('keeps the fallback pending while /api/auth/me is still loading, so no empty pair is posted', async () => {
+    // The catalog can land before the grants it is judged against: `usable()` rejects a
+    // server pair meanwhile, so dropping `aiPending` would enable Continue on '' (#591).
+    catalog = SERVER_CATALOG
+    auth.loading = true
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    let releaseCatalog: (value: unknown) => void = () => {}
+    get.mockImplementation(() => new Promise((resolve) => { releaseCatalog = resolve }))
+    const view = render(<Harness provider="claude" model="sonnet" />)
+    await waitFor(() => expect(get).toHaveBeenCalled())
+    await act(async () => releaseCatalog(SERVER_CATALOG))
+
+    expect(pair()).toBe('/')
+    expect(screen.getByTestId('settled').textContent).toBe('pending')
+    // The fallback is not judged unusable yet, so it is not announced as ignored.
+    expect(debug).not.toHaveBeenCalledWith('[ai-pair] ignored an unavailable default pair', 'claude/sonnet')
+
+    auth.loading = false
+    auth.canUseServerProviders = true
+    view.rerender(<Harness provider="claude" model="sonnet" />)
+    await waitFor(() => expect(pair()).toBe('claude/sonnet'))
+    expect(screen.getByTestId('settled').textContent).toBe('settled')
+  })
+
   it('applies a manual model id for a no-listing provider', async () => {
     // The backend keeps the provider in the catalog with an empty model list and reports
     // modelListingSupported: false, so the provider key exists and a manual pair is usable.

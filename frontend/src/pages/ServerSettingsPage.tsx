@@ -727,8 +727,11 @@ export function ServerSettingsPage() {
   // The catalog decides whether the default can be served at all (#591), and names the
   // part it cannot serve: a provider it does not have, a model it does not offer, or a
   // listed model the sidecar opens no session for. The stored value is left as it is.
-  const { providers: aiProviders, providerStatus: aiProviderStatus, providerKeys: aiProviderKeys } = useProviderCatalog()
-  const aiDefaultUnserved = savedAiProvider !== '' && aiProviderKeys.length > 0 &&
+  const {
+    providers: aiProviders, providerStatus: aiProviderStatus, providerKeys: aiProviderKeys, loaded: aiCatalogLoaded,
+  } = useProviderCatalog()
+  // A catalog that answered with no providers is still an answer; one that failed is not.
+  const aiDefaultUnserved = savedAiProvider !== '' && aiCatalogLoaded &&
     !isAnalysisAiAvailable(aiProviders, aiProviderStatus, savedAiProvider, savedAiModel, false, canUseServerProviders, canUseFreeProviders)
     ? analysisAiUnavailablePart(aiProviders, aiProviderStatus, savedAiProvider, savedAiModel, canUseServerProviders, canUseFreeProviders)
     : null

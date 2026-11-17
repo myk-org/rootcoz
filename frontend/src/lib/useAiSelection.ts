@@ -93,16 +93,17 @@ export function useAiSelection(
   // read, never written, cleared or replaced here.
   const fallbackApplied = fallbackProvider === '' || usable(fallbackProvider, fallbackModel)
   useEffect(() => {
-    if (fallbackProvider === '' || fallbackApplied || !catalogLoaded) return
+    if (fallbackProvider === '' || fallbackApplied || !catalogLoaded || authLoading) return
     console.debug('[ai-pair] ignored an unavailable default pair', `${fallbackProvider}/${fallbackModel}`)
-  }, [fallbackApplied, fallbackProvider, fallbackModel, catalogLoaded])
+  }, [fallbackApplied, fallbackProvider, fallbackModel, catalogLoaded, authLoading])
 
   return {
     aiProvider: sel ? sel.provider : fallbackApplied ? normalizeProvider(fallbackProvider) : '',
     aiModel: sel ? sel.model : fallbackApplied ? fallbackModel : '',
-    // A supplied fallback is undecided, not absent, until the catalog answers: a surface
-    // that sends the pair (issue preview) must wait instead of posting an empty one (#591).
-    aiPending: fallbackProvider !== '' && !sel && !catalogSettled,
+    // A supplied fallback is undecided, not absent, until the catalog answers _and_
+    // /api/auth/me resolves the grants `usable()` reads: a surface that sends the pair
+    // (issue preview) must wait instead of posting an empty one (#591).
+    aiPending: fallbackProvider !== '' && !sel && (!catalogSettled || authLoading),
     setAiPair,
   }
 }

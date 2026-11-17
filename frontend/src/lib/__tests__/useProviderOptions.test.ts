@@ -113,6 +113,24 @@ describe('useProviderCatalog shared fetch', () => {
     expect(result.current.providerStatus.foo).toBeUndefined()
   })
 
+  it('reports an empty catalog as loaded, but not a failed request', async () => {
+    // An answer with no providers is an answer; a failed request says nothing.
+    getMock.mockImplementation(async () => ({ providers: {}, provider_status: {} }))
+    const empty = renderHook(() => useProviderCatalog())
+    await waitFor(() => expect(empty.result.current.settled).toBe(true))
+    expect(empty.result.current.loaded).toBe(true)
+    expect(empty.result.current.providerKeys).toEqual([])
+    empty.unmount()
+
+    _resetProviderCatalogCacheForTests()
+    getMock.mockReset()
+    getMock.mockRejectedValue(new Error('503 Service Unavailable'))
+    const failed = renderHook(() => useProviderCatalog())
+    await waitFor(() => expect(failed.result.current.settled).toBe(true))
+    expect(failed.result.current.loaded).toBe(false)
+    failed.unmount()
+  })
+
   it('caches the catalog for later mounts and refetches after a reset', async () => {
     getMock.mockImplementation(async () => ({ providers: { openai: [{ id: 'gpt' }] } }))
     const regular = renderHook(() => useProviderCatalog())

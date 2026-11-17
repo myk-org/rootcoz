@@ -16,9 +16,11 @@ type CatalogState = {
   originalIds: Record<string, string>
   /** The request has answered (even with nothing) — not "still loading". */
   settled: boolean
+  /** The request succeeded — an empty provider list is an answer, a failure is not. */
+  loaded: boolean
 }
 
-const EMPTY_CATALOG: CatalogState = { providerKeys: [], providers: {}, enabled: [], providerStatus: {}, originalIds: {}, settled: false }
+const EMPTY_CATALOG: CatalogState = { providerKeys: [], providers: {}, enabled: [], providerStatus: {}, originalIds: {}, settled: false, loaded: false }
 /** A request that answered with nothing: terminal, unlike `EMPTY_CATALOG`. */
 const SETTLED_EMPTY_CATALOG: CatalogState = { ...EMPTY_CATALOG, settled: true }
 
@@ -89,6 +91,7 @@ function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
         providerStatus,
         originalIds,
         settled: true,
+        loaded: true,
       }
       if (generation === catalogGeneration && catalogInflight.get(cacheKey) === req) {
         catalogCache.set(cacheKey, next)
@@ -146,6 +149,8 @@ export function useProviderCatalog(): {
   originalIds: Record<string, string>
   /** The request has answered (even with nothing) — not "still loading". */
   settled: boolean
+  /** The request succeeded — an empty provider list is an answer, a failure is not. */
+  loaded: boolean
 } {
   const { username, isAdmin, authenticated } = useAuth()
   const cacheKey = catalogKeyFor(username, isAdmin, authenticated)
