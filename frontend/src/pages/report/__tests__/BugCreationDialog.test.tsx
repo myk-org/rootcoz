@@ -136,21 +136,30 @@ describe('BugCreationDialog AI picker', () => {
   it('gates a server-backed pair when the user has no server grant', async () => {
     grant = false
     const user = userEvent.setup()
+    // The analysis ran with a server-credentialed pair this user cannot use, so the
+    // dialog does not adopt it as a selection (#591) — the user picks a pair they can.
     await openPicker('claude', 'sonnet')
 
     expect(screen.getAllByText(SERVER_ACCESS_HELP).length).toBeGreaterThan(0)
-    await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
-    const serverModel = await screen.findByRole('option', { name: /sonnet/ })
-    expect(serverModel).toHaveAttribute('aria-disabled', 'true')
-    expect(screen.getByRole('button', { name: /continue/i })).toBeDisabled()
-    expect(screen.getByRole('alert')).toHaveTextContent(/not available with your credentials/i)
+    expect(screen.getByRole('combobox', { name: 'AI Provider' })).toHaveTextContent('Server default')
+    await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
+    const serverProvider = await screen.findByRole('option', { name: /claude.*Server/i })
+    expect(serverProvider).toHaveAttribute('aria-disabled', 'true')
 
     // A personal-key pair is usable, so the gate clears.
-    await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
     await user.click(await screen.findByRole('option', { name: /openai.*User/i }))
     await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
     await user.click(await screen.findByRole('option', { name: /gpt-4o/ }))
     expect(screen.getByRole('button', { name: /continue/i })).toBeEnabled()
+  })
+
+  it('refuses to send a pair the catalog cannot serve, instead of letting the server 400', async () => {
+    const user = userEvent.setup()
+    await openPicker('openai', 'gpt-4o')
+
+    await user.type(screen.getByRole('combobox', { name: 'AI Model' }), '-nope')
+    expect(screen.getByRole('alert')).toHaveTextContent(/not available/i)
+    expect(screen.getByRole('button', { name: /continue/i })).toBeDisabled()
   })
 
   it('sends the analysis pair with the preview request', async () => {

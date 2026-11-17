@@ -28,12 +28,20 @@ vi.mock('@/lib/auth', () => ({
   }),
 }))
 vi.mock('@/hooks/useProviderModels', () => ({
-  useProviderModels: () => ({ models: [], refresh: vi.fn(), refreshing: false }),
+  useProviderModels: (provider: string) => {
+    modelListingCalls.push(provider)
+    return { models: [], refresh: vi.fn(), refreshing: false }
+  },
 }))
+/** Providers the page asked for a model listing — never one the catalog lacks (#591). */
+let modelListingCalls: string[] = []
+/** Mutable catalog, so a test can serve (or not serve) the stored default. */
+let catalog: { providers: Record<string, unknown[]>; providerStatus: Record<string, unknown>; providerKeys: string[] } = {
+  providers: {}, providerStatus: {}, providerKeys: [],
+}
 vi.mock('@/lib/useProviderOptions', () => ({
   useCursorAuthStatus: () => null,
-  // No catalog: the peer editor renders its empty pickers.
-  useProviderCatalog: () => ({ providers: {}, providerStatus: {} }),
+  useProviderCatalog: () => catalog,
 }))
 vi.mock('@/components/shared/ServerProvidersCard', () => ({
   ServerProvidersCard: () => <div data-testid="server-providers-card" />,
@@ -211,6 +219,9 @@ beforeEach(() => {
   vi.clearAllMocks()
   localStorage.clear()
   scrollIntoView.mockClear()
+  modelListingCalls = []
+  // No catalog by default: the peer editor renders its empty pickers.
+  catalog = { providers: {}, providerStatus: {}, providerKeys: [] }
   get.mockResolvedValue(baseSettings() as never)
   put.mockResolvedValue({} as never)
   testIntegration.mockResolvedValue({ ok: true, message: 'ok' } as never)
@@ -1729,6 +1740,55 @@ describe('ServerSettingsPage env parity (#347)', () => {
     fireEvent.click(await screen.findByRole('tab', { name: 'Analysis' }))
     await waitForRow('active_server_providers')
     expect(screen.queryByText(/Free AI models/)).not.toBeInTheDocument()
+  })
+})
+
+// #591 — the stored AI default is judged against the catalog this server actually has.
+describe('ServerSettingsPage AI default catalog check (#591)', () => {
+  /** provider → its only model id, so a stored pair can be served or missed exactly. */
+  const catalogServing = (models: Record<string, string>) => ({
+    providers: Object.fromEntries(Object.entries(models).map(([p, id]) => [p, [{ id, name: id, provider: p, credential_sources: ['user'], verified: true }]])),
+    providerStatus: {},
+    providerKeys: Object.keys(models),
+  })
+
+  function storedDefault(provider: string, model: string) {
+    const settings = baseSettings()
+    Object.assign(settings.find((s) => s.key === 'ai_provider')!, { value: provider, source: 'db' })
+    Object.assign(settings.find((s) => s.key === 'ai_model')!, { value: model, source: 'db' })
+    get.mockResolvedValue(settings as never)
+  }
+
+  async function openAiRow() {
+    renderPage()
+    // #589 filed the AI settings under the Analysis tab.
+    fireEvent.click(await screen.findByRole('tab', { name: 'Analysis' }))
+    await waitForRow('ai_provider')
+    return row('ai_provider')!
+  }
+
+  it('reports a stored default the catalog does not serve, without asking for its models', async () => {
+    catalog = catalogServing({ enmaas: 'enmaas-model' })
+    storedDefault('cursor', 'cursor:cursor-grok-4.6-high')
+    const providerRow = await openAiRow()
+
+    expect(within(providerRow).getByRole('status')).toHaveTextContent(/Not available on this server/)
+    expect(within(providerRow).getAllByText(/cursor/).length).toBeGreaterThan(0)
+    // No model listing for a provider the catalog does not offer — that is the 400.
+    expect(modelListingCalls).not.toContain('cursor')
+    // The stored default is displayed, never cleared or rewritten by rendering.
+    expect(put).not.toHaveBeenCalled()
+    expect(persistSetting).not.toHaveBeenCalled()
+    expect(vi.mocked(api.delete)).not.toHaveBeenCalled()
+  })
+
+  it('stays quiet for a stored default the catalog serves', async () => {
+    catalog = catalogServing({ gemini: 'gemini-2.5-pro' })
+    storedDefault('gemini', 'gemini-2.5-pro')
+    const providerRow = await openAiRow()
+
+    expect(within(providerRow).queryByRole('status')).toBeNull()
+    expect(modelListingCalls).toContain('gemini')
   })
 })
 
