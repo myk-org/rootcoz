@@ -87,6 +87,41 @@ describe('dark theme text contrast', () => {
   })
 })
 
+/** Body of the rule opened by `selector` (rules here never nest). */
+function ruleBody(selector: string): string {
+  const start = themeCss.indexOf(`${selector} {`)
+  if (start < 0) throw new Error(`${selector} is missing from theme.css`)
+  return themeCss.slice(start, themeCss.indexOf('\n}', start))
+}
+
+/**
+ * Guard: the scrollbar hover is a surface, not text. It used to borrow
+ * `--color-text-tertiary`, so re-tinting text turned every hovered thumb
+ * near-white. It must own a token of its own.
+ */
+describe('scrollbar thumb hover', () => {
+  const hover = ruleBody('*::-webkit-scrollbar-thumb:hover')
+
+  it('does not derive its background from a text token', () => {
+    expect(hover.match(/--color-text-[a-z-]+/g) ?? []).toEqual([])
+  })
+
+  it('uses --color-scrollbar-thumb-hover', () => {
+    expect(hover).toContain('var(--color-scrollbar-thumb-hover)')
+  })
+
+  it.each([
+    ['dark', dark],
+    ['light', light],
+  ])('%s theme declares it', (_theme, tokens) => {
+    expect(tokens['--color-scrollbar-thumb-hover']).toMatch(/^#[0-9a-f]{6}$/)
+  })
+
+  it('differs between dark and light', () => {
+    expect(light['--color-scrollbar-thumb-hover']).not.toBe(dark['--color-scrollbar-thumb-hover'])
+  })
+})
+
 describe('light theme keeps its own text tokens', () => {
   it.each(Object.keys(FLOORS))('%s is overridden in html[data-theme="light"]', (token) => {
     expect(light[token], `light theme has no ${token} override`).toMatch(/^#[0-9a-f]{6}$/)
