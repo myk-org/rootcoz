@@ -217,6 +217,61 @@ async def test_a_link_reads_its_row_inside_the_link_transaction(
     assert again == created
 
 
+@pytest.mark.parametrize("block", ["pending", "disabled"])
+async def test_a_blocked_account_cannot_be_handed_a_link(
+    setup_test_db: Path, block: str
+) -> None:
+    """A block committed after the route's check still refuses the link write.
+
+    The route applies the same gate before it gets here; this pins the write
+    itself, which is what a caller added later would otherwise trust. Nothing is
+    stored either way.
+    """
+    from rootcoz.config import Settings
+
+    with (
+        patch.object(storage, "DB_PATH", setup_test_db),
+        patch("rootcoz.config._cached_settings", Settings(require_approval=True)),
+    ):
+        await storage.create_user("alice")
+        if block == "disabled":
+            assert await storage.set_user_disabled("alice", True) is not None
+        else:
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "UPDATE users SET status = ? WHERE username = 'alice'", (block,)
+                )
+                await db.commit()
+
+        with pytest.raises(ValueError, match=f"^account_{block}$"):
+            await storage.add_user_identity("alice", "google", "sub-1")
+
+        assert await _raw_identity_rows() == []
+
+
+async def test_an_admin_is_not_held_by_its_own_approval_status_when_linking(
+    setup_test_db: Path,
+) -> None:
+    """An administrator is exempt by role, not by status, in the link write too."""
+    from rootcoz.config import Settings
+
+    with (
+        patch.object(storage, "DB_PATH", setup_test_db),
+        patch("rootcoz.config._cached_settings", Settings(require_approval=True)),
+    ):
+        await storage.create_admin_user("boss")
+        async with storage._connect_db() as db:
+            await db.execute(
+                "UPDATE users SET status = 'pending' WHERE username = ?", ("boss",)
+            )
+            await db.commit()
+
+        created = await storage.add_user_identity("boss", "google", "sub-1")
+
+    assert created["username"] == "boss"
+    assert created["subject"] == "sub-1"
+
+
 async def test_create_with_identity_returns_the_api_key(setup_test_db: Path) -> None:
     """The key is part of creating the account: nothing else is ever shown."""
     raw_key = await storage.create_user_with_identity(

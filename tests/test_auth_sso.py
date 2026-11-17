@@ -1730,6 +1730,37 @@ async def test_a_stale_link_that_raced_a_delete_is_reported_as_missing(
         assert "no longer exists" in response.json()["detail"]
 
 
+async def test_a_block_committed_during_the_link_is_denied_with_its_reason(
+    temp_db_path: Path,
+) -> None:
+    """Storage's eligibility verdict answers like the route's own refusal.
+
+    The route checks the account minutes before the ticket comes back, so the
+    block an admin commits in that window lands in the write itself. The reason
+    storage names is audited as-is and answered 403 with the same detail the
+    route's own gate uses — not the generic "that sign-in cannot be used".
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        raw_key = await storage.rotate_own_key("ruthn")
+        ticket = await _ticket(client)
+
+        with patch(
+            "rootcoz.storage.add_user_identity",
+            side_effect=ValueError("account_pending"),
+        ):
+            response = client.post(
+                "/api/auth/sso/link",
+                json={"ticket": ticket, "username": "ruthn", "api_key": raw_key},
+            )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Account cannot be used to sign in"
+        refusal = await _last_sso_refusal(temp_db_path)
+        assert refusal["details"]["reason"] == "account_pending"
+        assert refusal["actor"] == "ruthn"
+
+
 async def test_the_bootstrap_admin_is_told_it_has_no_account_to_link(
     temp_db_path: Path,
 ) -> None:
@@ -4955,8 +4986,17 @@ async def test_above_require_approval_a_pending_account_is_held_with_its_reason(
     """
     env = {**_SSO_ENV, "REQUIRE_APPROVAL": "true"}
     for client in make_app_client(temp_db_path, env):
-        await storage.create_user("ruthn", status="pending")
+        # Linked while approved, then left pending: an identity that exists on an
+        # unapproved account is the case this gate has to hold, and it is the
+        # only order that produces it — the link write itself refuses a blocked
+        # account now.
+        await storage.create_user("ruthn")
         await storage.add_user_identity("ruthn", "google", "sub-1")
+        async with storage._connect_db() as db:
+            await db.execute(
+                "UPDATE users SET status = 'pending' WHERE username = ?", ("ruthn",)
+            )
+            await db.commit()
         raw_key = await storage.rotate_own_key("ruthn")
         sealed, state = _sealed(next_path="/report/1")
         client.cookies.set(sso_state.STATE_COOKIE, sealed)

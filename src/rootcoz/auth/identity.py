@@ -316,7 +316,11 @@ async def link_existing(
         AuthError: ``identity_conflict`` when the subject is already linked to
             a different account or the account already holds a different subject
             for this provider; ``account_missing`` when the account no longer
-            exists; ``ticket_expired`` when the ticket is no longer live.
+            exists; ``account_<reason>`` when the account may not act at all
+            (``account_pending``, ``account_rejected``, ``account_disabled``,
+            ``account_locked``) — storage re-reads that inside the write, so a
+            block committed after the caller's own check still wins;
+            ``ticket_expired`` when the ticket is no longer live.
     """
     try:
         await storage.add_user_identity(
@@ -330,7 +334,12 @@ async def link_existing(
         # The account disappeared between the credential check and this write: it
         # is not a conflict, and the caller must not be told "already linked".
         text = str(exc)
-        if "ticket" in text:
+        if text.startswith("account_"):
+            # Storage's eligibility verdict, already in its route-facing shape
+            # (``account_pending``): the route answers and audits it as if it had
+            # been the one to refuse.
+            reason = text.split(" ", 1)[0]
+        elif "ticket" in text:
             reason = "ticket_expired"
         elif "not found" in text:
             reason = "account_missing"

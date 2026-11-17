@@ -34,6 +34,10 @@ function label(provider: string): string {
   return PROVIDER_LABELS[provider] ?? provider
 }
 
+/** `null` identities cannot tell "never loaded" from "load failed", so the list
+ *  has its own state: a failed load must not read as still loading. */
+type LoadStatus = 'loading' | 'ready' | 'failed'
+
 /**
  * Connect or disconnect the SSO providers on this account.
  *
@@ -53,6 +57,7 @@ export function SignInMethodsCard() {
   // row, so no provider identity could ever be attached to it.
   const { role, username } = useAuth()
   const canManage = role !== 'viewer' && username !== 'admin'
+  const [status, setStatus] = useState<LoadStatus>('loading')
   const [identities, setIdentities] = useState<LinkedIdentity[] | null>(null)
   const [unlinkable, setUnlinkable] = useState(true)
   const [sso, setSso] = useState<BrowserSignIn>({ providers: [], cliOnly: false })
@@ -65,8 +70,10 @@ export function SignInMethodsCard() {
       const data = await api.get<IdentitiesResponse>('/api/user/identities')
       setIdentities(data.identities)
       setUnlinkable(data.unlinkable)
+      setStatus('ready')
     } catch (err) {
       setError(extractApiDetail(err) ?? 'Could not load your sign-in methods.')
+      setStatus('failed')
     }
     try {
       const offered = await api.get<SsoProvidersResponse>('/api/auth/sso/providers')
@@ -108,7 +115,12 @@ export function SignInMethodsCard() {
   }
 
   const connected = new Set((identities ?? []).map((identity) => identity.provider))
-  const available = sso.providers.filter((provider) => !connected.has(provider.name))
+  // Which providers are already connected is unknown until the list arrives, so
+  // no connect button is offered while it is missing or failed.
+  const available =
+    status === 'ready'
+      ? sso.providers.filter((provider) => !connected.has(provider.name))
+      : []
 
   return (
     <Card className="mt-4">
@@ -121,13 +133,17 @@ export function SignInMethodsCard() {
           </p>
         </div>
 
-        {identities === null ? (
+        {status === 'loading' && (
           <p className="text-sm text-text-tertiary">Loading…</p>
-        ) : identities.length === 0 ? (
+        )}
+
+        {status === 'ready' && identities?.length === 0 && (
           <p className="text-sm text-text-tertiary">
             No provider is connected yet — you sign in with your API key.
           </p>
-        ) : (
+        )}
+
+        {status === 'ready' && identities && identities.length > 0 && (
           <ul className="space-y-2">
             {identities.map((identity) => (
               <li

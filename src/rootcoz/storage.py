@@ -10433,9 +10433,11 @@ async def add_user_identity(
 
     Raises:
         ValueError: When the provider is unknown, the account does not exist,
-            the subject is already linked to another account, the account
-            already has a different subject for this provider, or the ticket was
-            no longer live.
+            the account may not act at all (``account_pending``,
+            ``account_rejected``, ``account_disabled``, ``account_locked``), the
+            subject is already linked to another account, the account already
+            has a different subject for this provider, or the ticket was no
+            longer live.
     """
     _validate_sso_provider(provider)
     _validate_identity_subject(subject)
@@ -10450,11 +10452,25 @@ async def add_user_identity(
             await db.execute("BEGIN IMMEDIATE")
             try:
                 cursor = await db.execute(
-                    "SELECT id FROM users WHERE username = ?", (username,)
+                    f"SELECT {_USER_LOOKUP_COLUMNS}, status FROM users"
+                    " WHERE username = ?",
+                    (username,),
                 )
-                user = await cursor.fetchone()
-                if user is None:
+                row = await cursor.fetchone()
+                if row is None:
                     msg = f"User '{username}' not found"
+                    raise ValueError(msg)
+                user = _user_row_to_dict(row)
+                # Asked here, from the row this transaction read, exactly like
+                # the device exchange: a block committed between the caller's
+                # check and this write must win, and a caller added later gets
+                # the gate without having to remember it. Nothing is written
+                # when it refuses.
+                refusal = _account_eligibility_refusal(
+                    user, is_admin=str(user.get("role") or "") == "admin"
+                )
+                if refusal:
+                    msg = f"account_{refusal}"
                     raise ValueError(msg)
                 linked = await _select_identities(
                     db, "i.provider = ? AND i.subject = ?", (provider, subject)
@@ -11216,18 +11232,21 @@ async def release_device_code(device_code: str) -> bool:
     return await _retry_contended(_attempt)
 
 
-def _device_exchange_refusal(user: dict[str, Any], *, is_admin: bool) -> str:
-    """Name why *user* may not be handed a freshly minted session, or ``""``.
+def _account_eligibility_refusal(user: dict[str, Any], *, is_admin: bool) -> str:
+    """Name why *user* may not act at all, or ``""`` when it may.
 
-    Approval happens minutes before a terminal polls, so the block an admin
-    commits in that window has to win: disabling or un-approving an account drops
-    its sessions, and a token minted afterwards would outlive the invalidation.
-    Both decisions are :mod:`rootcoz.auth.approval`'s — the same predicates the
-    login route, the middleware and the poll apply — imported here rather than
-    restated, because ``auth`` already depends on this module.
+    One predicate for every write that hands out access — a session minted from a
+    device code, an identity link written for a first login — each applied to the
+    row it read *inside* its own transaction. Approval happens minutes before
+    either write lands, so the block an admin commits in that window has to win:
+    disabling or un-approving an account drops its sessions, and a credential or
+    link written afterwards would outlive the invalidation. Both decisions are
+    :mod:`rootcoz.auth.approval`'s — the same predicates the login route, the
+    middleware and the poll apply — imported here rather than restated, because
+    ``auth`` already depends on this module.
 
     Args:
-        user: The users row, read inside the minting transaction.
+        user: The users row, read inside the writing transaction.
         is_admin: Whether the account is an administrator, who bypasses approval.
 
     Returns:
@@ -11336,7 +11355,7 @@ async def exchange_device_code_for_session(
                 else:
                     role = str(row["role"] or "reviewer")
                     is_admin = role == "admin"
-                    refusal = _device_exchange_refusal(user, is_admin=is_admin)
+                    refusal = _account_eligibility_refusal(user, is_admin=is_admin)
                     if refusal:
                         await db.rollback()
                         # Prefixed like every other SSO refusal reason, so the
