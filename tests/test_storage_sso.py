@@ -887,3 +887,126 @@ async def test_purge_removes_only_expired_device_codes(setup_test_db: Path) -> N
         assert await storage.purge_expired_device_codes() == 1
         assert await storage.get_device_code(live["device_code"]) is not None
         assert await storage.get_device_code(stale["device_code"]) is None
+
+
+async def test_a_pre_sso_database_upgrades_through_the_username_merge(
+    temp_db_path: Path,
+) -> None:
+    """A database from before SSO must still start up.
+
+    The username merge deletes the rows keyed by a duplicate's ``users.id``,
+    including its SSO rows — so it may only run once those tables exist. On a
+    deployment that predates SSO the tables do not exist when the old database
+    is first reopened, which a fresh test database (and therefore CI) never
+    reproduces: the merge must run after the table creation, not before it.
+    """
+    with patch.object(storage, "DB_PATH", temp_db_path):
+        # A modern database, made to look like one from before SSO: the three SSO
+        # tables and the username index are gone, and two case variants are back.
+        await storage.init_db()
+        async with storage._connect_db() as db:
+            for table in ("user_identities", "sso_device_codes", "sso_link_tickets"):
+                await db.execute(f"DROP TABLE {table}")
+            # The index is what tells the merge it already ran.
+            await db.execute("DROP INDEX idx_users_username_lower")
+            await db.execute(
+                "INSERT INTO users (username, role, created_at)"
+                " VALUES ('Frank', 'operator', '2024-01-01 00:00:00')"
+            )
+            await db.execute(
+                "INSERT INTO users (username, role, created_at)"
+                " VALUES ('FRANK', 'admin', '2024-06-01 00:00:00')"
+            )
+            await db.commit()
+
+        # The upgrade path, to completion: the merge deletes rows from the SSO
+        # tables, so it may only run once they exist again.
+        await storage.init_db()
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute("SELECT username, role FROM users")
+            users = [dict(row) for row in await cursor.fetchall()]
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+            tables = {row["name"] for row in await cursor.fetchall()}
+
+    assert users == [{"username": "frank", "role": "admin"}]
+    assert {"user_identities", "sso_device_codes", "sso_link_tickets"} <= tables
+
+
+async def _approve_and_claim(username: str) -> dict:
+    """Take a device code all the way to a claimed, unspent exchange."""
+    code = await storage.create_device_code(ttl_seconds=600, interval_seconds=5)
+    await storage.authorize_device_code(code["user_code"], username=username)
+    assert await storage.redeem_device_code(code["device_code"]) is not None
+    return code
+
+
+@pytest.mark.parametrize("block", ["disabled", "locked", "pending", "rejected"])
+async def test_a_block_committed_while_the_code_waited_refuses_the_mint(
+    setup_test_db: Path, block: str
+) -> None:
+    """Approval is minutes old; the account may be blocked by the time it mints.
+
+    The block already dropped the account's sessions, so a token minted after it
+    would outlive that invalidation. The exchange re-reads the row inside its own
+    transaction and refuses, naming the block so the poll can audit it.
+    """
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_user("alice")
+        code = await _approve_and_claim("alice")
+
+        if block == "disabled":
+            assert await storage.set_user_disabled("alice", True) is not None
+        else:
+            column = "locked_at" if block == "locked" else "status"
+            value = storage._now_str() if block == "locked" else block
+            async with storage._connect_db() as db:
+                await db.execute(
+                    f"UPDATE users SET {column} = ? WHERE username = 'alice'",
+                    (value,),
+                )
+                await db.commit()
+
+        refused = await storage.exchange_device_code_for_session(
+            code["device_code"], username="alice"
+        )
+        # Named, not silent: the poll reports it as a refusal with this reason.
+        assert refused == {"refused": f"account_{block}"}
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) AS n FROM sessions WHERE username = 'alice'"
+            )
+            assert (await cursor.fetchone())["n"] == 0
+        # The claim is spent, so no poll can mint while the block stands; an
+        # admin who lifts it does not hand the terminal a token it never asked
+        # for again — the person signs in afresh.
+        assert await storage.get_device_code(code["device_code"]) is not None
+        again = await storage.exchange_device_code_for_session(
+            code["device_code"], username="alice"
+        )
+        assert again is not None and "token" not in again
+
+
+async def test_below_require_approval_a_pending_row_still_mints(
+    setup_test_db: Path,
+) -> None:
+    """With approval off a pending row is an ordinary account, exactly as at login."""
+    from rootcoz.config import Settings
+
+    with (
+        patch.object(storage, "DB_PATH", setup_test_db),
+        patch("rootcoz.config._cached_settings", Settings(require_approval=False)),
+    ):
+        await storage.create_user("alice", status="pending")
+        code = await _approve_and_claim("alice")
+
+        minted = await storage.exchange_device_code_for_session(
+            code["device_code"], username="alice"
+        )
+
+        assert minted is not None
+        assert minted["role"] == "reviewer"
+        assert (await storage.get_session(minted["token"]))["username"] == "alice"

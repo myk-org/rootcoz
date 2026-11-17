@@ -1046,11 +1046,14 @@ class Settings(BaseSettings):
     sso_openshift_issuer: str = Field(
         default="",
         description=(
-            "Issuer of the cluster's OAuth server — exactly the value it puts in"
-            " its ID token's 'iss' claim, with no '/.well-known/...' path and no"
-            " trailing path, e.g. 'https://oauth-openshift.apps.example.com'."
-            " Must be https (http only for a loopback dev server); any other value"
-            " is refused, so a misconfiguration cannot silently hide the button."
+            "OAuth-server origin of the cluster, used for the code exchange, e.g."
+            " 'https://oauth-openshift.apps.example.com'. OpenShift issues opaque"
+            " access tokens and no ID token, so there is no 'iss' claim to match:"
+            " the account, its identities and the email are read from"
+            " SSO_OPENSHIFT_API_URL. No '/.well-known/...' path and no trailing"
+            " path. Must be https (http only for a loopback dev server); any other"
+            " value is refused, so a misconfiguration cannot silently hide the"
+            " button."
         ),
     )
     sso_openshift_api_url: str = Field(

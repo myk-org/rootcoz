@@ -4774,3 +4774,158 @@ async def test_a_spent_ticket_leaves_no_account_behind(temp_db_path: Path) -> No
         assert response.status_code in (404, 409)
         # Nothing durable: no account, no undisclosed key.
         assert await storage.get_user_by_username("ruthn") is None
+
+
+# -- one approval gate for every way in ---------------------------------------
+
+
+async def test_sso_does_not_hold_a_pending_account_when_approval_is_off(
+    temp_db_path: Path,
+) -> None:
+    """The SSO gate is the login route's gate, condition for condition.
+
+    Below ``REQUIRE_APPROVAL`` a password login of a pending account is allowed,
+    so sending the SSO login of that same account to ``/pending`` — with a session
+    the middleware then refuses — was one gate disagreeing with the other two.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):  # REQUIRE_APPROVAL=false
+        await storage.create_user("ruthn", status="pending")
+        raw_key = await storage.rotate_own_key("ruthn")
+        ticket = await _ticket(client)
+
+        response = client.post(
+            "/api/auth/sso/link",
+            json={"ticket": ticket, "username": "ruthn", "api_key": raw_key},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["next"] == "/"
+        # The session it minted is usable: this account is an ordinary one here.
+        assert client.get("/api/auth/me").status_code == 200
+        actions = [row["action"] for row in await _audit_actions(temp_db_path)]
+        assert "auth.sso_link" in actions
+        assert "auth.sso_login_blocked" not in actions
+
+
+async def test_an_admin_is_not_held_by_its_own_approval_status(
+    temp_db_path: Path,
+) -> None:
+    """Neither gate ever holds an administrator, so the SSO path must not either."""
+    env = {**_SSO_ENV, "REQUIRE_APPROVAL": "true"}
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_admin_user("boss")
+        raw_key = await storage.rotate_own_key("boss")
+        # A row left pending — an import, or an admin who never approved itself.
+        async with storage._connect_db() as db:
+            await db.execute(
+                "UPDATE users SET status = 'pending' WHERE username = 'boss'"
+            )
+            await db.commit()
+        ticket = await _ticket(client)
+
+        response = client.post(
+            "/api/auth/sso/link",
+            json={"ticket": ticket, "username": "boss", "api_key": raw_key},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["next"] == "/"
+        assert client.get("/api/auth/me").status_code == 200
+        assert "auth.sso_login_blocked" not in [
+            row["action"] for row in await _audit_actions(temp_db_path)
+        ]
+
+
+async def test_above_require_approval_a_pending_account_is_held_with_its_reason(
+    temp_db_path: Path,
+) -> None:
+    """The held half of the pair: approval on, non-admin, pending.
+
+    ``REQUIRE_APPROVAL`` on means the row decides access, so the SSO login lands
+    on ``/pending`` and the trail records the state it was held for — the same
+    answer the password login of that account gives, from the same gate.
+    """
+    env = {**_SSO_ENV, "REQUIRE_APPROVAL": "true"}
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("ruthn", status="pending")
+        await storage.add_user_identity("ruthn", "google", "sub-1")
+        raw_key = await storage.rotate_own_key("ruthn")
+        sealed, state = _sealed(next_path="/report/1")
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        # Held: not the page the flow was headed for.
+        assert response.status_code == 303
+        assert response.headers["location"] == "/pending"
+        blocked = [
+            row
+            for row in await _audit_actions(temp_db_path)
+            if row["action"] == "auth.sso_login_blocked"
+        ]
+        assert [(row["outcome"], row["details"]["status"]) for row in blocked] == [
+            ("denied", "pending")
+        ]
+
+        # The same account at the password door: the same refusal, same reason.
+        login = client.post(
+            "/api/auth/login", json={"username": "ruthn", "api_key": raw_key}
+        )
+        assert login.status_code == 403
+        assert login.json()["status"] == "pending"
+
+
+async def test_a_block_committed_inside_the_exchange_is_denied_with_its_reason(
+    temp_db_path: Path,
+) -> None:
+    """The poll's eligibility read is stale by design; the mint must not be.
+
+    The window between that read and the exchange transaction is exactly where an
+    admin blocks the account — and the block has already dropped its sessions, so
+    a token minted now would outlive that invalidation.
+    """
+    real_exchange = storage.exchange_device_code_for_session
+
+    async def exchange_after_the_block(device_code: str, **kwargs: object):
+        # The block lands between the poll's checks and the transaction.
+        assert await storage.set_user_disabled(str(kwargs["username"]), True)
+        return await real_exchange(device_code, **kwargs)
+
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        session = await storage.create_session("alice", is_admin=False, role="reviewer")
+        started = _start_device(client)
+        client.cookies.set("rootcoz_session", session)
+        approved = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
+        )
+        assert approved.status_code == 200
+        client.cookies.clear()
+
+        with patch.object(
+            storage, "exchange_device_code_for_session", exchange_after_the_block
+        ):
+            polled = client.post(
+                "/api/auth/sso/device/poll",
+                json={"device_code": started["device_code"]},
+            )
+
+        assert polled.json() == {"status": "denied"}
+        # Disabling dropped the approver's session, and the refused mint added
+        # none: the account has no live credential at all.
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) AS n FROM sessions WHERE username = 'alice'"
+            )
+            assert (await cursor.fetchone())["n"] == 0
+        # The trail names the block instead of reporting the code as expired.
+        refusal = await _last_sso_refusal(temp_db_path)
+        assert refusal["details"]["reason"] == "account_disabled"
