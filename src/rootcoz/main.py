@@ -21456,6 +21456,12 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     # capture below and feeds the ``supports_key`` flag further down.
     key_providers = await supported_key_providers()
     key_capable = _key_capable_ids(key_providers)
+    # Deployment credentials before the capture below needs them; the stored
+    # rows are read after it — a key stored while the capture runs must win
+    # (``test_stored_key_appearing_mid_capture_wins``), so the two halves of
+    # ``ai_client.server_provider_options()`` (#586) cannot be one read here.
+    # Both sides use the same rule: a stored row means a key, a deployment map
+    # entry means a credential, nothing else counts.
     deployment_credentials = deployment_provider_credentials()
     # Providers this load holds a deployment credential for — the same
     # ``capturable`` scope the capture writes with, so a stored key is not
@@ -22334,12 +22340,15 @@ async def get_admin_settings(
     _require_admin(request)
     metadata = _get_settings_metadata()
 
-    # The admin picker for server providers lists what the sidecar can serve.
+    # The admin picker for server providers lists what holds a server
+    # credential — the same derivation the Server providers card below reads
+    # (#586). The sidecar's catalog is not the source: a provider keyed from
+    # the DB has no catalog entry, so the picker used to come up empty.
     for item in metadata:
         if item["key"] == "active_server_providers":
-            from rootcoz.ai_client import server_capable_providers
+            from rootcoz.ai_client import server_provider_options
 
-            item["options"] = await server_capable_providers()
+            item["options"] = await server_provider_options()
 
     # Internal jira_verified_method row on the jira_auth_mode item (last
     # method whose test SUCCEEDED, "" when never verified; recorded only

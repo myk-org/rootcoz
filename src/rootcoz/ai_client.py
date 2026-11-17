@@ -426,44 +426,37 @@ async def require_selected_server_pair(provider: str, model: str) -> None:
         )
 
 
-# Cached settings picker options (monotonic_ts, provider list) — success and
-# failure alike, so a sidecar outage costs one attempt, not one per page load.
-_server_capable_cache: tuple[float, list[str]] | None = None
-_SERVER_CAPABLE_CACHE_TTL_SEC = 60.0
+async def server_provider_options() -> list[str]:
+    """Public names of the providers that hold a server credential, sorted.
 
+    The values the admin picker may offer for ``active_server_providers``
+    (#586): every stored server key — verified or not, a key being repaired is
+    still configured and must stay restrictable — union every deployment-env
+    credential. Catalog-only providers are excluded: they cannot serve on
+    server credentials, so a checkbox for them would mean nothing.
 
-def _invalidate_server_capable_cache() -> None:
-    """Drop cached settings picker options whenever the catalog changes."""
-    global _server_capable_cache
-    _server_capable_cache = None
+    The Server providers card (``list_server_providers_endpoint``) reads the
+    same two sources with the same rule — a stored row means a key, a
+    deployment map entry means a credential — so the picker and the card
+    cannot disagree. It cannot call this helper: it resolves the deployment
+    credentials before its capture and the stored rows after it, because a key
+    stored while the capture runs must win.
 
-
-async def server_capable_providers() -> list[str]:
-    """Provider IDs with server-credential models, for admin settings options.
-
-    Both success and failure are cached for a short TTL: an unreachable
-    sidecar must not slow (or queue behind the catalog lock on) every
-    admin settings page load. Only public names are ever returned —
-    internal ``cli-*``/``acpx-*`` catalog IDs map through
-    :func:`public_provider_name`, collapsing to one entry per name.
+    Only names are returned, never key material. Each stored row keeps its own
+    spelling — the normalized join key is not a display name. An empty list
+    means no provider is known to hold a credential right now (nothing stored,
+    nothing resolved from the deployment); a stored restriction — the
+    setting's own value — stays in effect regardless, which is how the UI
+    reads an empty list.
     """
-    global _server_capable_cache
-    now = time.monotonic()
-    if (
-        _server_capable_cache is not None
-        and now - _server_capable_cache[0] < _SERVER_CAPABLE_CACHE_TTL_SEC
-    ):
-        return _server_capable_cache[1]
-    try:
-        catalog = await _get_model_catalog()
-        providers = sorted(
-            {public_provider_name(p) for p in build_friendly_catalog(catalog)}
-        )
-    except httpx.HTTPError, OSError, RuntimeError, ValueError:
-        logger.warning("Unable to list server-capable providers for settings")
-        providers = []
-    _server_capable_cache = (now, providers)
-    return providers
+    from rootcoz.storage import list_server_ai_providers
+
+    stored = await list_server_ai_providers()
+    deployment = deployment_provider_credentials()
+    return sorted(
+        {public_provider_name(row["provider"]) for row in stored}
+        | {public_provider_name(provider) for provider in deployment or {}}
+    )
 
 
 async def require_server_provider_grant(provider: str = "", model: str = "") -> None:
@@ -919,7 +912,6 @@ async def _get_model_catalog(*, refresh: bool = False) -> list[dict[str, Any]]:
         if generation != _model_catalog_generation:
             return _model_catalog_cache if _model_catalog_cache is not None else catalog
         _model_catalog_cache = catalog
-        _invalidate_server_capable_cache()
         logger.debug("Loaded Pi-sidecar model catalog: %d models", len(catalog))
         return catalog
 
@@ -929,7 +921,6 @@ def update_model_catalog(models: list[dict[str, Any]] | None = None) -> None:
     global _model_catalog_cache, _model_catalog_generation
     _model_catalog_generation += 1
     _model_catalog_cache = models
-    _invalidate_server_capable_cache()
 
 
 async def registered_provider_ids() -> set[str] | None:

@@ -6,6 +6,7 @@ pre-existing behavior). Enforcement rechecks on every server-credential use,
 so a direct API call cannot bypass the catalog filtering.
 """
 
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -346,53 +347,66 @@ async def test_case_insensitive_grant_for_custom_provider(monkeypatch):
         await ai_client.require_server_provider_grant("openai", "m")
 
 
-@pytest.mark.asyncio
-async def test_server_capable_providers_returns_public_names(monkeypatch):
-    """Settings picker options never leak internal cli-* catalog IDs."""
-    _catalog(monkeypatch, "cli-claude", "cli-gemini", "cli-cursor", "openai")
-    assert await ai_client.server_capable_providers() == [
-        "claude",
-        "cursor",
-        "gemini",
-        "openai",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_server_capable_providers_dedupes_internal_and_canonical(monkeypatch):
-    """An internal and a canonical ID for the same provider yield one entry."""
-    _catalog(monkeypatch, "cli-claude", "claude", "acpx-cursor")
-    assert await ai_client.server_capable_providers() == ["claude", "cursor"]
-
-
-@pytest.mark.asyncio
-async def test_catalog_update_invalidates_server_capable_cache(monkeypatch):
-    """update_model_catalog() refreshes picker options without the 60s TTL wait."""
-    ai_client.update_model_catalog(None)
+def _stored_keys(monkeypatch, *rows: dict) -> None:
+    """Stored server provider rows as storage.list_server_ai_providers returns."""
     monkeypatch.setattr(
-        ai_client,
-        "_list_models_raw",
-        AsyncMock(return_value=[{"provider": "openai", "id": "m", "name": "m"}]),
+        storage, "list_server_ai_providers", AsyncMock(return_value=list(rows))
     )
-    assert await ai_client.server_capable_providers() == ["openai"]
-    ai_client.update_model_catalog([{"provider": "cli-cursor", "id": "m", "name": "m"}])
-    assert await ai_client.server_capable_providers() == ["cursor"]
+
+
+def _deployment_keys(monkeypatch, credentials: dict[str, str] | None) -> None:
+    """Deployment-env credentials as the resolver answers them (None = unknown)."""
+    monkeypatch.setattr(
+        ai_client, "deployment_provider_credentials", lambda: credentials
+    )
 
 
 @pytest.mark.asyncio
-async def test_catalog_refresh_invalidates_server_capable_cache(monkeypatch):
-    """A catalog refresh (not just replacement) also drops the picker cache."""
-    ai_client.update_model_catalog(None)
-    monkeypatch.setattr(
-        ai_client,
-        "_list_models_raw",
-        AsyncMock(return_value=[{"provider": "openai", "id": "m", "name": "m"}]),
+async def test_picker_options_include_db_only_keys_with_empty_catalog(monkeypatch):
+    """#586: a DB-stored key is an option even when the sidecar catalog is empty."""
+    _catalog(monkeypatch)
+    _stored_keys(monkeypatch, {"provider": "EnMaaS"}, {"provider": "openai"})
+    _deployment_keys(monkeypatch, {})
+    assert await ai_client.server_provider_options() == ["EnMaaS", "openai"]
+
+
+@pytest.mark.asyncio
+async def test_picker_options_include_deployment_credential(monkeypatch):
+    """#586: a deployment/env-credential provider is an option with no stored key."""
+    _catalog(monkeypatch)
+    _stored_keys(monkeypatch)
+    _deployment_keys(monkeypatch, {"openai": "sk-deployment"})
+    assert await ai_client.server_provider_options() == ["openai"]
+
+
+@pytest.mark.asyncio
+async def test_picker_options_exclude_catalog_only_providers(monkeypatch):
+    """#586: a catalog-only provider holds no server credential — no option."""
+    _catalog(monkeypatch, "cli-claude", "openai", "EnMaaS")
+    _stored_keys(monkeypatch, {"provider": "EnMaaS"})
+    _deployment_keys(monkeypatch, {})
+    assert await ai_client.server_provider_options() == ["EnMaaS"]
+
+
+@pytest.mark.asyncio
+async def test_picker_options_include_stored_but_unverified_key(monkeypatch):
+    """#586: a key being repaired stays restrictable, so it stays an option."""
+    _catalog(monkeypatch)
+    _stored_keys(monkeypatch, {"provider": "EnMaaS", "verified_at": None})
+    _deployment_keys(monkeypatch, {})
+    assert await ai_client.server_provider_options() == ["EnMaaS"]
+
+
+@pytest.mark.asyncio
+async def test_picker_options_are_public_names_only(monkeypatch):
+    """#586: options are de-duplicated public names — row metadata is not echoed."""
+    _catalog(monkeypatch)
+    _stored_keys(
+        monkeypatch,
+        {"provider": "cli-claude", "verified_at": "2026-01-01", "extra": "ignored"},
+        {"provider": "claude"},
     )
-    assert await ai_client.server_capable_providers() == ["openai"]
-    monkeypatch.setattr(
-        ai_client,
-        "_list_models_raw",
-        AsyncMock(return_value=[{"provider": "cli-gemini", "id": "m", "name": "m"}]),
-    )
-    await ai_client._get_model_catalog(refresh=True)
-    assert await ai_client.server_capable_providers() == ["gemini"]
+    _deployment_keys(monkeypatch, {"acpx-cursor": "deployment-value"})
+    options = await ai_client.server_provider_options()
+    assert options == ["claude", "cursor"]
+    assert json.dumps(options) == '["claude", "cursor"]'

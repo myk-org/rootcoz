@@ -15751,23 +15751,52 @@ class TestAdminSettingsEndpoints:
             == 200
         )
 
-    def test_settings_provider_options_survive_sidecar_outage(
+    def test_settings_provider_options_ignore_sidecar_discovery(
         self, test_client, monkeypatch
     ) -> None:
-        """Settings load stays fast and complete when sidecar discovery fails."""
+        """#586: the picker reads stored keys + deployment creds, not the catalog.
+
+        A sidecar outage used to empty the picker; discovery is not even asked.
+        """
         from rootcoz import ai_client
 
         discover = AsyncMock(side_effect=httpx.ConnectError("sidecar down"))
         monkeypatch.setattr(ai_client, "_list_models_raw", discover)
         monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+        monkeypatch.setattr(
+            storage,
+            "list_server_ai_providers",
+            AsyncMock(return_value=[{"provider": "EnMaaS"}]),
+        )
         response = test_client.get("/api/admin/settings")
         assert response.status_code == 200
         item = next(s for s in response.json() if s["key"] == "active_server_providers")
-        assert item["options"] == []
-        # Cached failure: a second settings load does not re-attempt discovery.
-        second = test_client.get("/api/admin/settings")
-        assert second.status_code == 200
-        discover.assert_awaited_once()
+        assert item["options"] == ["EnMaaS"]
+        discover.assert_not_awaited()
+
+    def test_settings_provider_options_exclude_catalog_only_providers(
+        self, test_client, monkeypatch
+    ) -> None:
+        """#586: an option means "holds a server credential" — names only."""
+        from rootcoz import ai_client
+
+        monkeypatch.setattr(
+            ai_client,
+            "deployment_provider_credentials",
+            lambda: {"openai": "deployment-value"},
+        )
+        monkeypatch.setattr(
+            storage,
+            "list_server_ai_providers",
+            AsyncMock(return_value=[{"provider": "EnMaaS"}]),
+        )
+        response = test_client.get("/api/admin/settings")
+        assert response.status_code == 200
+        item = next(s for s in response.json() if s["key"] == "active_server_providers")
+        # The fixture catalog's providers (claude, gemini) hold no credential.
+        assert item["options"] == ["EnMaaS", "openai"]
+        # Names only: the resolved credential value never reaches the response.
+        assert "deployment-value" not in response.text
 
     def test_get_settings_non_admin_forbidden(self, test_client) -> None:
         """Non-admin users cannot access settings."""
@@ -16342,11 +16371,18 @@ class TestAdminSettingsEndpoints:
         ai_timeout = next(s for s in get_resp.json() if s["key"] == "ai_call_timeout")
         assert ai_timeout["source"] != "db"
 
-    def test_active_server_providers_setting(self, test_client) -> None:
+    def test_active_server_providers_setting(self, test_client, monkeypatch) -> None:
         """active_server_providers: metadata with options, PUT/GET round-trip."""
         from rootcoz.config import get_settings
 
         key = "active_server_providers"
+        # Options are the providers holding a server credential (#586): the
+        # fixture catalog alone is not enough.
+        monkeypatch.setattr(
+            storage,
+            "list_server_ai_providers",
+            AsyncMock(return_value=[{"provider": "claude"}, {"provider": "gemini"}]),
+        )
         item = next(
             s for s in test_client.get("/api/admin/settings").json() if s["key"] == key
         )
@@ -16356,7 +16392,6 @@ class TestAdminSettingsEndpoints:
             "",
         )
         assert not item["sensitive"] and not item["restart_required"]
-        # Options come from the sidecar catalog (test fixture: claude, gemini).
         assert item["options"] == ["claude", "gemini"]
         assert (
             test_client.put(
