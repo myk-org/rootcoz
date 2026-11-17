@@ -53,7 +53,35 @@ def _register_usage_recorder() -> None:
     _setup_usage_recorder()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _private_admin_artifact_root(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[None]:
+    """Give each worker its own admin-chat artifact tree.
+
+    The product root is machine-global (``/tmp/rootcoz-admin-artifacts``) and
+    clearing admin chat deletes a user's whole tree, so two workers writing and
+    clearing the same path race: a save→download window in one worker loses its
+    file to the other's clear (``test_download_artifact`` 404s). With
+    ``--dist loadgroup`` and no ``xdist_group`` markers every test is its own
+    xdist unit, so nothing keeps the artifact tests on one worker. pytest owns
+    and removes ``tmp_path_factory``, which also stops the suite littering the
+    machine's ``/tmp`` (#582).
+    """
+    from rootcoz import main
+
+    original = main._ADMIN_ARTIFACTS_BASE
+    main._ADMIN_ARTIFACTS_BASE = tmp_path_factory.mktemp("admin-artifacts")
+    try:
+        yield
+    finally:
+        main._ADMIN_ARTIFACTS_BASE = original
+
+
 CLI_TEST_BASE_URL = "http://localhost:8700"
+
+#: The product's machine-global admin-chat artifact root. No test may use it.
+MACHINE_GLOBAL_ARTIFACT_ROOT = Path("/tmp/rootcoz-admin-artifacts")
 
 # The host variables the app-under-test may legitimately see. An allowlist, never
 # "real environment minus a denylist": a denylist leaks every credential the
