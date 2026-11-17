@@ -111,11 +111,11 @@ interface SettingsImportResult {
   dry_run?: boolean
 }
 
-// Category display order for the tab layout (mirrors backend _SETTINGS_CATEGORIES).
+// Deployment-level settings first, then the two CI sources adjacent and before what consumes their artifacts, then analysis/output, then the operator-facing categories (mirrors backend _SETTINGS_CATEGORIES order).
 const CATEGORY_ORDER = [
-  'Jenkins', 'Analysis', 'Jira', 'GitHub issues', 'Report Portal', 'Datadog',
-  'Auth & Security', 'Prow', 'Server', 'Notifications', 'Data & retention',
-  'Repos & workspace', 'Logging', 'Advanced',
+  'Server', 'Jenkins', 'Prow', 'Analysis', 'Jira', 'GitHub issues',
+  'Report Portal', 'Datadog', 'Auth & Security', 'Notifications',
+  'Data & retention', 'Repos & workspace', 'Logging', 'Advanced',
 ]
 
 // The Sidecar rows whose live transcript directory usage the card below them

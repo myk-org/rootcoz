@@ -226,8 +226,8 @@ describe('ServerSettingsPage tabs and search', () => {
     // The fixture's categories, in the shipped order (the full 14-tab strip is
     // asserted against the backend taxonomy in the #585 E2E block below).
     expect(tabs.map((t) => t.textContent)).toEqual([
-      'Jenkins', 'Analysis', 'Jira', 'GitHub issues', 'Report Portal', 'Datadog',
-      'Auth & Security', 'Prow', 'Server', 'Notifications',
+      'Server', 'Jenkins', 'Prow', 'Analysis', 'Jira', 'GitHub issues',
+      'Report Portal', 'Datadog', 'Auth & Security', 'Notifications',
     ])
 
     // Default (Server) tab shows only Server settings
@@ -3203,9 +3203,9 @@ describe('ServerSettingsPage Jira fields by auth mode (#585)', () => {
 // Exactly the tabs _SETTINGS_CATEGORIES declares, in its order
 // (src/rootcoz/main.py) — the backend is authoritative, the page mirrors it.
 const SHIPPED_CATEGORIES = [
-  'Jenkins', 'Analysis', 'Jira', 'GitHub issues', 'Report Portal', 'Datadog',
-  'Auth & Security', 'Prow', 'Server', 'Notifications', 'Data & retention',
-  'Repos & workspace', 'Logging', 'Advanced',
+  'Server', 'Jenkins', 'Prow', 'Analysis', 'Jira', 'GitHub issues',
+  'Report Portal', 'Datadog', 'Auth & Security', 'Notifications',
+  'Data & retention', 'Repos & workspace', 'Logging', 'Advanced',
 ]
 
 /** One setting per shipped category, so every tab exists. */

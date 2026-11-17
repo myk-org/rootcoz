@@ -631,6 +631,14 @@ _SETTING_CHOICES: dict[str, dict[str, Any]] = {
 # after a product behind a generic capability, and never on an abstraction
 # like "Sources". Server keeps exactly two settings.
 _SETTINGS_CATEGORIES: dict[str, list[str]] = {
+    # Tab order: deployment-level first, then the two CI sources adjacent and
+    # before what consumes their artifacts, then analysis/output, then the
+    # operator-facing categories.
+    "Server": [
+        # Exactly two: where the server is reachable, and where it pushes.
+        "public_base_url",
+        "auto_push_exporters",  # runtime toggle, no restart required
+    ],
     "Jenkins": [
         "jenkins_url",
         "jenkins_user",
@@ -642,6 +650,13 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "wait_for_completion",
         "poll_interval_minutes",
         "max_wait_minutes",
+    ],
+    "Prow": [
+        "prow_url",
+        "gcs_bucket",
+        "prow_artifacts_max_size_mb",
+        "prow_artifact_max_file_size_mb",
+        "prow_artifacts_max_objects",
     ],
     # The AI settings plus the analysis pipeline they run in.
     "Analysis": [
@@ -726,18 +741,6 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "session_ttl_hours",
         "login_lockout_enabled",
         "login_lockout_threshold",
-    ],
-    "Prow": [
-        "prow_url",
-        "gcs_bucket",
-        "prow_artifacts_max_size_mb",
-        "prow_artifact_max_file_size_mb",
-        "prow_artifacts_max_objects",
-    ],
-    "Server": [
-        # Exactly two: where the server is reachable, and where it pushes.
-        "public_base_url",
-        "auto_push_exporters",  # runtime toggle, no restart required
     ],
     "Notifications": [
         "smtp_host",
