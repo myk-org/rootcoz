@@ -113,8 +113,9 @@ interface SettingsImportResult {
 
 // Category display order for the tab layout (mirrors backend _SETTINGS_CATEGORIES).
 const CATEGORY_ORDER = [
-  'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow',
-  'Auth & Security', 'Web Push', 'Notifications', 'Sidecar', 'Storage', 'Workspace',
+  'Jenkins', 'Analysis', 'Jira', 'GitHub issues', 'Report Portal', 'Datadog',
+  'Auth & Security', 'Prow', 'Server', 'Notifications', 'Data & retention',
+  'Repos & workspace', 'Logging', 'Advanced',
 ]
 
 // The Sidecar rows whose live transcript directory usage the card below them
@@ -129,7 +130,7 @@ const TRANSCRIPT_SETTING_KEYS = new Set([
 const TEST_INTEGRATIONS: Record<string, string> = {
   Jenkins: 'jenkins',
   Jira: 'jira',
-  GitHub: 'github',
+  'GitHub issues': 'github',
   'Report Portal': 'reportportal',
   Datadog: 'datadog',
   Prow: 'prow',
@@ -1288,19 +1289,27 @@ export function ServerSettingsPage() {
     }
   }
 
+  // The strip follows the backend order above; the Server tab stays the tab a
+  // first-time admin lands on (changing that is a UX decision, not a rename).
+  const landingTab = allGroups.find(g => g.category === 'Server') ?? allGroups[0]
   const effectiveTab = allGroups.some(g => g.category === activeTab)
     ? activeTab
-    : allGroups[0]?.category ?? ''
+    : landingTab?.category ?? ''
 
-  // ---- Live transcript directory usage (Sidecar card) ----
+  // ---- Live transcript directory usage (transcripts card) ----
+  // The card follows the transcript rows themselves — they ship on Advanced
+  // (the directory) and Data & retention (the budgets) — so no category name
+  // is hardcoded here and a rename can never orphan it again (#585 E2E).
+  const showsTranscriptsUsage = (category: string, settings: ServerSetting[]) =>
+    !state.collapsedCategories.has(category)
+    && settings.some(s => TRANSCRIPT_SETTING_KEYS.has(s.key))
   // Only fetched while the transcript rows are actually on screen: the probe
   // samples CPU and walks the data directory, which no unrelated tab pays for.
   const transcriptsUsageVisible = groups.some(
     ({ category, settings }) =>
-      category === 'Sidecar'
-      && !state.collapsedCategories.has(category)
-      && settings.some(s => TRANSCRIPT_SETTING_KEYS.has(s.key)),
-  ) && (Boolean(state.search) || effectiveTab === 'Sidecar')
+      showsTranscriptsUsage(category, settings)
+      && (Boolean(state.search) || effectiveTab === category),
+  )
   const [transcriptsUsage, setTranscriptsUsage] = useState<ServerStatusDisk | null>(null)
   const [transcriptsUsageLoading, setTranscriptsUsageLoading] = useState(false)
   // Bumped whenever the card becomes visible: a request started before a
@@ -1817,7 +1826,7 @@ export function ServerSettingsPage() {
                 cloudId={state.settings.find(s => s.key === 'atlassian_oauth_cloud_id')?.value ?? ''}
               />
             )}
-            {category === 'AI' && cursorAuthStatus && (
+            {category === 'Analysis' && cursorAuthStatus && (
               <div className="mb-3">
                 <CursorAuthBanner status={cursorAuthStatus} />
               </div>
@@ -1834,9 +1843,8 @@ export function ServerSettingsPage() {
                 </div>
               ))}
             </div>
-            {category === 'AI' && <ServerProvidersCard />}
-            {category === 'Sidecar'
-              && rowSettings.some(s => TRANSCRIPT_SETTING_KEYS.has(s.key))
+            {category === 'Analysis' && <ServerProvidersCard />}
+            {showsTranscriptsUsage(category, rowSettings)
               && (
                 <SidecarTranscriptsUsage
                   disk={transcriptsUsage}

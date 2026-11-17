@@ -151,7 +151,7 @@ export function AdminTranscriptsPage() {
         <Card>
           <CardContent className="text-sm text-muted-foreground py-3">
             Transcript recording is currently disabled. Enable it in Server
-            Settings → AI — it applies immediately, no restart needed
+            Settings → Analysis — it applies immediately, no restart needed
             (pi-sidecar ≥ 4.14.0).
           </CardContent>
         </Card>
