@@ -1,14 +1,17 @@
 """Key-scoped catalog and forced server routing."""
 
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from rootcoz import ai_client, main, storage
 from rootcoz import models as models_module
+from tests.conftest import capture_main_logs
 
 
 @pytest.mark.asyncio
@@ -276,13 +279,14 @@ async def test_missing_upstream_does_not_guess_user_models(monkeypatch):
         assert ai_client.model_listing_status.get()["openai"]["unavailable"]
         with pytest.raises(ValueError, match="Key-scoped model discovery unavailable"):
             await ai_client.resolve_catalog_pair("openai", "made-up")
-        # Even an exact server pair cannot silently switch credential source.
+        # The server-pool entry is consulted even though this key's discovery
+        # failed (#592) — and the grant rules still refuse the silent switch.
         monkeypatch.setattr(
             ai_client,
             "_get_model_catalog",
             AsyncMock(return_value=[{"provider": "openai", "id": "shared"}]),
         )
-        with pytest.raises(ValueError, match="Key-scoped model discovery unavailable"):
+        with pytest.raises(ValueError, match="Server provider access"):
             await ai_client.resolve_catalog_pair("openai", "shared")
         monkeypatch.setattr(main, "_require_authenticated", lambda request: None)
         request = type(
@@ -952,3 +956,175 @@ async def test_flagged_provider_with_empty_models_is_not_marked(monkeypatch, tmp
     assert models[0]["session_unsupported_reason"] == (
         ai_client.SESSION_UNSUPPORTED_REASON
     )
+
+
+# --- #592: a rejected personal key must not hide a pair the server pool serves ---
+
+
+@pytest.fixture
+async def keyed_db(tmp_path, monkeypatch):
+    """Real storage so the grant/free-pair rules run for real."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "rejected-key.db")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "rejected-key.db"))
+    await storage.init_db()
+
+
+def _rejected_user_key(monkeypatch, provider, catalog=(), status=401):
+    """Store one key whose discovery the provider rejects, plus a server catalog."""
+    monkeypatch.setattr(
+        ai_client, "_get_model_catalog", AsyncMock(return_value=list(catalog))
+    )
+    monkeypatch.setattr(
+        storage, "get_user_ai_credentials", AsyncMock(return_value={provider: "secret"})
+    )
+    monkeypatch.setattr(
+        ai_client, "supported_key_providers", AsyncMock(return_value=[provider])
+    )
+    monkeypatch.setattr(
+        ai_client,
+        "models_for_api_key",
+        AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                str(status),
+                request=httpx.Request("POST", "http://sidecar/models/for-api-key"),
+                response=httpx.Response(status),
+            )
+        ),
+    )
+
+
+def _set_free_models(monkeypatch, enabled):
+    from rootcoz import config
+
+    class _Settings:
+        enable_free_models = enabled
+        active_server_providers = ""
+
+    monkeypatch.setattr(config, "get_settings", lambda: _Settings())
+
+
+@pytest.mark.asyncio
+async def test_rejected_personal_key_serves_pair_from_server_pool(
+    keyed_db, monkeypatch, caplog
+):
+    """#592: the rejection warn is the caller's key, not an unknown pair."""
+    _rejected_user_key(
+        monkeypatch, "enmaas", [{"provider": "enmaas", "id": "rits/deepseek-v4"}]
+    )
+    await storage.create_user(
+        "reviewer", role="reviewer", can_use_server_providers=True
+    )
+    token = ai_client.ai_username.set("reviewer")
+    with capture_main_logs(caplog, logger=("rootcoz.main", "rootcoz.ai_client")):
+        try:
+            pair = await ai_client.resolve_catalog_pair("enmaas", "rits/deepseek-v4")
+            assert pair == ("enmaas", "rits/deepseek-v4")
+            assert ai_client._selected_credential_source.get() == "server"
+        finally:
+            ai_client.ai_username.reset(token)
+    assert "enmaas" in caplog.text
+    assert "rejected" in caplog.text.lower()
+    assert "unknown pair" not in caplog.text.lower()
+    assert "secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_rejected_personal_key_free_pair_succeeds_and_non_free_refuses(
+    keyed_db, monkeypatch
+):
+    """#592: the free-pair gate still admits, and still refuses a non-free pair."""
+    _set_free_models(monkeypatch, True)
+    _rejected_user_key(
+        monkeypatch,
+        "enmaas",
+        [
+            {"provider": "enmaas", "id": "free-model"},
+            {"provider": "enmaas", "id": "paid-model"},
+        ],
+    )
+    await storage.create_user("reporter", role="reviewer")
+    await storage.set_free_ai_models([("enmaas", "free-model")], "admin")
+    token = ai_client.ai_username.set("reporter")
+    try:
+        assert await ai_client.resolve_catalog_pair("enmaas", "free-model") == (
+            "enmaas",
+            "free-model",
+        )
+        assert ai_client._selected_credential_source.get() == "server"
+        with pytest.raises(ValueError, match="administrator grant"):
+            await ai_client.resolve_catalog_pair("enmaas", "paid-model")
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_rejected_personal_key_without_server_entry_names_the_key(
+    keyed_db, monkeypatch
+):
+    """#592: no server-pool entry either → the caller's key is named as the cause."""
+    _rejected_user_key(monkeypatch, "enmaas", [])
+    await storage.create_user(
+        "reviewer", role="reviewer", can_use_server_providers=True
+    )
+    token = ai_client.ai_username.set("reviewer")
+    try:
+        with pytest.raises(ValueError) as exc_info:
+            await ai_client.resolve_catalog_pair("enmaas", "gone-model")
+    finally:
+        ai_client.ai_username.reset(token)
+    detail = str(exc_info.value)
+    assert "enmaas" in detail
+    assert "rejected" in detail.lower()
+    assert "unknown" not in detail.lower()
+    assert "secret" not in detail
+
+
+@pytest.mark.asyncio
+async def test_validate_catalog_pair_logs_rejected_key_at_warning(
+    keyed_db, monkeypatch, caplog
+):
+    """#592: a rejected caller key is a WARNING naming provider and reason."""
+    _rejected_user_key(monkeypatch, "enmaas", [])
+    await storage.create_user(
+        "reviewer", role="reviewer", can_use_server_providers=True
+    )
+    token = ai_client.ai_username.set("reviewer")
+    with capture_main_logs(caplog, logger=("rootcoz.main", "rootcoz.ai_client")):
+        try:
+            with pytest.raises(HTTPException) as exc_info:
+                await main._validate_catalog_pair("enmaas", "gone-model")
+            assert exc_info.value.status_code == 422
+            assert "rejected" in str(exc_info.value.detail).lower()
+        finally:
+            ai_client.ai_username.reset(token)
+    assert any(
+        record.levelno == logging.WARNING
+        and "enmaas" in record.getMessage()
+        and "rejected" in record.getMessage().lower()
+        for record in caplog.records
+    )
+    assert "unknown pair" not in caplog.text.lower()
+    assert "secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_validate_catalog_pair_logs_unknown_pair_at_info(monkeypatch, caplog):
+    """A genuinely unknown pair keeps its 422 and an INFO log naming the pair."""
+    monkeypatch.setattr(
+        ai_client,
+        "_get_model_catalog",
+        AsyncMock(return_value=[{"provider": "openai", "id": "gpt-5"}]),
+    )
+    with (
+        capture_main_logs(caplog, level=logging.INFO),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await main._validate_catalog_pair("nosuchprovider", "no-model")
+    assert exc_info.value.status_code == 422
+    assert "Unknown Pi-sidecar provider/model pair" in str(exc_info.value.detail)
+    records = [
+        record
+        for record in caplog.records
+        if "nosuchprovider/no-model" in record.getMessage()
+    ]
+    assert records and records[-1].levelno == logging.INFO
