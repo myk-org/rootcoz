@@ -21452,9 +21452,8 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     # the offered set is the live listing, not the provider's static manifest.
     # One resolved map feeds both the capture and the source field below.
     from rootcoz.ai_client import (
-        deployment_provider_credentials,
         server_credential_providers,
-        sidecar_declared_provider_ids,
+        server_credential_sources,
     )
 
     # One capability answer per page load (#376): it gates the deployment
@@ -21467,8 +21466,9 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     # ``ai_client.server_provider_options()`` (#586) cannot be one read here.
     # Membership itself is not decided here: ``holds_credential`` below comes
     # from ``ai_client.server_credential_providers()``, the one rule the picker
-    # uses too, once the stored rows have been read.
-    deployment_credentials = deployment_provider_credentials()
+    # uses too, once the stored rows have been read. Both manifest-derived
+    # answers come from one read of ``models.json`` (#586 r2).
+    deployment_credentials, sidecar_declared = server_credential_sources()
     # Providers this load holds a deployment credential for — the same
     # ``capturable`` scope the capture writes with, so a stored key is not
     # counted here (it owns its rows) and the refresh flag below cannot drift
@@ -21506,7 +21506,7 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     credential_providers = server_credential_providers(
         stored=(row["provider"] for row in stored.values()),
         deployment=deployment_credentials,
-        sidecar_declared=sidecar_declared_provider_ids(),
+        sidecar_declared=sidecar_declared,
     )
     selections: dict[str, dict[str, bool]] = {}
     for row in await storage.list_server_provider_models():
@@ -21586,6 +21586,11 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     # ``supportsSessionApiKey: false`` provider is not in this list at all.
     for key_provider in key_providers:
         listed_ids.setdefault(key_provider.lower(), key_provider)
+    # A provider the sidecar's own manifest authenticates gets a row even with
+    # no catalog model and no key-capability entry: the picker offers it
+    # (``holds_credential``), so the card must show it too (#586).
+    for declared_id in sidecar_declared:
+        listed_ids.setdefault(declared_id, declared_id)
     for provider in sorted(listed_ids.values()):
         provider_lower = provider.lower()
         # Managed = stored selection rows or a stored key — the same rule

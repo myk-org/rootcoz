@@ -15785,7 +15785,7 @@ class TestAdminSettingsEndpoints:
         monkeypatch.setattr(
             ai_client,
             "deployment_provider_credentials",
-            lambda: {"openai": "deployment-value"},
+            lambda *_: {"openai": "deployment-value"},
         )
         # The sidecar's own declared key is a server credential too (#586).
         monkeypatch.setattr(

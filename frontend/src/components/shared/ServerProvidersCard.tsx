@@ -34,6 +34,12 @@ function isProviderRow(item: ServerProvider): boolean {
   return item.has_key === true || item.has_deployment_credential === true
 }
 
+/** The sidecar's own models.json apiKey is the credential: neither a key stored
+ * here (has_key) nor one the deployment env resolves for RootCoz. */
+function isSidecarCredentialRow(item: ServerProvider): boolean {
+  return item.holds_credential === true && !item.has_key && item.has_deployment_credential !== true
+}
+
 /** POST refresh-models — re-run of key-scoped discovery with the stored key. */
 type RefreshModelsResult = { ok: boolean; status: string; model_count: number }
 
@@ -102,7 +108,11 @@ export function ServerProvidersCard() {
   const rows = listed.filter(isProviderRow)
   // A provider already shown as a row is managed from that row (Store/Edit
   // key, Models) — offering it in Find a provider would duplicate the path.
-  const added = new Set(rows.map((item) => normalizeProvider(item.provider)))
+  // A sidecar-keyed row is the exception: nothing is stored for it here and it
+  // has no RootCoz key action, so a key-capable one stays addable (#586).
+  const added = new Set(rows
+    .filter((item) => item.has_key || item.has_deployment_credential === true || !item.supports_key)
+    .map((item) => normalizeProvider(item.provider)))
   // Only providers the server accepts keys for are offered — ambient/
   // deployment-credential providers would just 400 on key verification.
   const keySupported = new Set(listed.filter((item) => item.supports_key).map((item) => normalizeProvider(item.provider)))
@@ -333,6 +343,18 @@ export function ServerProvidersCard() {
                           {/* Credential-derived, not listing-derived: the key can be
                               promoted even when no listing was captured. */}
                           {item.has_deployment_credential && <Badge variant="outline">Deployment credentials</Badge>}
+                          {isSidecarCredentialRow(item) && (
+                            // The sidecar's own models.json apiKey serves this
+                            // provider; nothing is stored or promoted here.
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Badge variant="outline">Sidecar credentials</Badge>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                The sidecar authenticates this provider with the key in its own models.json — RootCoz stores no key for it. Add a key to serve it from RootCoz's store instead.
+                              </TooltipContent>
+                            </Tooltip>
+                          )}
                           {canRefresh && refreshButton}
                           {item.supports_key && item.has_deployment_credential && (
                             <HintButton variant="outline" size="sm" disabled={busy !== null} onClick={() => openKeyDialog(item.provider, 'store')} aria-label={`Store ${item.provider} API key`} hint="Promotes the deployment credential into RootCoz's encrypted store — pick a model to verify it; nothing is typed.">Store API key</HintButton>

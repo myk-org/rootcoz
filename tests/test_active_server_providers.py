@@ -361,9 +361,12 @@ def _stored_keys(monkeypatch, *rows: dict) -> None:
 
 
 def _deployment_keys(monkeypatch, credentials: dict[str, str] | None) -> None:
-    """Deployment-env credentials as the resolver answers them (None = unknown)."""
+    """Deployment-env credentials as the resolver answers them (None = unknown).
+
+    The picker passes the manifest it already read, so the fake takes it.
+    """
     monkeypatch.setattr(
-        ai_client, "deployment_provider_credentials", lambda: credentials
+        ai_client, "deployment_provider_credentials", lambda *_: credentials
     )
 
 
@@ -426,6 +429,7 @@ async def test_picker_options_include_sidecar_declared_key(monkeypatch):
     skips a declared key), yet the provider does serve on a server
     credential — dropping it would let a saved restriction block it silently.
     A key-less entry (``modelOverrides`` only) authenticates nothing (#389).
+    An unset ``$VAR`` reference cannot authenticate either (#586).
     """
     _catalog(monkeypatch)
     _stored_keys(monkeypatch)
@@ -436,8 +440,11 @@ async def test_picker_options_include_sidecar_declared_key(monkeypatch):
         lambda: {
             "sidecaronly": {"apiKey": "sidecar-key"},  # pragma: allowlist secret
             "keyless": {"modelOverrides": {"m": {"contextWindow": 1000}}},
+            # An unset reference authenticates nothing: no option (#586).
+            "unresolved": {"apiKey": "$NOT_EXPORTED_KEY"},
         },
     )
+    monkeypatch.delenv("NOT_EXPORTED_KEY", raising=False)
     options = await ai_client.server_provider_options()
     assert options == ["sidecaronly"]
     # Names only: the declared key never reaches the payload.

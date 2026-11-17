@@ -2422,6 +2422,91 @@ def test_deployment_credentials_missing_manifest_is_unknown(tmp_path, monkeypatc
     assert ai_client.deployment_provider_credentials() == {}
 
 
+def _write_manifest(monkeypatch, tmp_path, text: str):
+    """Write a raw manifest body and point the agent dir at it."""
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    (agent_dir / "models.json").write_text(text)
+    monkeypatch.setenv("PI_SIDECAR_AGENT_DIR", str(agent_dir))
+    return agent_dir
+
+
+def test_manifest_comments_and_bom_are_read_like_pi(tmp_path, monkeypatch, caplog):
+    """A manifest pi loads — BOM, ``//`` comments, trailing commas — is read (#586).
+
+    Strict ``json.loads`` used to answer "nothing declared" for a manifest the
+    sidecar authenticates providers with, so the picker hid them.
+    """
+    _write_manifest(
+        monkeypatch,
+        tmp_path,
+        "\ufeff{\n"
+        "  // the sidecar's own gateway key\n"
+        '  "providers": {\n'
+        '    "literal": {"apiKey": "plain-key", // pragma: allowlist secret\n'
+        '                "baseUrl": "https://gw.example/v1",},\n'
+        '    "reffed": {"apiKey": "${MYGATEWAY_API_KEY}", '
+        '"trustKeyScopedListing": true,},\n'
+        "  },\n"
+        "}\n",
+    )
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    with capture_main_logs(caplog, logging.DEBUG, logger=ai_client.logger):
+        declared = ai_client.sidecar_declared_provider_ids()
+        # The same prepared text feeds the deployment resolve (#586 r2).
+        assert ai_client.deployment_provider_credentials() == {"reffed": DEPLOYMENT_KEY}
+    assert declared == {"literal", "reffed"}
+    assert any("stripped before parsing" in r.getMessage() for r in caplog.records)
+    # Names only: the literal key never leaves the manifest.
+    assert "plain-key" not in str(declared)
+
+
+def test_unparseable_manifest_declares_nothing_and_does_not_raise(
+    tmp_path, monkeypatch, caplog
+):
+    """A malformed manifest degrades to no declared providers (#586).
+
+    A block comment is not pi syntax either, so this is a manifest pi rejects
+    too — the point is that RootCoz reports it and carries on.
+    """
+    _write_manifest(
+        monkeypatch,
+        tmp_path,
+        '{"providers": { /* not pi syntax */ "x": {"apiKey": "$K"} }}',
+    )
+    with capture_main_logs(caplog, logging.WARNING, logger=ai_client.logger):
+        assert ai_client.sidecar_declared_provider_ids() == set()
+        assert ai_client.deployment_provider_credentials() is None
+    assert any("manifest unreadable" in r.getMessage() for r in caplog.records)
+
+
+def test_declared_ids_skip_a_manifest_key_that_cannot_resolve(tmp_path, monkeypatch):
+    """An unset ``$VAR`` authenticates nothing, so it is not a credential (#586).
+
+    A literal key still counts. Counting an unresolvable reference would offer
+    a checkbox for a provider the sidecar cannot authenticate — the same entry
+    the deployment resolver skips.
+    """
+    _write_manifest(
+        monkeypatch,
+        tmp_path,
+        json.dumps(
+            {
+                "providers": {
+                    "literal": {"apiKey": "plain-key"},  # pragma: allowlist secret
+                    "unset": {"apiKey": "$NOT_EXPORTED_KEY"},
+                    "empty": {"apiKey": "${EMPTY_KEY}"},
+                    "resolvable": {"apiKey": f"${DEPLOYMENT_ENV}"},
+                }
+            }
+        ),
+    )
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    monkeypatch.setenv("EMPTY_KEY", "   ")
+    monkeypatch.delenv("NOT_EXPORTED_KEY", raising=False)
+    assert ai_client.sidecar_declared_provider_ids() == {"literal", "resolvable"}
+
+
 async def test_deployment_capture_lists_all_models_and_keeps_selection(
     client, monkeypatch, tmp_path
 ):
@@ -2890,6 +2975,80 @@ async def test_picker_and_card_agree_on_credential_membership(
     assert "catalagonly" not in options
     # The sidecar's declared key is names-only payload material.
     assert "sidecar-key" not in str(listed)
+
+
+def test_manifest_comment_stripping_leaves_string_values_alone():
+    """The strip helper's contract: pi's tolerance, string literals untouched."""
+    strip = ai_client._strip_manifest_comments
+    # ``//`` inside a string value is not a comment; trailing commas go.
+    assert strip('{"a": "https://gw/v1//x", "b": 1,}') == (
+        '{"a": "https://gw/v1//x", "b": 1}'
+    )
+    # Comments are removed wherever they sit, line content otherwise intact.
+    assert strip('{\n // c\n "a": 1\n}') == '{\n \n "a": 1\n}'
+    # The comma goes, the whitespace before the bracket stays (pi's exact edit).
+    assert strip('{"a": [1, 2, ]}') == '{"a": [1, 2 ]}'
+    # A literal backslash-escaped quote keeps the string boundary correct.
+    assert strip('{"a": "x\\"//y", "b": 2}') == '{"a": "x\\"//y", "b": 2}'
+
+
+async def test_card_lists_a_declared_provider_outside_catalog_and_registry(
+    client, monkeypatch, tmp_path
+):
+    """A manifest-declared provider gets a row even when nothing else lists it.
+
+    The picker offers it (``holds_credential``), so the card must show it too —
+    otherwise the two surfaces disagree again (#586).
+    """
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {"sidecaronly": {"apiKey": "sidecar-key"}},  # pragma: allowlist secret
+    )
+    _register_providers(monkeypatch)
+    _fake_catalog(monkeypatch, [{"provider": "catalagonly", "id": "catalagonly/m"}])
+    _mock_supported(monkeypatch, ["catalagonly"])
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+
+    listed = _providers(client)
+
+    assert listed["sidecaronly"]["holds_credential"] is True
+    assert listed["sidecaronly"]["has_key"] is False
+    assert ai_client.public_provider_name("sidecaronly") in set(
+        await ai_client.server_provider_options()
+    )
+
+
+def test_page_load_reads_and_reports_the_manifest_once(
+    client, monkeypatch, tmp_path, caplog
+):
+    """One page load reads models.json once and logs a failure once (#586).
+
+    The card resolves deployment credentials and declared ids from the same
+    manifest; reading it per consumer doubled both the read and the warning.
+    """
+    agent_dir = _point_agent_dir(
+        monkeypatch, tmp_path, {"mygateway": _deployment_provider()}
+    )
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    _mock_supported(monkeypatch, ["mygateway"])
+    reads: list[int] = []
+    real_read = ai_client._agent_manifest
+
+    def counting_read():
+        reads.append(1)
+        return real_read()
+
+    monkeypatch.setattr(ai_client, "_agent_manifest", counting_read)
+    _providers(client)
+    assert len(reads) == 1
+
+    # Unreadable: one warning, not one per consumer.
+    (agent_dir / "models.json").unlink()
+    with capture_main_logs(caplog, logging.WARNING, logger=ai_client.logger):
+        _providers(client)
+    warnings = [r for r in caplog.records if "manifest unreadable" in r.getMessage()]
+    assert len(warnings) == 1
 
 
 async def test_can_refresh_models_false_for_ambient_provider(client, monkeypatch):

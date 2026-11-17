@@ -466,6 +466,21 @@ def server_credential_providers(
     return providers
 
 
+def server_credential_sources() -> tuple[dict[str, str] | None, set[str]]:
+    """``(deployment credentials, sidecar-declared ids)`` from one manifest read.
+
+    Both answers come from the same ``models.json``, so a page load asking for
+    both must not read — and report — the file twice (#586). The first value is
+    :func:`deployment_provider_credentials`' (``None`` = unknown), the second
+    :func:`sidecar_declared_provider_ids`'.
+    """
+    manifest = _agent_manifest()
+    return (
+        deployment_provider_credentials(manifest),
+        sidecar_declared_provider_ids(manifest),
+    )
+
+
 async def server_provider_options() -> list[str]:
     """Public names of the providers that hold a server credential, sorted.
 
@@ -483,10 +498,11 @@ async def server_provider_options() -> list[str]:
     from rootcoz.storage import list_server_ai_providers
 
     stored = await list_server_ai_providers()
+    deployment, sidecar_declared = server_credential_sources()
     providers = server_credential_providers(
         stored=(row["provider"] for row in stored),
-        deployment=deployment_provider_credentials(),
-        sidecar_declared=sidecar_declared_provider_ids(),
+        deployment=deployment,
+        sidecar_declared=sidecar_declared,
     )
     return sorted(set(providers.values()))
 
@@ -1239,19 +1255,57 @@ def _cached_catalog_provider_ids() -> list[str]:
     )
 
 
+# Pi's own models.json tolerance, mirrored: one optional leading UTF-8 BOM,
+# ``//`` line comments and trailing commas are accepted. String literals are
+# left untouched, so a ``"https://host"`` value survives. Block comments are
+# not pi syntax, so a manifest holding one is malformed for pi and for us.
+_JSON_STRING_OR_LINE_COMMENT = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*')
+_JSON_STRING_OR_TRAILING_COMMA = re.compile(r'"(?:\\.|[^"\\])*"|,(\s*[}\]])')
+
+
+def _strip_manifest_comments(text: str) -> str:
+    """Drop ``//`` comments and trailing commas, string literals untouched.
+
+    The exact preparation pi applies before ``JSON.parse`` (#586), so a
+    manifest pi loads parses here too — otherwise a provider the sidecar does
+    authenticate is missing from the admin picker.
+    """
+    text = _JSON_STRING_OR_LINE_COMMENT.sub(
+        lambda match: match.group(0) if match.group(0).startswith('"') else "",
+        text,
+    )
+    return _JSON_STRING_OR_TRAILING_COMMA.sub(
+        lambda match: match.group(1) if match.group(1) is not None else match.group(0),
+        text,
+    )
+
+
 def _agent_manifest() -> dict[str, Any] | None:
     """The agent-dir ``models.json`` ``providers`` mapping, or ``None``.
 
     One read and one failure behaviour for every consumer: a configured agent
     dir whose manifest is missing, unreadable or unparseable is *unknown*
     (``None``), never "nothing declared". An unset ``PI_SIDECAR_AGENT_DIR``
-    also answers ``None`` — there is no manifest to read.
+    answers ``{}`` — there is no manifest, so nothing is declared and the
+    ambient environment still supplies what it can.
+
+    The text is prepared the way pi prepares it — a leading BOM is dropped and
+    ``//`` comments and trailing commas are stripped (:func:
+    `_strip_manifest_comments`) — so a manifest the sidecar loads is read here
+    too, not misjudged as unparseable (#586).
     """
     agent_dir = _sidecar_agent_dir()
     if agent_dir is None:
-        return None
+        return {}
     try:
-        manifest = json.loads((agent_dir / "models.json").read_text())
+        content = (agent_dir / "models.json").read_text()
+        prepared = _strip_manifest_comments(content.removeprefix("\ufeff"))
+        if prepared != content:
+            logger.debug(
+                "Sidecar manifest carried a BOM, comments or trailing commas;"
+                " stripped before parsing"
+            )
+        manifest = json.loads(prepared)
     except (OSError, ValueError) as exc:
         logger.warning(
             "Deployment provider manifest unreadable (%s); keeping captured"
@@ -1287,21 +1341,62 @@ def _is_key_scoped_provider(config: object) -> bool:
     return isinstance(config, dict) and config.get("trustKeyScopedListing") is True
 
 
-def sidecar_declared_provider_ids() -> set[str]:
+def _manifest_api_key_resolves(api_key: object) -> bool:
+    """Whether an entry's ``apiKey`` authenticates anything right now.
+
+    A literal key does. A ``$VAR``/``${VAR}`` reference does only when the
+    variable is set to a nonempty value — unset, the sidecar cannot
+    authenticate the provider, and :func:`deployment_provider_credentials`
+    skips the same entry for the same reason (#586).
+    """
+    if not api_key:
+        return False
+    var = _env_reference_var(api_key)
+    return var is None or bool(os.environ.get(var, "").strip())
+
+
+def _manifest_credential_provider_ids(providers: Mapping[str, Any]) -> set[str]:
+    """Lowercase IDs of the manifest entries that hold an available key.
+
+    :func:`_manifest_declared_provider_ids` narrowed to a key that can
+    authenticate now (:func:`_manifest_api_key_resolves`): this is the
+    membership the admin picker and the Server providers card report, so an
+    unresolvable ``$VAR`` gets no checkbox that a save would then enforce.
+    """
+    return {
+        provider.lower()
+        for provider, config in providers.items()
+        if isinstance(provider, str)
+        and isinstance(config, dict)
+        and _manifest_api_key_resolves(config.get("apiKey"))
+    }
+
+
+# Sentinel for "the caller supplied no models.json manifest".
+_UNREAD_MANIFEST: Any = object()
+
+
+def sidecar_declared_provider_ids(manifest: Any = _UNREAD_MANIFEST) -> set[str]:
     """Lowercase IDs of the providers the sidecar's own config authenticates.
 
-    A ``models.json`` entry carrying an ``apiKey`` — literal or ``$VAR``
-    reference — is the key the sidecar serves with, so such a provider does
-    hold a server credential even though nothing is stored and
-    :func:`deployment_provider_credentials` reports no map entry for it (that
-    map is only what Rootcoz resolves itself). The admin picker must offer it
-    (#586), or saving any restriction silently blocks it.
+    A ``models.json`` entry carrying an ``apiKey`` — a literal key, or a
+    ``$VAR`` reference whose variable is set — is the key the sidecar serves
+    with, so such a provider does hold a server credential even though nothing
+    is stored and :func:`deployment_provider_credentials` reports no map entry
+    for it (that map is only what Rootcoz resolves itself). The admin picker
+    must offer it (#586), or saving any restriction silently blocks it. An
+    unset reference is not a credential the sidecar can use, so it is not
+    offered.
+
+    ``manifest`` is the already-read ``providers`` mapping when the caller read
+    it (:func:`server_credential_sources`), so a page load reads the file once.
 
     Names only, never key material. An unset agent dir declares nothing; an
     unreadable one is already reported by :func:`_agent_manifest`, and the
     stored and deployment sources still answer.
     """
-    return _manifest_declared_provider_ids(_agent_manifest() or {})
+    providers = _agent_manifest() if manifest is _UNREAD_MANIFEST else manifest
+    return _manifest_credential_provider_ids(providers or {})
 
 
 def _manifest_session_models() -> dict[str, set[str]]:
@@ -1376,7 +1471,9 @@ def _mark_session_support(
         target["session_unsupported_reason"] = SESSION_UNSUPPORTED_REASON
 
 
-def deployment_provider_credentials() -> dict[str, str] | None:
+def deployment_provider_credentials(
+    manifest: Any = _UNREAD_MANIFEST,
+) -> dict[str, str] | None:
     """Deployment-env keys of the providers the server can list models with.
 
     Two sources, both of which leave the provider with no stored server key,
@@ -1414,6 +1511,10 @@ def deployment_provider_credentials() -> dict[str, str] | None:
     keep whatever it captured before, so ambient resolution is skipped too
     rather than reporting an empty-capture pass. An empty dict is a
     successful read of a warm catalog that resolved no credential.
+
+    ``manifest`` is the already-read ``providers`` mapping when the caller read
+    it (:func:`server_credential_sources`), so one page load reads the file
+    once; omitted, this function reads it itself.
     """
     if _model_catalog_cache is None:
         # Only a warm catalog may produce an ambient-derived map (#376): an
@@ -1423,33 +1524,30 @@ def deployment_provider_credentials() -> dict[str, str] | None:
         )
         return None
     resolved: dict[str, str] = {}
-    declared: set[str] = set()
-    agent_dir = _sidecar_agent_dir()
-    if agent_dir is not None:
-        providers = _agent_manifest()
-        if providers is None:
-            # A configured agent dir without a readable manifest is unknown,
-            # not "no eligible providers" (#376): the caller would sweep every
-            # captured deployment listing away over a transient blip.
-            return None
-        # Only an entry that supplies a key owns it; a key-less entry
-        # (``modelOverrides`` only) leaves the key to the ambient env.
-        declared = _manifest_declared_provider_ids(providers)
-        for provider, config in providers.items():
-            if not isinstance(provider, str) or not isinstance(config, dict):
-                continue
-            if not _is_key_scoped_provider(config):
-                continue
-            var = _env_reference_var(config.get("apiKey"))
-            key = os.environ.get(var, "").strip() if var else ""
-            if not key:
-                logger.debug(
-                    "Deployment credential unavailable for provider=%s (%s unset)",
-                    provider,
-                    var or "no env reference",
-                )
-                continue
-            resolved[provider] = key
+    providers = _agent_manifest() if manifest is _UNREAD_MANIFEST else manifest
+    if providers is None:
+        # A configured agent dir without a readable manifest is unknown,
+        # not "no eligible providers" (#376): the caller would sweep every
+        # captured deployment listing away over a transient blip.
+        return None
+    # Only an entry that supplies a key owns it; a key-less entry
+    # (``modelOverrides`` only) leaves the key to the ambient env.
+    declared = _manifest_declared_provider_ids(providers)
+    for provider, config in providers.items():
+        if not isinstance(provider, str) or not isinstance(config, dict):
+            continue
+        if not _is_key_scoped_provider(config):
+            continue
+        var = _env_reference_var(config.get("apiKey"))
+        key = os.environ.get(var, "").strip() if var else ""
+        if not key:
+            logger.debug(
+                "Deployment credential unavailable for provider=%s (%s unset)",
+                provider,
+                var or "no env reference",
+            )
+            continue
+        resolved[provider] = key
     ambient: list[str] = []
     for provider in _cached_catalog_provider_ids():
         # Cursor's agents authenticate through acpx / the CLI login, so
