@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
 import { ReAnalyzeDialog } from '@/pages/report/ReAnalyzeDialog'
 import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
+import { writeLastAiPair } from '@/lib/lastAiPair'
 import type { AnalysisResult, AiModelsResponse } from '@/types'
 
 const get = vi.fn()
@@ -375,6 +376,24 @@ describe('new analysis stored default (#591)', () => {
     await user.click(screen.getByRole('button', { name: 'Paste XML' }))
     await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
     await user.click(screen.getByRole('button', { name: 'Submit Analysis' }))
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'openai', ai_model: 'gpt' })))
+  })
+
+  it('submits the server default when the remembered pair is the empty one', async () => {
+    setup()
+    // "Server default" picked on another surface is remembered as an empty pair: no
+    // override, not "no selection" — the form runs the server default with no tests repo.
+    writeLastAiPair('alice', { provider: '', model: '' })
+    const user = userEvent.setup()
+    render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
+    await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
+    // What will run is what the picker shows: the pair the server default resolves to.
+    expect(await screen.findByRole('combobox', { name: 'AI Model' })).toHaveValue('gpt')
+    await user.click(screen.getByRole('button', { name: 'Paste XML' }))
+    await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
+    const submit = screen.getByRole('button', { name: 'Submit Analysis' })
+    expect(submit).toBeEnabled()
+    await user.click(submit)
     await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'openai', ai_model: 'gpt' })))
   })
 

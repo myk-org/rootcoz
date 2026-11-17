@@ -168,7 +168,9 @@ export function NewAnalysisPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const { providers, providerStatus } = useProviderCatalog()
-  const { aiProvider, aiModel, setAiPair } = useAiSelection(storedAi.provider, storedAi.model)
+  // "Server default" is a legal answer here (empty pair = no override), so a remembered
+  // empty pair falls back to the server default instead of reading as no selection (#591).
+  const { aiProvider, aiModel, setAiPair } = useAiSelection(storedAi.provider, storedAi.model, { respectCleared: false })
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')

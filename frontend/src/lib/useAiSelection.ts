@@ -13,8 +13,9 @@ import { readLastAiPair, subscribeLastAiPair, writeLastAiPair, type AiPair, type
  * pair is used as-is. A half pair (provider picked, model not yet, or a model still
  * being typed) is a draft local to this mount and is never persisted.
  *
- * `respectCleared: false` treats a cleared pair as "use my fallbacks" instead —
- * for surfaces that cannot run on the server default (chat needs a concrete pair).
+ * `respectCleared: false` treats a cleared pair as "use my fallbacks" instead, for
+ * surfaces whose fallbacks are a pair to run (chat's server config, the new-analysis
+ * form's server default).
  * A fallback is judged by the same catalog rule as a remembered pair: one the server
  * cannot serve is no selection at all (#591), and the stored default is never written.
  */
