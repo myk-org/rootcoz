@@ -23562,6 +23562,141 @@ async def test_device_approval_accepts_the_deployments_own_origin(
         assert response.json()["ok"] is True
 
 
+async def _approve_a_device_code(client: Any, username: str = "alice") -> str:
+    """Create *username*, approve a fresh device code from its session, return it."""
+    started = _start_device_code(client)
+    await storage.create_user(username)
+    session = await storage.create_session(username, is_admin=False, role="reviewer")
+    client.cookies.set("rootcoz_session", session)
+    approved = client.post(
+        "/api/auth/sso/device/approve",
+        json={"user_code": started["user_code"]},
+        headers={"origin": _SSO_HTTPS_ENV["PUBLIC_BASE_URL"]},
+    )
+    assert approved.status_code == 200, approved.text
+    client.cookies.clear()
+    return started["device_code"]
+
+
+async def _session_count(username: str) -> int:
+    """How many sessions *username* holds — a poll must not add a second one."""
+    async with storage._connect_db() as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) AS n FROM sessions WHERE username = ?", (username,)
+        )
+        return int((await cursor.fetchone())["n"])
+
+
+async def _wait_out_the_poll_interval() -> None:
+    """Rewind the code's poll clock so the throttle lets the next poll through."""
+    async with storage._connect_db() as db:
+        await db.execute(
+            "UPDATE sso_device_codes SET last_polled_at = '2000-01-01 00:00:00'"
+        )
+        await db.commit()
+
+
+async def test_a_fault_after_the_claim_leaves_the_code_redeemable(
+    temp_db_path: Path,
+) -> None:
+    """A code claimed by a poll that then faulted must not read as spent.
+
+    The claim is a committed write made before the account lookup; a fault in
+    that lookup would strand the terminal unless the claim is released.
+    """
+    real_lookup = storage.get_user_by_username
+    claimed_when_it_failed: list[bool] = []
+
+    async def lookup_failing_once(username: str) -> dict[str, Any] | None:
+        if not claimed_when_it_failed:
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT COUNT(*) AS n FROM sso_device_codes"
+                    " WHERE redeemed_at IS NOT NULL"
+                )
+                claimed_when_it_failed.append((await cursor.fetchone())["n"] == 1)
+            raise RuntimeError("storage down")
+        return await real_lookup(username)
+
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        device_code = await _approve_a_device_code(client)
+
+        # The test client re-raises the server error: the terminal sees a 500
+        # after its code was already claimed.
+        with (
+            patch.object(storage, "get_user_by_username", lookup_failing_once),
+            pytest.raises(RuntimeError),
+        ):
+            client.post("/api/auth/sso/device/poll", json={"device_code": device_code})
+
+        # The fault hit after the claim (the window this covers), no session was
+        # minted, and the release let the same terminal redeem the code.
+        assert claimed_when_it_failed == [True]
+        assert await _session_count("alice") == 1
+        await _wait_out_the_poll_interval()
+        retried = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": device_code}
+        ).json()
+        assert retried["status"] == "approved"
+        assert await storage.get_session(retried["token"]) is not None
+
+
+async def test_a_blocked_account_keeps_its_claimed_code_spent(
+    temp_db_path: Path,
+) -> None:
+    """A denial is deliberate: releasing the claim would let a blocked account in.
+
+    The code stays claimed, so a later poll gets nothing — only an unexpected
+    fault releases it.
+    """
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        device_code = await _approve_a_device_code(client)
+        async with storage._connect_db() as db:
+            await db.execute("UPDATE users SET disabled = 1 WHERE username = 'alice'")
+            await db.commit()
+
+        denied = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": device_code}
+        )
+        assert denied.json() == {"status": "denied"}
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT details FROM audit_events"
+                " WHERE action = 'auth.sso_login_failed' ORDER BY id DESC LIMIT 1"
+            )
+            refusal = json.loads((await cursor.fetchone())["details"])
+        assert refusal["reason"] == "account_disabled"
+
+        await _wait_out_the_poll_interval()
+        again = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": device_code}
+        )
+        assert again.json() == {"status": "expired"}
+        assert await _session_count("alice") == 1
+
+
+async def test_the_approved_code_hands_out_one_session_and_then_expires(
+    temp_db_path: Path,
+) -> None:
+    """Redemption consumes the code: the same code yields one session, ever."""
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        device_code = await _approve_a_device_code(client)
+
+        approved = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": device_code}
+        ).json()
+        assert approved["status"] == "approved"
+        assert approved["username"] == "alice"
+        assert await storage.get_session(approved["token"]) is not None
+        assert await _session_count("alice") == 2
+
+        again = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": device_code}
+        )
+        assert again.json() == {"status": "expired"}
+        assert await _session_count("alice") == 2
+
+
 async def test_link_start_refuses_an_http_page_on_the_same_host(
     temp_db_path: Path,
 ) -> None:

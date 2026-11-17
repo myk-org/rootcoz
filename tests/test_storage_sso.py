@@ -6,6 +6,7 @@ these tests pin storage behaviour only.
 """
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -1176,3 +1177,133 @@ async def test_below_require_approval_a_pending_row_still_mints(
         assert minted is not None
         assert minted["role"] == "reviewer"
         assert (await storage.get_session(minted["token"]))["username"] == "alice"
+
+
+class _MovableClock:
+    """Stand in for ``storage.datetime`` and hand out a time the test controls.
+
+    Patching the module's ``datetime`` (not the system clock) lets a call span
+    more time than a real poll ever would, without the test sleeping.
+    """
+
+    def __init__(self, current: datetime) -> None:
+        self.current = current
+
+    def now(self, _tz: object | None = None) -> datetime:
+        return self.current
+
+    # ``record_device_code_poll`` parses the column it just formatted.
+    strptime = staticmethod(datetime.strptime)
+
+
+async def test_a_contended_poll_stamps_the_moment_it_decides(
+    setup_test_db: Path,
+) -> None:
+    """A lock wait must not buy the next poll a free interval.
+
+    The first poll is held between the call and the write lock for longer than
+    the interval — what contention with another writer looks like. Stamped
+    before that wait, the row says the poll happened an interval ago, so the
+    poll that arrives right after it commits is let through. Stamped once the
+    lock is held, the wait costs the flooder nothing.
+    """
+    interval = 5
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        code = await storage.create_device_code(
+            ttl_seconds=600, interval_seconds=interval
+        )
+        clock = _MovableClock(datetime.now(UTC))
+        real_connect_db = storage._connect_db
+        waiting = True
+
+        @contextlib.asynccontextmanager
+        async def contended_connect_db(  # type: ignore[no-untyped-def]
+            db_path: Path | None = None,
+        ):
+            nonlocal waiting
+            async with real_connect_db(db_path) as db:
+                if waiting:
+                    waiting = False
+                    # The write lock was held elsewhere for longer than the
+                    # interval before this poll got it.
+                    clock.current += timedelta(seconds=interval + 5)
+                yield db
+
+        with (
+            patch.object(storage, "datetime", clock),
+            patch.object(storage, "_connect_db", contended_connect_db),
+        ):
+            assert await storage.record_device_code_poll(code["device_code"]) is True
+
+            async with real_connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT last_polled_at FROM sso_device_codes"
+                    " WHERE device_code_hash = ?",
+                    (storage._hash_token(code["device_code"]),),
+                )
+                stamped = (await cursor.fetchone())["last_polled_at"]
+            # The stored instant is the one the decision used: after the wait.
+            assert stamped == clock.current.strftime(storage.SQL_TIMESTAMP_FORMAT)
+
+            # The poll that lands immediately after the delayed one commits is
+            # still inside the window.
+            assert await storage.record_device_code_poll(code["device_code"]) is False
+
+
+async def test_a_keyless_row_is_created_without_a_key(
+    setup_test_db: Path,
+) -> None:
+    """Provisioning records the account, never a secret nobody was shown."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_keyless_user(
+            "sso-provisioned", status="pending", created_via="proxy"
+        )
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT api_key_hash, role, status, created_via, can_view_reports"
+                " FROM users WHERE username = 'sso-provisioned'"
+            )
+            row = dict(await cursor.fetchone())
+
+        # Same shape ``create_user`` leaves, minus the phantom key hash.
+        assert row == {
+            "api_key_hash": None,
+            "role": "reviewer",
+            "status": "pending",
+            "created_via": "proxy",
+            "can_view_reports": 0,
+        }
+        # Nothing to authenticate with until somebody issues a key.
+        assert await storage.user_has_key("sso-provisioned") is False
+
+        with pytest.raises(ValueError, match="already exists"):
+            await storage.create_keyless_user("sso-provisioned", created_via="proxy")
+
+
+async def test_a_provisioned_name_cannot_be_claimed_by_registering_it(
+    setup_test_db: Path,
+) -> None:
+    """A name is not a credential: registration must not take the row over."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_keyless_user("sso-provisioned", created_via="proxy")
+
+        with pytest.raises(ValueError, match="already has an API key"):
+            await storage.create_user("sso-provisioned")
+
+        # Still keyless: the refused claim wrote nothing.
+        assert await storage.user_has_key("sso-provisioned") is False
+
+
+async def test_an_administrator_rotation_gives_a_keyless_account_a_key(
+    setup_test_db: Path,
+) -> None:
+    """The documented recovery: an audited rotation, not a name claim."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_keyless_user("sso-provisioned", created_via="proxy")
+
+        raw_key = await storage.rotate_user_key("sso-provisioned")
+
+        assert (await storage.get_user_by_key(raw_key))["username"] == (
+            "sso-provisioned"
+        )

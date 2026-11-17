@@ -132,6 +132,11 @@ class ProxyStrategy(AuthStrategy):
     account exactly as it is for a self-registered one. The provider proves
     *who* someone is, never that they may act.
 
+    The provisioned row holds **no API key**: the header is this account's
+    credential, so a key minted at provisioning would be a secret nobody was
+    ever shown. A person whose proxy goes away has their key rotated by an
+    administrator (``admin users rotate-key``) — never by claiming the name.
+
     It is never an administrator by default — the administrator bit comes from
     the row only. :data:`~rootcoz.auth.base.RESERVED_ADMIN_USERNAME` is always
     refused, because the bootstrap administrator has no row to resolve.
@@ -211,12 +216,17 @@ class ProxyStrategy(AuthStrategy):
             return None
         status = "pending" if settings.require_approval else "active"
         try:
-            await storage.create_user(username, status=status, created_via="proxy")
+            # Keyless: the header is this account's credential, so provisioning
+            # must not mint a secret nobody is ever shown. The same role rule,
+            # status rule and provenance as every other creation path.
+            await storage.create_keyless_user(
+                username, status=status, created_via="proxy"
+            )
         except ValueError:
             # Provisioning by name is idempotent, and a browser fires several
             # requests in parallel on its first page load: the losers of that race
-            # see "already has an API key" — a ValueError for a name that was, in
-            # fact, just provisioned. Re-read before refusing, or the account's
+            # see "already exists" — a ValueError for a name that was, in fact,
+            # just provisioned. Re-read before refusing, or the account's
             # very first load would answer 401 to some of its own requests.
             existing = await storage.get_user_by_username(username)
             if existing is None:

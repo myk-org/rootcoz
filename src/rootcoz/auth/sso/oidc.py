@@ -149,6 +149,21 @@ class OIDCProvider(SSOProvider):
         self._client_id = client_id
         self._client_secret = client_secret
 
+    def accepted_issuers(self) -> frozenset[str]:
+        """The ``iss`` values this provider's ID tokens may carry.
+
+        The discovery document and the JWKS always come from the configured
+        issuer; only the ``iss`` *claim* is allowed to differ, and only for a
+        provider that documents a second form (Google). Everything else must
+        match exactly, so an override here is what widens that check — never a
+        looser comparison in :meth:`_verify_id_token`.
+
+        Returns:
+            The accepted issuers, normalised the way ``__init__`` stores the
+            configured one.
+        """
+        return frozenset({self.issuer})
+
     @classmethod
     def from_settings(cls, settings: Settings) -> OIDCProvider | None:
         """Build the provider when both credentials are configured.
@@ -426,7 +441,11 @@ class OIDCProvider(SSOProvider):
         if issued_at - CLOCK_SKEW_SECONDS > now:
             raise AuthError("id_token_invalid", "ID token was issued in the future")
         issuer = claims.get("iss")
-        if issuer not in {self.issuer, self.issuer.rstrip("/")}:
+        # A trailing slash is the one spelling difference tolerated on both
+        # sides; every other value must be in the provider's accepted set, and a
+        # non-string claim is a refusal rather than an unhashable-set TypeError.
+        claimed_issuer = issuer.rstrip("/") if isinstance(issuer, str) else None
+        if claimed_issuer not in self.accepted_issuers():
             raise AuthError("id_token_invalid", f"unexpected issuer {issuer!r}")
         audience = claims.get("aud")
         if isinstance(audience, str):
