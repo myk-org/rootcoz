@@ -9119,6 +9119,10 @@ async def _delete_user_dependants(db: aiosqlite.Connection, user_id: int) -> Non
     Args:
         db: Open connection taking part in the deleting transaction.
         user_id: ``users.id`` of the account being removed.
+
+    Requires the SSO tables to exist, which ``init_db`` guarantees before the
+    username merge that calls this: the merge runs after the table creation, so
+    a database upgrading from before SSO has them by then.
     """
     await db.execute("DELETE FROM user_identities WHERE user_id = ?", (user_id,))
     await db.execute("DELETE FROM sso_device_codes WHERE user_id = ?", (user_id,))
@@ -11133,6 +11137,43 @@ async def release_device_code(device_code: str) -> bool:
     return await _retry_contended(_attempt)
 
 
+def _device_exchange_refusal(user: dict[str, Any], *, is_admin: bool) -> str:
+    """Name why *user* may not be handed a freshly minted session, or ``""``.
+
+    Approval happens minutes before a terminal polls, so the block an admin
+    commits in that window has to win: disabling or un-approving an account drops
+    its sessions, and a token minted afterwards would outlive the invalidation.
+    Both decisions are :mod:`rootcoz.auth.approval`'s — the same predicates the
+    login route, the middleware and the poll apply — imported here rather than
+    restated, because ``auth`` already depends on this module.
+
+    Args:
+        user: The users row, read inside the minting transaction.
+        is_admin: Whether the account is an administrator, who bypasses approval.
+
+    Returns:
+        ``"disabled"``, ``"locked"``, ``"pending"`` or ``"rejected"`` — the
+        reason a caller prefixes with ``account_`` for the trail — or ``""`` for
+        an account that may act.
+    """
+    from rootcoz.auth.approval import (
+        account_block_reason,
+        approval_gate_applies,
+        is_approval_blocked,
+    )
+    from rootcoz.config import get_settings
+
+    reason = account_block_reason(user)
+    if reason is not None:
+        return reason
+    status = str(user.get("status") or "")
+    if approval_gate_applies(is_admin=is_admin, settings=get_settings()) and (
+        is_approval_blocked(status)
+    ):
+        return status
+    return ""
+
+
 async def exchange_device_code_for_session(
     device_code: str,
     *,
@@ -11150,12 +11191,15 @@ async def exchange_device_code_for_session(
     leaves the claim releasable (:func:`release_device_code`), never a half-done
     redemption.
 
-    The rights are read from the account's row *inside* the transaction, never
-    taken from whatever the poll saw before it: a downgrade commits a role change
-    and invalidates the account's sessions, and a code approved under the old
-    rights must not get past that invalidation with them (the same reason the
-    row is re-read rather than cached). Removing the role from the signature is
-    what makes the stale value unrepresentable.
+    The rights and the account's eligibility are read from its row *inside* the
+    transaction, never taken from whatever the poll saw before it: a downgrade
+    commits a role change and invalidates the account's sessions, and a block
+    (``disabled``, locked, or un-approved) drops them too — so a code approved
+    before either must not get past that invalidation with a fresh token. The same
+    row read answers both questions, and the refusals come from
+    ``rootcoz.auth.approval`` so this gate cannot disagree with the login route or
+    the middleware. Removing the role from the signature is what makes the stale
+    value unrepresentable.
 
     Args:
         device_code: The raw device code the CLI holds.
@@ -11167,10 +11211,13 @@ async def exchange_device_code_for_session(
 
     Returns:
         ``{"token", "role", "is_admin"}`` — the credential and the rights the
-        account holds now — or ``None`` when there is no live claim to spend
+        account holds now — or ``{"refused": "account_<reason>"}`` when the
+        account is blocked, so the poll can audit what happened instead of
+        reporting an expiry, or ``None`` when there is no live claim to spend
         (unknown, expired, unapproved, never claimed, claimed for another
-        account, or naming an account that no longer has a row). Nothing is
-        written in that case.
+        account, or naming an account that no longer has a row). Neither refusal
+        writes anything; a refused claim stays spent, because a blocked account
+        must not be re-polled into a session.
     """
     if ttl_hours is None:
         ttl_hours = current_session_ttl_hours()
@@ -11192,10 +11239,13 @@ async def exchange_device_code_for_session(
                     await db.rollback()
                     return None
                 cursor = await db.execute(
-                    "SELECT role FROM users WHERE username = ?", (normalized,)
+                    f"SELECT {_USER_LOOKUP_COLUMNS}, status FROM users"
+                    " WHERE username = ?",
+                    (normalized,),
                 )
                 row = await cursor.fetchone()
-                if row is None:
+                user = _user_row_to_dict(row) if row is not None else None
+                if user is None:
                     # A row-less name is the bootstrap administrator, which is an
                     # administrator by construction — the same answer ``/api/auth/login``
                     # and the poll give it. Any other row-less name lost its account
@@ -11207,6 +11257,12 @@ async def exchange_device_code_for_session(
                 else:
                     role = str(row["role"] or "reviewer")
                     is_admin = role == "admin"
+                    refusal = _device_exchange_refusal(user, is_admin=is_admin)
+                    if refusal:
+                        await db.rollback()
+                        # Prefixed like every other SSO refusal reason, so the
+                        # poll audits it as-is.
+                        return {"refused": f"account_{refusal}"}
                 token = await _insert_session_in_tx(
                     db,
                     username=normalized,

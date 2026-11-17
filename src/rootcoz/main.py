@@ -4858,9 +4858,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if (
                 has_valid_session
                 and username
-                and not is_admin
-                and settings.require_approval
                 and not self._is_public_path(path)
+                and auth_approval.approval_gate_applies(
+                    is_admin=is_admin, settings=settings
+                )
             ):
                 user_status = await storage.get_user_status(username)
                 blocked = auth_approval.blocked_user_status_response(
@@ -18478,7 +18479,7 @@ async def login(request: Request) -> JSONResponse:
         raise HTTPException(status_code=401, detail="Invalid username or API key")
 
     # Check pending/rejected status before creating a session (non-admin only)
-    if not is_admin and settings.require_approval:
+    if auth_approval.approval_gate_applies(is_admin=is_admin, settings=settings):
         user_status = await storage.get_user_status(username)
         blocked = auth_approval.blocked_user_status_response(user_status, settings)
         if blocked is not None:
@@ -19511,7 +19512,13 @@ async def _sso_issue_session(
         auth_provider=provider,
     )
 
-    blocked = auth_approval.is_approval_blocked(resolution.status)
+    # The login route's approval gate, not a fourth version of it: a pending or
+    # rejected row only holds a non-administrator back, and only while
+    # ``REQUIRE_APPROVAL`` is on. Below that setting the account is an ordinary
+    # one, and an administrator is never held by its own approval status.
+    blocked = auth_approval.approval_gate_applies(
+        is_admin=is_admin, settings=settings
+    ) and auth_approval.is_approval_blocked(resolution.status)
     destination = "/pending" if blocked else next_path
     if blocked and resolution.created:
         notify_pending_count_changed()
@@ -20238,7 +20245,7 @@ async def sso_device_poll(request: Request) -> JSONResponse:
     # admin may have moved it back to pending since, and an approval is not a
     # standing exemption from `REQUIRE_APPROVAL`. Same condition and same
     # decision as `/api/auth/login`, from `auth/approval` so they cannot drift.
-    if not is_admin and settings.require_approval:
+    if auth_approval.approval_gate_applies(is_admin=is_admin, settings=settings):
         status = await storage.get_user_status(username) or ""
         if auth_approval.is_approval_blocked(status):
             await _audit_sso_refusal(
@@ -20249,9 +20256,11 @@ async def sso_device_poll(request: Request) -> JSONResponse:
     try:
         # One transaction: the session is written and the code spent together, so
         # a failure cannot leave a token the terminal never saw behind a code no
-        # later poll can redeem. The rights are re-read from the account inside
-        # that transaction, so a downgrade that committed while the code was
-        # pending wins over the role this poll read above.
+        # later poll can redeem. The eligibility and the rights are re-read from
+        # the account inside that transaction, so a block or a downgrade that
+        # committed while the code was pending wins over what this poll read
+        # above — the block has already dropped the account's sessions, and a
+        # token minted now would outlive that.
         minted = await storage.exchange_device_code_for_session(
             device_code,
             username=username,
@@ -20262,6 +20271,11 @@ async def sso_device_poll(request: Request) -> JSONResponse:
         # exchanged for a credential must not read as spent.
         await storage.release_device_code(device_code)
         raise
+    if minted is not None and "refused" in minted:
+        # The account was blocked inside the exchange transaction. The refusal
+        # names the block, so the trail says why instead of reading as expiry.
+        await _audit_sso_refusal(request, provider, minted["refused"], subject=username)
+        return JSONResponse(content={"status": "denied"})
     if minted is None:
         # The claim was released by a failed exchange that another poll has
         # already re-taken, the code expired meanwhile, or the account lost its

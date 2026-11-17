@@ -8,7 +8,11 @@ from fastapi import Request, Response
 from fastapi.responses import RedirectResponse
 
 from rootcoz import get_child_logger, storage
-from rootcoz.auth.approval import account_block_reason, is_approval_blocked
+from rootcoz.auth.approval import (
+    account_block_reason,
+    approval_gate_applies,
+    is_approval_blocked,
+)
 from rootcoz.auth.base import (
     SESSION_COOKIE,
     SET_PROXY_COOKIE_ATTR,
@@ -276,7 +280,9 @@ async def _login_destination(username: str, ctx: AuthContext) -> str | None:
     # The same three conditions the middleware's approval gate applies, so this
     # can never send a visitor to a page that gate would refuse.
     _, is_admin = role_and_admin(user, ctx.settings.default_user_role)
-    if ctx.settings.require_approval and not is_admin and is_approval_blocked(status):
+    if approval_gate_applies(is_admin=is_admin, settings=ctx.settings) and (
+        is_approval_blocked(status)
+    ):
         return "/pending" if status == "pending" else None
     return "/"
 

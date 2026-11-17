@@ -50,6 +50,25 @@ def is_approval_blocked(user_status: str | None) -> bool:
     return (user_status or "") in APPROVAL_STATUS_DETAILS
 
 
+def approval_gate_applies(*, is_admin: bool, settings: Settings) -> bool:
+    """Whether ``REQUIRE_APPROVAL`` holds a non-administrator back at all.
+
+    The condition half of every approval refusal: the middleware, the proxy
+    redirect, ``/api/auth/login``, the device poll and the SSO session issue ask
+    this first and :func:`is_approval_blocked` second, so none of them can drift
+    into refusing an administrator, or an ordinary account below
+    ``REQUIRE_APPROVAL``, that the others let in.
+
+    Args:
+        is_admin: Whether the resolved identity is an administrator.
+        settings: Application settings carrying ``REQUIRE_APPROVAL``.
+
+    Returns:
+        True when this caller's ``status`` decides access.
+    """
+    return settings.require_approval and not is_admin
+
+
 def account_block_reason(user: dict[str, Any] | None) -> str | None:
     """``"disabled"`` / ``"locked"`` for a row that must not log in (#379).
 

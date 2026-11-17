@@ -1444,7 +1444,7 @@ class TestProxyHeaders:
                         },
                         follow_redirects=False,
                     )
-                    assert login.status_code == 200
+                    _assert_spa_page(login)
                     assert login.cookies.get("rootcoz_username") is None
                     assert login.cookies.get("rootcoz_session") is None
 
