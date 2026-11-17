@@ -21594,9 +21594,15 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     # second row beside the catalog's ``enmaas``.
     for declared_id in sidecar_declared:
         listed_ids[declared_id.lower()] = declared_id
-    # Catalog rows by the same folded key: the row's spelling may now come from
-    # the manifest while the catalog bucket keeps its own casing.
-    catalog_models = {p.lower(): rows for p, rows in models_by_provider.items()}
+    # Catalog rows by the same folded key, each bucket keeping its own spelling:
+    # the row's spelling may now come from the manifest while the catalog bucket
+    # keeps its own casing. Two providers that differ only in case are distinct
+    # providers (``_catalog_provider_spelling`` refuses to pick between them), so
+    # one bucket must never overwrite the other — that would attach one
+    # provider's models to the other's row (#586 r5).
+    catalog_models: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for catalog_id, rows in models_by_provider.items():
+        catalog_models.setdefault(catalog_id.lower(), {})[catalog_id] = rows
     for provider in sorted(listed_ids.values()):
         provider_lower = provider.lower()
         # Managed = stored selection rows or a stored key — the same rule
@@ -21607,6 +21613,14 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
         # model and silently withdraw the rest of the catalog (#347 r4).
         managed = provider_lower in selections or normalize_provider(provider) in stored
         selected = selections.get(provider_lower, {})
+        # The row's own spelling first, so a case-distinct provider lists exactly
+        # its own models; a row with no bucket of its own spelling still follows
+        # the lone case-variant of the same provider (manifest ``EnMaaS``,
+        # catalog ``enmaas`` — #586 r4).
+        catalog_buckets = catalog_models.get(provider_lower, {})
+        catalog_rows = catalog_buckets.get(provider)
+        if catalog_rows is None:
+            catalog_rows = next(iter(catalog_buckets.values()), [])
         models = [
             {
                 "id": m["id"],
@@ -21614,7 +21628,7 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
                 "included": (m["id"] in selected) if managed else True,
                 "free": m["id"] in free_by_provider.get(provider_lower, set()),
             }
-            for m in catalog_models.get(provider_lower, [])
+            for m in catalog_rows
         ]
         record = stored.get(normalize_provider(provider))
         # Which credential captured the key-scoped listing above (#372): a

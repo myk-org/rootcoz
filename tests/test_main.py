@@ -15793,6 +15793,7 @@ class TestAdminSettingsEndpoints:
         from rootcoz import ai_client
 
         monkeypatch.setattr(ai_client, "_COLD_CATALOG_TIMEOUT_SECONDS", 0.1)
+        monkeypatch.setattr(ai_client, "_cold_catalog_retry_at", 0.0)
 
         async def _hang(*_: object) -> list[dict]:
             await asyncio.sleep(1)
@@ -15813,6 +15814,53 @@ class TestAdminSettingsEndpoints:
         item = next(s for s in response.json() if s["key"] == "active_server_providers")
         assert item["options"] == ["EnMaaS"]
         assert elapsed < 0.5
+
+    def test_settings_provider_options_retry_a_hang_after_the_cooldown(
+        self, test_client, monkeypatch
+    ) -> None:
+        """#586 r5: one timed-out discovery, not one per settings load.
+
+        A hung sidecar leaves the catalog cache cold, so without a cooldown every
+        settings load waits for the same timeout. The first load pays it, the
+        next one inside the window answers immediately, and a load after the
+        window tries again instead of baking the outage in.
+        """
+        from rootcoz import ai_client
+
+        monkeypatch.setattr(ai_client, "_COLD_CATALOG_TIMEOUT_SECONDS", 0.1)
+        monkeypatch.setattr(ai_client, "_COLD_CATALOG_RETRY_SECONDS", 60.0)
+        monkeypatch.setattr(ai_client, "_cold_catalog_retry_at", 0.0)
+        attempts = []
+
+        async def _hang(*_: object) -> list[dict]:
+            attempts.append(1)
+            await asyncio.sleep(1)
+            return []
+
+        monkeypatch.setattr(ai_client, "_list_models_raw", _hang)
+        monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+        monkeypatch.setattr(ai_client, "_agent_manifest", dict)
+        monkeypatch.setattr(
+            storage,
+            "list_server_ai_providers",
+            AsyncMock(return_value=[{"provider": "EnMaaS"}]),
+        )
+        first = time.monotonic()
+        assert test_client.get("/api/admin/settings").status_code == 200
+        assert time.monotonic() - first >= 0.1
+        second = time.monotonic()
+        response = test_client.get("/api/admin/settings")
+        assert response.status_code == 200
+        assert time.monotonic() - second < 0.1
+        assert len(attempts) == 1
+        item = next(s for s in response.json() if s["key"] == "active_server_providers")
+        # Still everything that resolves without the catalog.
+        assert item["options"] == ["EnMaaS"]
+
+        # Past the window the discovery is attempted again — never frozen cold.
+        monkeypatch.setattr(ai_client, "_cold_catalog_retry_at", 0.0)
+        assert test_client.get("/api/admin/settings").status_code == 200
+        assert len(attempts) == 2
 
     def test_settings_provider_options_exclude_catalog_only_providers(
         self, test_client, monkeypatch

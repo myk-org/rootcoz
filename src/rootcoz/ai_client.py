@@ -65,6 +65,13 @@ _STREAM_TERMINAL_GRACE_SECONDS = 5.0
 # client's own timeout is minutes, so an unresponsive sidecar would hold every
 # admin settings page; a healthy one lists in well under this.
 _COLD_CATALOG_TIMEOUT_SECONDS = 2.0
+# How long a timed-out cold-cache discovery suppresses the next attempt. Without
+# it every settings load while the sidecar hangs pays the same bound again. The
+# catalog cache stays cold (never a stale snapshot) and the window is short: the
+# first load after it retries, so a recovered sidecar comes back on its own.
+_COLD_CATALOG_RETRY_SECONDS = 30.0
+# ``monotonic()`` deadline of that window; 0.0 = no timed-out attempt recorded.
+_cold_catalog_retry_at = 0.0
 
 # Only explicitly initiated AI tasks set this; unrelated request tasks never inherit credentials.
 ai_username: ContextVar[str] = ContextVar("ai_username", default="")
@@ -501,19 +508,30 @@ async def server_provider_options() -> list[str]:
     """
     from rootcoz.storage import list_server_ai_providers
 
-    if _model_catalog_cache is None:
+    global _cold_catalog_retry_at
+
+    # A cold cache normally means the background preload has not finished, but a
+    # hung sidecar never fills it: retry at most once per
+    # ``_COLD_CATALOG_RETRY_SECONDS`` instead of making every load wait for the
+    # same timeout.
+    if _model_catalog_cache is None and time.monotonic() >= _cold_catalog_retry_at:
         # The ambient half of the resolve reads the catalog snapshot, so a cold
         # cache would silently drop ambient providers from the picker (#586):
         # one bounded discovery here, no caching of its own — the cache stays
-        # cold on a timeout, so the next load retries instead of baking in an
+        # cold on a timeout, so a later load retries instead of baking in an
         # outage, and everything resolvable without the catalog still answers.
+        # Only the timeout arms the cooldown: an error the sidecar answers with
+        # costs no wait, so it needs no suppression.
         try:
             await asyncio.wait_for(_get_model_catalog(), _COLD_CATALOG_TIMEOUT_SECONDS)
         except TimeoutError:
+            _cold_catalog_retry_at = time.monotonic() + _COLD_CATALOG_RETRY_SECONDS
             logger.warning(
                 "Sidecar model catalog did not answer within %.1fs for server"
-                " provider options; listing what resolves without it",
+                " provider options; listing what resolves without it and not"
+                " retrying for %.0fs",
                 _COLD_CATALOG_TIMEOUT_SECONDS,
+                _COLD_CATALOG_RETRY_SECONDS,
             )
         except httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError:
             logger.warning(

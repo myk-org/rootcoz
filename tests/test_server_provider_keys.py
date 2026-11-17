@@ -3099,6 +3099,37 @@ async def test_card_folds_a_declared_mixed_case_provider_once(
     assert await ai_client.server_provider_options() == ["EnMaaS"]
 
 
+async def test_card_never_lists_a_case_distinct_providers_models(
+    client, monkeypatch, tmp_path
+):
+    """#586 r5: folding on the lowercase key never lends a provider another's models.
+
+    ``Foo`` and ``foo`` are two providers (``_catalog_provider_spelling``
+    refuses to pick between them), so the row spelled ``Foo`` — here taken from
+    the manifest, which is what the runtime resolves — lists exactly ``Foo``'s
+    catalog models, not the ones of the bucket that folds onto the same key.
+    """
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {"Foo": {"apiKey": "foo-literal-key"}},  # pragma: allowlist secret
+    )
+    _fake_catalog(
+        monkeypatch,
+        [
+            {"provider": "Foo", "id": "Foo/upper-model"},
+            {"provider": "foo", "id": "foo/lower-model"},
+        ],
+    )
+    _mock_supported(monkeypatch, [])
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+
+    listed = _providers(client)
+
+    assert list(listed) == ["Foo"]
+    assert [m["id"] for m in listed["Foo"]["models"]] == ["Foo/upper-model"]
+
+
 def test_page_load_reads_and_reports_the_manifest_once(
     client, monkeypatch, tmp_path, caplog
 ):
