@@ -428,6 +428,7 @@ from rootcoz.transcripts import (
 from rootcoz.url_utils import (
     _parse_valid_url,
     is_safe_navigation_url,
+    is_same_origin,
     mask_url_credentials_in_text,
     mask_url_value,
     redact_urls_in_text,
@@ -4729,9 +4730,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         settings = get_settings()
 
-        # A proxy-authenticated visitor on /login goes straight to the dashboard,
-        # or to the pending page while approval holds their account.
-        if path.startswith("/login"):
+        # A proxy-authenticated visitor on the login *page* goes straight to the
+        # dashboard, or to the pending page while approval holds their account.
+        # Exactly that page, not every "/login" prefix: /login/device is the CLI
+        # approval screen, and a proxy-only visitor has no session to satisfy a
+        # redirect to "/" — the header already proves they may open it.
+        if path_key == "/login":
             redirect = await auth_proxy.proxy_login_redirect(
                 AuthContext(request=request, settings=settings)
             )
@@ -18972,9 +18976,14 @@ def _request_is_same_origin(request: Request) -> bool:
 
     ``Sec-Fetch-Site`` is what current browsers send and is decisive when present;
     the ``Origin`` header (falling back to ``Referer``) covers a client that omits
-    it. Anything that proves nothing — no header, an unset ``PUBLIC_BASE_URL``, a
-    foreign host — is refused, because "unproven" and "cross-site" must take the
-    same branch.
+    it, and must then name the same *origin* — scheme, host **and** port, not just
+    the host. The scheme is the part that matters most: an ``http`` page on the
+    deployment's own host is a different origin, and when a trusted proxy
+    authenticates the request itself (``X-Forwarded-User``) nothing else about the
+    request shows that the page which started it was plaintext. Anything that
+    proves nothing — no header, an unset or incomplete ``PUBLIC_BASE_URL``, a
+    foreign, relative or unparseable origin — is refused, because "unproven" and
+    "cross-site" must take the same branch.
 
     Args:
         request: The request that wants to act on the caller's account.
@@ -18985,11 +18994,8 @@ def _request_is_same_origin(request: Request) -> bool:
     fetch_site = request.headers.get("sec-fetch-site", "")
     if fetch_site:
         return fetch_site == "same-origin"
-    base = urlparse((get_settings().public_base_url or "").strip())
     source = request.headers.get("origin") or request.headers.get("referer") or ""
-    return bool(base.netloc) and (
-        urlparse(source).netloc.lower() == base.netloc.lower()
-    )
+    return is_same_origin(source, (get_settings().public_base_url or "").strip())
 
 
 @app.get("/api/auth/sso/{provider}/login", operation_id="ssoLogin")
