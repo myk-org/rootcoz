@@ -127,6 +127,20 @@ AUDIT_BRANCH_EXEMPT: dict[tuple[str, str], str] = {
         "POST",
         "/api/admin/settings/import",
     ): "dry_run=true validates and diffs without writing settings",
+    (
+        # Public route: a call with no cookie, or naming a session row that is
+        # already gone, clears nothing — auditing those would let anyone fill
+        # the trail by probing the endpoint.
+        "POST",
+        "/api/auth/logout",
+    ): "a cookie-less call, or one whose row is already gone, clears no session",
+    (
+        # The terminal's poll: pending, slow_down, expired and never-claimed all
+        # return without minting anything. The mint, every refusal and the
+        # approval are audited.
+        "POST",
+        "/api/auth/sso/device/poll",
+    ): "pending, slow_down and expired polls hand out no session to audit",
 }
 
 
