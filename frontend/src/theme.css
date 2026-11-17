@@ -31,9 +31,9 @@
   --color-glow-purple: rgba(188, 140, 255, 0.12);
 
   /* Text colors */
-  --color-text-primary: #f0f6fc;
-  --color-text-secondary: #9198a1;
-  --color-text-tertiary: #656d76;
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #e8ecf1;
+  --color-text-tertiary: #c3cbd4;
   --color-text-link: #388bfd;
 
   /* Accent border for focus/active states */
