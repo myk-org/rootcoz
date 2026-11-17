@@ -14,9 +14,13 @@ type CatalogState = {
   providerStatus: Record<string, ProviderStatus>
   /** folded provider id → exact-case catalog id. */
   originalIds: Record<string, string>
+  /** The request has answered (even with nothing) — not "still loading". */
+  settled: boolean
 }
 
-const EMPTY_CATALOG: CatalogState = { providerKeys: [], providers: {}, enabled: [], providerStatus: {}, originalIds: {} }
+const EMPTY_CATALOG: CatalogState = { providerKeys: [], providers: {}, enabled: [], providerStatus: {}, originalIds: {}, settled: false }
+/** A request that answered with nothing: terminal, unlike `EMPTY_CATALOG`. */
+const SETTLED_EMPTY_CATALOG: CatalogState = { ...EMPTY_CATALOG, settled: true }
 
 /** Shared in-flight / completed catalog so concurrent hook mounts share one fetch. */
 const catalogInflight = new Map<string, Promise<CatalogState>>()
@@ -84,6 +88,7 @@ function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
         enabled: providerKeys.filter((p) => (providers[p] ?? []).length > 0),
         providerStatus,
         originalIds,
+        settled: true,
       }
       if (generation === catalogGeneration && catalogInflight.get(cacheKey) === req) {
         catalogCache.set(cacheKey, next)
@@ -139,6 +144,8 @@ export function useProviderCatalog(): {
   providerStatus: Record<string, ProviderStatus>
   /** folded provider id → exact-case catalog id. */
   originalIds: Record<string, string>
+  /** The request has answered (even with nothing) — not "still loading". */
+  settled: boolean
 } {
   const { username, isAdmin, authenticated } = useAuth()
   const cacheKey = catalogKeyFor(username, isAdmin, authenticated)
@@ -163,7 +170,7 @@ export function useProviderCatalog(): {
         if (!ignore && generation === catalogGeneration) setState({ key: cacheKey, catalog: next })
       })
       .catch(() => {
-        if (!ignore && generation === catalogGeneration) setState({ key: cacheKey, catalog: EMPTY_CATALOG })
+        if (!ignore && generation === catalogGeneration) setState({ key: cacheKey, catalog: SETTLED_EMPTY_CATALOG })
       })
     return () => {
       ignore = true

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { useEffect, type ReactNode } from 'react'
@@ -160,6 +160,22 @@ describe('BugCreationDialog AI picker', () => {
     await user.type(screen.getByRole('combobox', { name: 'AI Model' }), '-nope')
     expect(screen.getByRole('alert')).toHaveTextContent(/not available/i)
     expect(screen.getByRole('button', { name: /continue/i })).toBeDisabled()
+  })
+
+  it('waits for the catalog before previewing the supplied pair', async () => {
+    // The issue prompt can land before /api/ai-models. Posting then sends an empty pair,
+    // and the server resolves the preview against its stored default instead (#591).
+    let releaseCatalog: (value: unknown) => void = () => {}
+    get.mockImplementation(withAccountRow((path) => {
+      if (path.startsWith('/api/ai-models')) return new Promise((resolve) => { releaseCatalog = resolve })
+      if (path.endsWith('/issue-prompt')) return { issue_prompt: 'Describe the bug' }
+      return {}
+    }))
+    await openPicker('openai', 'gpt-4o')
+
+    expect(screen.getByRole('button', { name: /continue/i })).toBeDisabled()
+    await act(async () => releaseCatalog(catalog))
+    await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).toBeEnabled())
   })
 
   it('sends the analysis pair with the preview request', async () => {

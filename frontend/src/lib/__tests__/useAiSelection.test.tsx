@@ -49,10 +49,11 @@ let catalog: unknown = USER_CATALOG
 
 /** Fallbacks default to a pair this catalog serves; a test overrides them for the rest. */
 function Harness({ provider = 'openai', model = 'gpt-4o' }: { provider?: string; model?: string }) {
-  const { aiProvider, aiModel, setAiPair } = useAiSelection(provider, model)
+  const { aiProvider, aiModel, aiPending, setAiPair } = useAiSelection(provider, model)
   return (
     <>
       <span data-testid="pair">{`${aiProvider}/${aiModel}`}</span>
+      <span data-testid="settled">{aiPending ? 'pending' : 'settled'}</span>
       <button onClick={() => setAiPair('claude', 'sonnet')}>pick complete</button>
       <button onClick={() => setAiPair('claude', '')}>pick provider</button>
       <button onClick={() => setAiPair('', '')}>pick server default</button>
@@ -131,6 +132,37 @@ describe('useAiSelection', () => {
     const options = (await screen.findAllByRole('option')).map((option) => option.textContent).join(' ')
     expect(options).toMatch(/claude/i)
     expect(options).toMatch(/openai/i)
+  })
+
+  it('reports the fallback as pending until the catalog judges it', async () => {
+    let releaseCatalog: (value: unknown) => void = () => {}
+    get.mockImplementation(() => new Promise((resolve) => { releaseCatalog = resolve }))
+    render(<Harness />)
+    await waitFor(() => expect(get).toHaveBeenCalled())
+    expect(screen.getByTestId('settled').textContent).toBe('pending')
+
+    await act(async () => releaseCatalog(USER_CATALOG))
+    await waitFor(() => expect(pair()).toBe('openai/gpt-4o'))
+    expect(screen.getByTestId('settled').textContent).toBe('settled')
+  })
+
+  it('stops waiting when the catalog cannot be fetched, so a surface never locks up', async () => {
+    get.mockRejectedValue(new Error('503 Service Unavailable'))
+    render(<Harness />)
+    await waitFor(() => expect(screen.getByTestId('settled').textContent).toBe('settled'))
+    expect(pair()).toBe('/')
+  })
+
+  it('applies a manual model id for a no-listing provider', async () => {
+    // The backend keeps the provider in the catalog with an empty model list and reports
+    // modelListingSupported: false, so the provider key exists and a manual pair is usable.
+    catalog = {
+      providers: { cursor: [] },
+      provider_status: { cursor: { has_api_key: true, modelListingSupported: false } },
+    }
+    await mount({ provider: 'cursor', model: 'cursor:manual-only' })
+    await waitFor(() => expect(pair()).toBe('cursor/cursor:manual-only'))
+    expect(screen.getByTestId('settled').textContent).toBe('settled')
   })
 
   it('keeps an in-progress draft even when the fallback is unavailable', async () => {

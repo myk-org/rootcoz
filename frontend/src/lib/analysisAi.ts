@@ -58,6 +58,24 @@ export function isAnalysisAiAvailable(providers: Record<string, AiModel[]>, stat
   return models.some((option) => option.id === model && option.verified !== false)
 }
 
+/**
+ * Which part of a pair the loaded catalog cannot serve, so a notice can name it: the
+ * provider when the catalog has never heard of it, the model when it lists the provider
+ * but not a usable model, and the session when the model is listed yet the sidecar
+ * refuses to open a session for it.
+ */
+export type AnalysisAiUnavailablePart = 'provider' | 'model' | 'session'
+
+export function analysisAiUnavailablePart(
+  providers: Record<string, AiModel[]>, status: Record<string, ProviderStatus>,
+  provider: string, model: string, canUseServer = true, canUseFree = false,
+): AnalysisAiUnavailablePart {
+  const id = normalizeProvider(provider)
+  if (!(id in providers) && !(id in status)) return 'provider'
+  const listed = usableModels(providers, provider, false, status, canUseServer, canUseFree)
+  return listed.some((option) => option.id === model && option.session_supported === false) ? 'session' : 'model'
+}
+
 export function isAnalysisFormAiUnavailable(
   providers: Record<string, AiModel[]>, status: Record<string, ProviderStatus>,
   primary: { ai_provider: string; ai_model: string }, peers: { ai_provider: string; ai_model: string }[],

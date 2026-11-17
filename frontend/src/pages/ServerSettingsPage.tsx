@@ -54,7 +54,7 @@ import { TestResultBanner } from '@/components/shared/TestResultBanner'
 import { useProviderModels } from '@/hooks/useProviderModels'
 import { useCursorAuthStatus, useProviderCatalog } from '@/lib/useProviderOptions'
 import { normalizeProvider } from '@/lib/aiProviders'
-import { isAnalysisAiAvailable } from '@/lib/analysisAi'
+import { isAnalysisAiAvailable, analysisAiUnavailablePart, type AnalysisAiUnavailablePart } from '@/lib/analysisAi'
 import { ServerProvidersCard } from '@/components/shared/ServerProvidersCard'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
@@ -690,6 +690,20 @@ function EnvVarWarning({ setting }: { setting: ServerSetting }) {
 // Component
 // ---------------------------------------------------------------------------
 
+/**
+ * Why the stored default cannot be served, in the catalog's own terms. Naming the model
+ * (or the session) matters: blaming the provider every time contradicted the picker,
+ * which lists a model the sidecar merely refuses to open a session for.
+ */
+function unservedDefaultReason(part: AnalysisAiUnavailablePart, provider: string, model: string): React.ReactNode {
+  const id = (value: string) => <span className="font-mono">{value}</span>
+  const pair = model ? <>{id(provider)} / {id(model)}</> : id(provider)
+  if (part === 'provider') return <>the provider catalog does not offer {pair}</>
+  if (part === 'session') return <>{pair} is listed, but the sidecar cannot open a session for that model</>
+  if (!model) return <>{id(provider)} is listed, but the stored default names no model for it</>
+  return <>{id(provider)} is listed, but the provider catalog does not offer the model {id(model)}</>
+}
+
 export function ServerSettingsPage() {
   const { isAdmin, canUseServerProviders, canUseFreeProviders } = useAuth()
   const [state, dispatch] = useReducer(reducer, initialState)
@@ -710,12 +724,14 @@ export function ServerSettingsPage() {
   const effectiveAiProvider = aiProviderEditing
     ? aiProviderValue
     : (savedAiProvider || aiProviderValue)
-  // The catalog decides whether the default can be served at all (#591): a provider
-  // this server does not offer is never asked for models, it is reported as such —
-  // the stored value itself is left exactly as it is.
+  // The catalog decides whether the default can be served at all (#591), and names the
+  // part it cannot serve: a provider it does not have, a model it does not offer, or a
+  // listed model the sidecar opens no session for. The stored value is left as it is.
   const { providers: aiProviders, providerStatus: aiProviderStatus, providerKeys: aiProviderKeys } = useProviderCatalog()
-  const aiDefaultUnavailable = savedAiProvider !== '' && aiProviderKeys.length > 0 &&
+  const aiDefaultUnserved = savedAiProvider !== '' && aiProviderKeys.length > 0 &&
     !isAnalysisAiAvailable(aiProviders, aiProviderStatus, savedAiProvider, savedAiModel, false, canUseServerProviders, canUseFreeProviders)
+    ? analysisAiUnavailablePart(aiProviders, aiProviderStatus, savedAiProvider, savedAiModel, canUseServerProviders, canUseFreeProviders)
+    : null
   const modelListingProvider = aiProviderKeys.includes(normalizeProvider(effectiveAiProvider)) ? effectiveAiProvider : ''
   const { models: aiModels, refresh: refreshModels, refreshing: refreshingModels } = useProviderModels(modelListingProvider)
   const cursorAuthStatus = useCursorAuthStatus()
@@ -1425,11 +1441,10 @@ export function ServerSettingsPage() {
             onShowHistory={() => handleShowHistory(setting.key)}
             configureLabel="Configure provider"
             notConfiguredLabel="Not configured (uses AI_PROVIDER env var)"
-            notice={aiDefaultUnavailable ? (
+            notice={aiDefaultUnserved ? (
               <p role="status" className="flex items-center gap-1.5 text-xs text-signal-amber">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                Not available on this server: the provider catalog does not offer
-                {' '}<span className="font-mono">{savedAiProvider}</span>{savedAiModel ? ` / ${savedAiModel}` : ''}.
+                Not available on this server: {unservedDefaultReason(aiDefaultUnserved, savedAiProvider, savedAiModel)}.
                 AI surfaces therefore show no provider selected. The default is left unchanged.
               </p>
             ) : undefined}

@@ -1745,9 +1745,21 @@ describe('ServerSettingsPage env parity (#347)', () => {
 
 // #591 — the stored AI default is judged against the catalog this server actually has.
 describe('ServerSettingsPage AI default catalog check (#591)', () => {
-  /** provider → its only model id, so a stored pair can be served or missed exactly. */
-  const catalogServing = (models: Record<string, string>) => ({
-    providers: Object.fromEntries(Object.entries(models).map(([p, id]) => [p, [{ id, name: id, provider: p, credential_sources: ['user'], verified: true }]])),
+  /** One catalog model entry: user-credentialed and verified unless told otherwise. */
+  const modelEntry = (provider: string, entry: Record<string, unknown> | string) => ({
+    id: typeof entry === 'string' ? entry : String(entry.id),
+    name: typeof entry === 'string' ? entry : String(entry.id),
+    provider,
+    credential_sources: ['user'],
+    verified: true,
+    ...(typeof entry === 'string' ? {} : entry),
+  })
+  /** provider → its models, so a stored pair can be served or missed exactly. */
+  const catalogServing = (models: Record<string, Array<Record<string, unknown>> | string>) => ({
+    providers: Object.fromEntries(Object.entries(models).map(([provider, entries]) => [
+      provider,
+      (typeof entries === 'string' ? [entries] : entries).map((entry) => modelEntry(provider, entry)),
+    ])),
     providerStatus: {},
     providerKeys: Object.keys(models),
   })
@@ -1772,7 +1784,7 @@ describe('ServerSettingsPage AI default catalog check (#591)', () => {
     storedDefault('cursor', 'cursor:cursor-grok-4.6-high')
     const providerRow = await openAiRow()
 
-    expect(within(providerRow).getByRole('status')).toHaveTextContent(/Not available on this server/)
+    expect(within(providerRow).getByRole('status')).toHaveTextContent(/the provider catalog does not offer cursor/)
     expect(within(providerRow).getAllByText(/cursor/).length).toBeGreaterThan(0)
     // No model listing for a provider the catalog does not offer — that is the 400.
     expect(modelListingCalls).not.toContain('cursor')
@@ -1780,6 +1792,27 @@ describe('ServerSettingsPage AI default catalog check (#591)', () => {
     expect(put).not.toHaveBeenCalled()
     expect(persistSetting).not.toHaveBeenCalled()
     expect(vi.mocked(api.delete)).not.toHaveBeenCalled()
+  })
+
+  it('says the model is the part the catalog misses when the provider is there', async () => {
+    catalog = catalogServing({ gemini: 'gemini-2.5-pro' })
+    storedDefault('gemini', 'gemini-2.0-flash')
+    const providerRow = await openAiRow()
+
+    expect(within(providerRow).getByRole('status')).toHaveTextContent(
+      /gemini is listed, but the provider catalog does not offer the model gemini-2\.0-flash/,
+    )
+  })
+
+  it('does not call a listed model missing when only a session is refused', async () => {
+    // That model is in the picker right below: "the catalog does not offer it" would contradict the screen.
+    catalog = catalogServing({ gemini: [{ id: 'gemini-2.5-pro', session_supported: false }] })
+    storedDefault('gemini', 'gemini-2.5-pro')
+    const providerRow = await openAiRow()
+
+    const status = within(providerRow).getByRole('status')
+    expect(status).toHaveTextContent(/gemini \/ gemini-2\.5-pro is listed, but the sidecar cannot open a session/i)
+    expect(status).not.toHaveTextContent(/does not offer/i)
   })
 
   it('stays quiet for a stored default the catalog serves', async () => {

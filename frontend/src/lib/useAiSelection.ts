@@ -26,7 +26,7 @@ export function useAiSelection(
   const {
     username, canUseServerProviders, canUseFreeProviders, authenticated, loading: authLoading,
   } = useAuth()
-  const { providers, providerKeys, providerStatus } = useProviderCatalog()
+  const { providers, providerKeys, providerStatus, settled: catalogSettled } = useProviderCatalog()
   // An empty or failed /api/ai-models says nothing about any pair.
   const catalogLoaded = providerKeys.length > 0
   // Re-reads on every write for this user, so all mounted surfaces stay in sync.
@@ -100,6 +100,9 @@ export function useAiSelection(
   return {
     aiProvider: sel ? sel.provider : fallbackApplied ? normalizeProvider(fallbackProvider) : '',
     aiModel: sel ? sel.model : fallbackApplied ? fallbackModel : '',
+    // A supplied fallback is undecided, not absent, until the catalog answers: a surface
+    // that sends the pair (issue preview) must wait instead of posting an empty one (#591).
+    aiPending: fallbackProvider !== '' && !sel && !catalogSettled,
     setAiPair,
   }
 }

@@ -95,7 +95,7 @@ export function BugCreationDialog({
   const refreshEnrichments = useRefreshEnrichments()
   const { capabilities: reportCapabilities, capabilitiesLoaded } = useReportState()
   const { username, canUseServerProviders, canUseFreeProviders } = useAuth()
-  const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultAiProvider, defaultAiModel)
+  const { aiProvider, aiModel, aiPending, setAiPair } = useAiSelection(defaultAiProvider, defaultAiModel)
   const { providers, providerStatus } = useProviderCatalog()
   const [phase, setPhase] = useState<Phase>('idle')
   // The issue prompt belongs to the dialog session (open + job) that requested
@@ -142,6 +142,9 @@ export function BugCreationDialog({
 
   /** No provider selected = server default (resolved server-side), so only gate an explicit pair. */
   const aiUnavailable = aiProvider.trim() !== '' && !isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, false, canUseServerProviders, canUseFreeProviders)
+  // `aiPending` closes the same gate from the other side: the supplied pair is still being
+  // judged, and posting now would send '' — the server would resolve the preview against
+  // its own default instead (#591).
 
   const previewPath = target === 'github' ? 'preview-github-issue' : 'preview-jira-bug'
   const createPath = target === 'github' ? 'create-github-issue' : 'create-jira-bug'
@@ -707,7 +710,7 @@ export function BugCreationDialog({
           {promptPhase === 'prompt' && (
             <div className="flex gap-2 sm:ml-auto">
               <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
-              <Button onClick={handleContinueFromPrompt} disabled={aiUnavailable}>Continue</Button>
+              <Button onClick={handleContinueFromPrompt} disabled={aiUnavailable || aiPending}>Continue</Button>
             </div>
           )}
           {(promptPhase === 'success' || promptPhase === 'error') && (
