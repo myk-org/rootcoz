@@ -122,7 +122,7 @@ This clones the tests repository plus both extra repositories into the analysis 
    | Setting | Default | Notes |
    | --- | --- | --- |
    | `get_job_artifacts` | on | Runtime toggle per submission or server-wide |
-   | `jenkins_artifacts_max_size_mb` | 500 | Size cap for the download |
+   | `jenkins_artifacts_max_size_mb` | 500 | Size cap per artifact; a larger artifact is skipped, so a build with several large artifacts downloads more than this in total |
 
    Turn artifact collection off for large builds where the console output already tells the whole story — it is the slowest part of setting up a job.
 

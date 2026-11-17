@@ -626,7 +626,10 @@ _SETTING_CHOICES: dict[str, dict[str, Any]] = {
     },
 }
 
-# Category grouping for UI display
+# Category grouping for UI display. The tab list is purpose-based (#585):
+# a setting sits on the tab for the task it configures, never on a tab named
+# after a product behind a generic capability, and never on an abstraction
+# like "Sources". Server keeps exactly two settings.
 _SETTINGS_CATEGORIES: dict[str, list[str]] = {
     "Jenkins": [
         "jenkins_url",
@@ -635,9 +638,13 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "jenkins_ssl_verify",
         "jenkins_timeout",
         "jenkins_artifacts_max_size_mb",
-        "get_job_artifacts",
+        # Jenkins-only polling, beside the settings it polls with.
+        "wait_for_completion",
+        "poll_interval_minutes",
+        "max_wait_minutes",
     ],
-    "AI": [
+    # The AI settings plus the analysis pipeline they run in.
+    "Analysis": [
         "ai_provider",
         "ai_model",
         "ai_call_timeout",
@@ -648,31 +655,40 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "ambient_auth_providers",
         "active_server_providers",
         "record_transcripts",
+        "enable_auto_review",  # runtime toggle, no restart required
+        "max_concurrent_analyses",
+        "metadata_rules_file",
+        # The only setting BOTH sources read (jenkins_source, prow_source),
+        # so neither source may own it.
+        "get_job_artifacts",
     ],
     "Jira": [
         "jira_auth_mode",
+        "enable_jira",
+        "enable_jira_issues",
+        "jira_project_key",
+        "jira_site_url",
+        "jira_max_results",
+        # basic
         "jira_email",
         "jira_api_token",
         "jira_cloud_url",
         "jira_cloud_ssl_verify",
+        # pat
         "jira_pat",
         "jira_server_url",
         "jira_server_ssl_verify",
+        # oauth
         "jira_oauth_client_secret",
-        "atlassian_oauth_cloud_id",
         "atlassian_oauth_client_id",
-        "jira_atst_token",
+        # oauth + atst
+        "atlassian_oauth_cloud_id",
         "jira_oauth_ssl_verify",
-        "jira_site_url",
-        "jira_project_key",
-        "jira_max_results",
-        "enable_jira",
-        "enable_jira_issues",
+        # atst
+        "jira_atst_token",
     ],
-    "GitHub": [
+    "GitHub issues": [
         "github_token",
-        "tests_repo_url",
-        "tests_repo_token",
         "feedback_repo_url",
         "enable_github_issues",
     ],
@@ -710,9 +726,6 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "session_ttl_hours",
         "login_lockout_enabled",
         "login_lockout_threshold",
-        "audit_retention_days",
-        "audit_max_rows",
-        "audit_auth_failure_max_per_minute",
     ],
     "Prow": [
         "prow_url",
@@ -722,27 +735,9 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "prow_artifacts_max_objects",
     ],
     "Server": [
+        # Exactly two: where the server is reachable, and where it pushes.
         "public_base_url",
-        "additional_repos",
-        "max_concurrent_repo_clones",
-        "max_concurrent_analyses",
-        "chat_clone_depth",
-        "repo_clone_timeout_seconds",
-        "wait_for_completion",
-        "poll_interval_minutes",
-        "max_wait_minutes",
-        "metadata_rules_file",
-        "log_level",
-        "log_max_bytes",
-        "log_backup_count",
-        "log_min_free_bytes",
-        "enable_auto_review",  # runtime toggle, no restart required
         "auto_push_exporters",  # runtime toggle, no restart required
-    ],
-    "Web Push": [
-        "vapid_public_key",
-        "vapid_private_key",
-        "vapid_claim_email",
     ],
     "Notifications": [
         "smtp_host",
@@ -759,30 +754,74 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "health_alert_error_rate_percent",
         "health_alert_error_rate_seconds",
         "health_alert_stuck_analysis_seconds",
+        # Browser push is a notification channel.
+        "vapid_public_key",
+        "vapid_private_key",
+        "vapid_claim_email",
+    ],
+    # Data lifecycle: everything that deletes rows or files.
+    "Data & retention": [
+        "audit_retention_days",
+        "audit_max_rows",
+        "audit_auth_failure_max_per_minute",
+        "results_retention_days",
+        "results_max_rows",
+        "pi_sidecar_transcripts_max_age_days",
+        "pi_sidecar_transcripts_max_size_mb",
+    ],
+    # What is cloned, and how big the workspace it lands in may get.
+    "Repos & workspace": [
+        "tests_repo_url",
+        "tests_repo_token",
+        "additional_repos",
+        "max_concurrent_repo_clones",
+        "chat_clone_depth",
+        "repo_clone_timeout_seconds",
+        "max_workspace_graph_mb",
+    ],
+    "Logging": [
+        "log_level",
+        "log_max_bytes",
+        "log_backup_count",
+        "log_min_free_bytes",
+        "pi_sidecar_log_level",
     ],
     # Restart-required: the sidecar starts once at container boot and reads
     # these from the /data/pi-sidecar/env bridge the entrypoint sources.
-    "Sidecar": [
+    "Advanced": [
         "sidecar_host",
         "sidecar_port",
         "sidecar_url",
         "acpx_agents",
         "cli_agents",
-        "pi_sidecar_log_level",
         "node_binary",
         "pi_sidecar_transcripts_dir",
-        "pi_sidecar_transcripts_max_age_days",
-        "pi_sidecar_transcripts_max_size_mb",
     ],
-    # Data lifecycle. Before Workspace, which stays last on the page.
-    "Storage": [
-        "results_retention_days",
-        "results_max_rows",
-    ],
-    # Last on purpose: a rarely-touched disk budget should not lead the page.
-    "Workspace": [
-        "max_workspace_graph_mb",
-    ],
+}
+
+# Settings shown only for the selected Jira auth mode (#585): the page filters
+# on the controlling value so switching mode shows the new fields at once. The
+# rule travels with the setting; a mode -> field map in the page would drift.
+# Hiding never clears: an invisible field keeps its stored value untouched.
+_SETTING_VISIBLE_WHEN: dict[str, dict[str, Any]] = {
+    # basic (Jira Cloud email + API token)
+    "jira_email": {"key": "jira_auth_mode", "in": ["basic"]},
+    "jira_api_token": {"key": "jira_auth_mode", "in": ["basic"]},
+    "jira_cloud_url": {"key": "jira_auth_mode", "in": ["basic"]},
+    "jira_cloud_ssl_verify": {"key": "jira_auth_mode", "in": ["basic"]},
+    # pat (Jira Server/DC bearer PAT)
+    "jira_pat": {"key": "jira_auth_mode", "in": ["pat"]},
+    "jira_server_url": {"key": "jira_auth_mode", "in": ["pat"]},
+    "jira_server_ssl_verify": {"key": "jira_auth_mode", "in": ["pat"]},
+    # oauth (Atlassian OAuth 2.0 service-account credential)
+    "jira_oauth_client_secret": {"key": "jira_auth_mode", "in": ["oauth"]},
+    "atlassian_oauth_client_id": {"key": "jira_auth_mode", "in": ["oauth"]},
+    # Shared by oauth and atst: both go through the api.atlassian.com
+    # gateway, which the cloud ID locates and the TLS flag verifies.
+    "atlassian_oauth_cloud_id": {"key": "jira_auth_mode", "in": ["oauth", "atst"]},
+    "jira_oauth_ssl_verify": {"key": "jira_auth_mode", "in": ["oauth", "atst"]},
+    # atst (already-minted service-account scoped token)
+    "jira_atst_token": {"key": "jira_auth_mode", "in": ["atst"]},
 }
 
 # Reverse lookup: field -> category
@@ -974,39 +1013,42 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
         # comes from the value itself — a boolean, never a hint of its content.
         is_set = value is not None and str(value).strip() != ""
 
-        result.append(
-            {
-                "key": field_name,
-                "label": _setting_label(field_name),
-                # jira_auth_mode is DB-only (Server Settings) — no env var
-                "env_var": "" if field_name == "jira_auth_mode" else field_name.upper(),
-                "value": display_value,
-                "is_set": is_set,
-                "default": default_str,
-                "description": description,
-                "type": field_type,
-                "category": _FIELD_TO_CATEGORY.get(field_name, "Other"),
-                "sensitive": is_sensitive,
-                "restart_required": field_name in _RESTART_REQUIRED_SETTINGS,
-                "source": "default",  # Will be overridden by caller
-                # Enumerated-setting contract (#379): every item carries the
-                # four keys so the UI renders a picker without special cases.
-                "options": choices.get("options"),
-                "options_source": choices.get("options_source"),
-                "multiple": bool(choices.get("multiple", False)),
-                "allow_custom": bool(choices.get("allow_custom", False)),
-                # Persistability contract (#347): server-only settings are
-                # env bootstrap the persist/reset/PUT paths always reject,
-                # and derived settings must not be pinned (see
-                # _DERIVED_SETTINGS) — the UI hides "Save to DB" for both.
-                "server_only": field_name in _SERVER_ONLY_SETTINGS,
-                "derived": field_name in _DERIVED_SETTINGS,
-                "persistable": (
-                    field_name not in _SERVER_ONLY_SETTINGS
-                    and field_name not in _DERIVED_SETTINGS
-                ),
-            }
-        )
+        entry: dict[str, Any] = {
+            "key": field_name,
+            "label": _setting_label(field_name),
+            # jira_auth_mode is DB-only (Server Settings) — no env var
+            "env_var": "" if field_name == "jira_auth_mode" else field_name.upper(),
+            "value": display_value,
+            "is_set": is_set,
+            "default": default_str,
+            "description": description,
+            "type": field_type,
+            "category": _FIELD_TO_CATEGORY.get(field_name, "Other"),
+            "sensitive": is_sensitive,
+            "restart_required": field_name in _RESTART_REQUIRED_SETTINGS,
+            "source": "default",  # Will be overridden by caller
+            # Enumerated-setting contract (#379): every item carries the
+            # four keys so the UI renders a picker without special cases.
+            "options": choices.get("options"),
+            "options_source": choices.get("options_source"),
+            "multiple": bool(choices.get("multiple", False)),
+            "allow_custom": bool(choices.get("allow_custom", False)),
+            # Persistability contract (#347): server-only settings are
+            # env bootstrap the persist/reset/PUT paths always reject,
+            # and derived settings must not be pinned (see
+            # _DERIVED_SETTINGS) — the UI hides "Save to DB" for both.
+            "server_only": field_name in _SERVER_ONLY_SETTINGS,
+            "derived": field_name in _DERIVED_SETTINGS,
+            "persistable": (
+                field_name not in _SERVER_ONLY_SETTINGS
+                and field_name not in _DERIVED_SETTINGS
+            ),
+        }
+        # Conditional visibility travels beside the setting; absent — never
+        # null — for the settings that are always shown.
+        if visible_when := _SETTING_VISIBLE_WHEN.get(field_name):
+            entry["visible_when"] = visible_when
+        result.append(entry)
 
     return result
 

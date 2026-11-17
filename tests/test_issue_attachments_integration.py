@@ -378,7 +378,7 @@ class TestPrepareFeedbackAndSettings:
     ) -> None:
         client, _ = integration_env
         assert get_settings().feedback_repo_url == "https://github.com/myk-org/rootcoz"
-        assert "feedback_repo_url" in main._SETTINGS_CATEGORIES["GitHub"]
+        assert "feedback_repo_url" in main._SETTINGS_CATEGORIES["GitHub issues"]
 
         monkeypatch.setenv("FEEDBACK_REPO_URL", "   ")
         clear_settings_cache()
@@ -400,7 +400,7 @@ class TestPrepareFeedbackAndSettings:
         admin_settings = client.get("/api/admin/settings", headers=admin_headers)
         assert admin_settings.status_code == 200
         by_key = {row["key"]: row for row in admin_settings.json()}
-        assert by_key["feedback_repo_url"]["category"] == "GitHub"
+        assert by_key["feedback_repo_url"]["category"] == "GitHub issues"
         assert by_key["feedback_repo_url"]["sensitive"] is False
         assert by_key["feedback_repo_url"]["env_var"] == "FEEDBACK_REPO_URL"
 

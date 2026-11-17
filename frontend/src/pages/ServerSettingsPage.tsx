@@ -89,6 +89,12 @@ interface ServerSetting {
   allow_custom?: boolean
   jira_verified_method?: string
   persistable?: boolean
+  /**
+   * Render only while the controlling setting holds one of these values
+   * (#585, e.g. the Jira fields by `jira_auth_mode`). Older servers omit it,
+   * so a missing field means "always visible".
+   */
+  visible_when?: { key: string; in: string[] }
 }
 
 interface CategoryGroup {
@@ -107,8 +113,9 @@ interface SettingsImportResult {
 
 // Category display order for the tab layout (mirrors backend _SETTINGS_CATEGORIES).
 const CATEGORY_ORDER = [
-  'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow',
-  'Auth & Security', 'Web Push', 'Notifications', 'Sidecar', 'Storage', 'Workspace',
+  'Jenkins', 'Analysis', 'Jira', 'GitHub issues', 'Report Portal', 'Datadog',
+  'Auth & Security', 'Prow', 'Server', 'Notifications', 'Data & retention',
+  'Repos & workspace', 'Logging', 'Advanced',
 ]
 
 // The Sidecar rows whose live transcript directory usage the card below them
@@ -123,7 +130,7 @@ const TRANSCRIPT_SETTING_KEYS = new Set([
 const TEST_INTEGRATIONS: Record<string, string> = {
   Jenkins: 'jenkins',
   Jira: 'jira',
-  GitHub: 'github',
+  'GitHub issues': 'github',
   'Report Portal': 'reportportal',
   Datadog: 'datadog',
   Prow: 'prow',
@@ -135,27 +142,14 @@ type OptionSource = 'exporters' | 'providers' | 'users'
 
 // Jira auth methods (exactly one is selected in Server Settings; none = Jira disabled)
 type JiraMethod = 'oauth' | 'basic' | 'pat' | 'atst'
-const JIRA_METHODS: { id: JiraMethod; label: string; fields: string[] }[] = [
-  {
-    id: 'oauth',
-    label: 'Atlassian OAuth (client secret / cloud ID)',
-    fields: ['jira_oauth_client_secret', 'atlassian_oauth_client_id', 'atlassian_oauth_cloud_id', 'jira_oauth_ssl_verify'],
-  },
-  {
-    id: 'basic',
-    label: 'Email + API token',
-    fields: ['jira_email', 'jira_api_token', 'jira_cloud_url', 'jira_cloud_ssl_verify'],
-  },
-  {
-    id: 'pat',
-    label: 'PAT (Bearer)',
-    fields: ['jira_pat', 'jira_server_url', 'jira_server_ssl_verify'],
-  },
-  {
-    id: 'atst',
-    label: 'Atlassian service account token (ATST, Bearer)',
-    fields: ['jira_atst_token', 'atlassian_oauth_cloud_id', 'jira_oauth_ssl_verify'],
-  },
+// Only the choices and their labels live here: which field belongs to which
+// method arrives as `visible_when` metadata from the API, so the page and the
+// server can never drift apart (#585).
+const JIRA_METHODS: { id: JiraMethod; label: string }[] = [
+  { id: 'oauth', label: 'Atlassian OAuth (client secret / cloud ID)' },
+  { id: 'basic', label: 'Email + API token' },
+  { id: 'pat', label: 'PAT (Bearer)' },
+  { id: 'atst', label: 'Atlassian service account token (ATST, Bearer)' },
 ]
 
 const jiraMethodLabel = (id: JiraMethod) => JIRA_METHODS.find(m => m.id === id)!.label
@@ -181,17 +175,24 @@ function settingHint(category: string, method: JiraMethod | null, key: string): 
 const LOCKOUT_OFF_HINT =
   'Lockout is disabled — this threshold is ignored until login lockout is turned on.'
 
-function hiddenJiraFieldsFor(method: JiraMethod): Set<string> {
-  // oauth and atst share locator/TLS fields (atlassian_oauth_cloud_id,
-  // jira_oauth_ssl_verify) — a shared field stays visible for either of
-  // its methods, so subtract the SELECTED method's fields instead of
-  // unioning every other method's.
-  const selected = new Set(JIRA_METHODS.find(m => m.id === method)!.fields)
-  return new Set(
-    JIRA_METHODS.filter(m => m.id !== method)
-      .flatMap(m => m.fields)
-      .filter(f => !selected.has(f)),
-  )
+// A field declaring `visible_when` renders only while the controlling setting
+// holds one of its values. A mode that shares a field (atlassian_oauth_cloud_id
+// and jira_oauth_ssl_verify belong to both oauth and atst) just lists both, so
+// one metadata source covers every method. No field entry, no filtering.
+function visibleWhenMet(setting: ServerSetting, valueOf: (key: string) => string): boolean {
+  const when = setting.visible_when
+  if (!when) return true
+  return when.in.includes(valueOf(when.key))
+}
+
+// A value whose default reads like "disabled" but is not. Rendered next to the
+// control as well as in the tooltip — a tooltip is invisible until hovered
+// (#585 decision 7).
+function valueTrap(setting: ServerSetting, value: string): string | undefined {
+  if (setting.key === 'max_wait_minutes' && value === '0') {
+    return '0 means wait forever — the build is polled until it finishes.'
+  }
+  return undefined
 }
 
 // Server-only settings (env/CLI-owned, never persistable to the DB) — the
@@ -599,29 +600,45 @@ function SaveToDbButton({ saving, onClick }: { saving: boolean; onClick: () => v
   )
 }
 
-// Every row is titled with its human label. The env var is the operator's link
-// to `.env` and the docs, so it lives in the label's tooltip — discoverable,
-// copyable, never a permanent second line (E2E-F27).
+// Every row is titled with its human label. The label's tooltip carries the
+// row's whole story: the description (every setting has one, #585) and the env
+// var, the operator's link to `.env` and the docs — discoverable, copyable,
+// never a permanent second line (E2E-F27). One affordance, every row.
 function SettingRowLabel({ setting }: { setting: ServerSetting }) {
   const label = (tabIndex?: number) => (
     <span data-setting-title="" tabIndex={tabIndex} className="text-sm font-semibold text-text-primary">
       {setting.label}
     </span>
   )
-  // A setting without an env var has nothing to reveal (jira_auth_mode).
-  if (!setting.env_var) return label()
+  // Nothing to say (no description, no env var): no dead hover.
+  if (!setting.description && !setting.env_var) return label()
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         {/* Focusable: the tooltip must open without a pointer, not hover-only. */}
         {label(0)}
       </TooltipTrigger>
-      <TooltipContent side="top">
-        <span data-setting-env-var="" className="select-text font-mono text-xs">
-          {setting.env_var}
-        </span>
+      <TooltipContent side="top" className="max-w-xs space-y-1">
+        {setting.description && (
+          <p data-setting-description="" className="text-xs">{setting.description}</p>
+        )}
+        {setting.env_var && (
+          <span data-setting-env-var="" className="block select-text font-mono text-xs text-text-tertiary">
+            {setting.env_var}
+          </span>
+        )}
       </TooltipContent>
     </Tooltip>
+  )
+}
+
+/** The trap of a value whose default looks disabled, said beside the control. */
+function ValueTrap({ text }: { text: string }) {
+  return (
+    <p data-setting-trap="" className="flex items-center gap-1.5 text-xs text-signal-amber">
+      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+      {text}
+    </p>
   )
 }
 
@@ -1183,12 +1200,6 @@ export function ServerSettingsPage() {
   const verifiedJiraMethod = parseJiraMethod(
     state.settings.find(s => s.jira_verified_method !== undefined)?.jira_verified_method,
   )
-  // Unset = no method chosen yet: hide every method credential field until
-  // the admin picks one; only method-independent rows stay visible (#346).
-  const jiraHiddenFields = persistedJiraMethod
-    ? hiddenJiraFieldsFor(persistedJiraMethod)
-    : new Set(JIRA_METHODS.flatMap(m => m.fields))
-
   function handleJiraMethodChange(method: JiraMethod | null) {
     setJiraModeError(null)
     if (method === null) {
@@ -1216,7 +1227,9 @@ export function ServerSettingsPage() {
     // a field the new method hides must still be cancelled (#346).
     const cancelHiddenJiraEdit = () => {
       const key = editingKeyRef.current
-      if (key && (method === null || hiddenJiraFieldsFor(method).has(key))) {
+      if (!key) return
+      const setting = state.settings.find(s => s.key === key)
+      if (setting && !visibleWhenMet(setting, () => method ?? '')) {
         dispatch({ type: 'CANCEL_EDIT' })
       }
     }
@@ -1276,19 +1289,27 @@ export function ServerSettingsPage() {
     }
   }
 
+  // The strip follows the backend order above; the Server tab stays the tab a
+  // first-time admin lands on (changing that is a UX decision, not a rename).
+  const landingTab = allGroups.find(g => g.category === 'Server') ?? allGroups[0]
   const effectiveTab = allGroups.some(g => g.category === activeTab)
     ? activeTab
-    : allGroups[0]?.category ?? ''
+    : landingTab?.category ?? ''
 
-  // ---- Live transcript directory usage (Sidecar card) ----
+  // ---- Live transcript directory usage (transcripts card) ----
+  // The card follows the transcript rows themselves — they ship on Advanced
+  // (the directory) and Data & retention (the budgets) — so no category name
+  // is hardcoded here and a rename can never orphan it again (#585 E2E).
+  const showsTranscriptsUsage = (category: string, settings: ServerSetting[]) =>
+    !state.collapsedCategories.has(category)
+    && settings.some(s => TRANSCRIPT_SETTING_KEYS.has(s.key))
   // Only fetched while the transcript rows are actually on screen: the probe
   // samples CPU and walks the data directory, which no unrelated tab pays for.
   const transcriptsUsageVisible = groups.some(
     ({ category, settings }) =>
-      category === 'Sidecar'
-      && !state.collapsedCategories.has(category)
-      && settings.some(s => TRANSCRIPT_SETTING_KEYS.has(s.key)),
-  ) && (Boolean(state.search) || effectiveTab === 'Sidecar')
+      showsTranscriptsUsage(category, settings)
+      && (Boolean(state.search) || effectiveTab === category),
+  )
   const [transcriptsUsage, setTranscriptsUsage] = useState<ServerStatusDisk | null>(null)
   const [transcriptsUsageLoading, setTranscriptsUsageLoading] = useState(false)
   // Bumped whenever the card becomes visible: a request started before a
@@ -1363,11 +1384,12 @@ export function ServerSettingsPage() {
       s.source === 'env' && !SERVER_ONLY_SETTING_KEYS.has(s.key) && s.persistable !== false ? (
         <SaveToDbButton saving={persistingKey === s.key} onClick={() => handlePersistEnv(s.key)} />
       ) : null
-    // Search must be able to find every Jira field, so auth-method hiding
+    // Search must be able to find every Jira field, so `visible_when` hiding
     // only applies in the tab view. jira_auth_mode is edited by the card's
-    // selector, so it never gets a row of its own (E2E-F33).
-    const rowSettings = settings.filter(s => s.key !== 'jira_auth_mode' && !(
-      category === 'Jira' && !state.search && jiraHiddenFields.has(s.key)
+    // selector, so it never gets a row of its own (E2E-F33). Hiding is
+    // rendering only: no hidden setting is ever reset or written back (#585).
+    const rowSettings = settings.filter(s => s.key !== 'jira_auth_mode' && (
+      Boolean(state.search) || visibleWhenMet(s, settingValue)
     ))
     // One setting row; the map below supplies the shared key, data attribute and
     // match mark, so no branch can render an unaddressable row.
@@ -1537,7 +1559,6 @@ export function ServerSettingsPage() {
                 </div>
               </div>
             )}
-            <p className="text-xs text-text-tertiary">{setting.description}</p>
             {setting.source === 'db' && setting.updated_by && (
               <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
             )}
@@ -1585,7 +1606,6 @@ export function ServerSettingsPage() {
                 )}
               </div>
             )}
-            <p className="text-xs text-text-tertiary">{setting.description}</p>
             {setting.source === 'db' && setting.updated_by && (
               <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
             )}
@@ -1627,7 +1647,6 @@ export function ServerSettingsPage() {
                 )}
               </div>
             )}
-            <p className="text-xs text-text-tertiary">{setting.description}</p>
             {setting.source === 'db' && setting.updated_by && (
               <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
             )}
@@ -1807,7 +1826,7 @@ export function ServerSettingsPage() {
                 cloudId={state.settings.find(s => s.key === 'atlassian_oauth_cloud_id')?.value ?? ''}
               />
             )}
-            {category === 'AI' && cursorAuthStatus && (
+            {category === 'Analysis' && cursorAuthStatus && (
               <div className="mb-3">
                 <CursorAuthBanner status={cursorAuthStatus} />
               </div>
@@ -1824,9 +1843,8 @@ export function ServerSettingsPage() {
                 </div>
               ))}
             </div>
-            {category === 'AI' && <ServerProvidersCard />}
-            {category === 'Sidecar'
-              && rowSettings.some(s => TRANSCRIPT_SETTING_KEYS.has(s.key))
+            {category === 'Analysis' && <ServerProvidersCard />}
+            {showsTranscriptsUsage(category, rowSettings)
               && (
                 <SidecarTranscriptsUsage
                   disk={transcriptsUsage}
@@ -2140,7 +2158,6 @@ function AiSettingRow({
           </button>
         </div>
       )}
-      <p className="text-xs text-text-tertiary">{setting.description}</p>
       {setting.source === 'db' && setting.updated_by && (
         <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
       )}
@@ -2230,7 +2247,6 @@ function EnumSettingRow({
       ) : (
         <SingleValuePicker setting={setting} options={options} saving={saving} onSave={onSave} />
       )}
-      <p className="text-xs text-text-tertiary">{setting.description}</p>
       {setting.source === 'db' && setting.updated_by && (
         <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
       )}
@@ -2386,6 +2402,8 @@ function SettingRow({
   onBooleanToggle,
 }: SettingRowProps) {
   const inputRef = useRef<HTMLInputElement>(null)
+  // The trap follows the value on screen, so typing 0 shows it before saving.
+  const trap = valueTrap(setting, isEditing ? editValue : setting.value)
 
   // Focus input when editing starts
   useEffect(() => {
@@ -2427,7 +2445,7 @@ function SettingRow({
           className="h-9 font-mono text-sm"
           aria-label={`Edit ${setting.env_var}`}
         />
-        <p className="text-xs text-text-tertiary">{setting.description}</p>
+        {trap && <ValueTrap text={trap} />}
         {hint && <p className="text-xs text-text-quaternary">{hint}</p>}
         <div className="flex items-center gap-2">
           <Button size="sm" onClick={onSave} disabled={saving || disabled} className="h-7 text-xs">
@@ -2503,8 +2521,8 @@ function SettingRow({
             </button>
           )}
 
-          {/* Description */}
-          <p className="text-xs text-text-tertiary">{setting.description}</p>
+          {/* The description lives in the label tooltip (#585): only the trap stays here. */}
+          {trap && <ValueTrap text={trap} />}
           {hint && <p className="text-xs text-text-quaternary">{hint}</p>}
 
           {/* Modified by info */}

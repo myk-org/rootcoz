@@ -35,7 +35,9 @@ vi.mock('@/lib/useProviderOptions', () => ({
   // No catalog: the peer editor renders its empty pickers.
   useProviderCatalog: () => ({ providers: {}, providerStatus: {} }),
 }))
-vi.mock('@/components/shared/ServerProvidersCard', () => ({ ServerProvidersCard: () => null }))
+vi.mock('@/components/shared/ServerProvidersCard', () => ({
+  ServerProvidersCard: () => <div data-testid="server-providers-card" />,
+}))
 vi.mock('@/components/shared/CursorAuthBanner', () => ({ CursorAuthBanner: () => null }))
 vi.mock('@/components/shared/ProviderSelect', () => ({ ProviderSelect: () => null }))
 vi.mock('@/components/shared/ModelCombobox', () => ({
@@ -66,6 +68,7 @@ interface TestSetting {
   jira_verified_method?: string
   persistable?: boolean
   derived?: boolean
+  visible_when?: { key: string; in: string[] }
 }
 
 function mk(key: string, category: string, value = '', extra: Partial<TestSetting> = {}): TestSetting {
@@ -87,12 +90,30 @@ function mk(key: string, category: string, value = '', extra: Partial<TestSettin
   }
 }
 
+// Which jira_auth_mode values show each conditional Jira field — the API
+// ships this per setting as `visible_when`, so the test fixture mirrors it
+// instead of the page keeping a mode→field map of its own (#585).
+const JIRA_MODES: Record<string, string[]> = {
+  jira_oauth_client_secret: ['oauth'],
+  atlassian_oauth_client_id: ['oauth'],
+  atlassian_oauth_cloud_id: ['oauth', 'atst'],
+  jira_oauth_ssl_verify: ['oauth', 'atst'],
+  jira_email: ['basic'],
+  jira_api_token: ['basic'],
+  jira_cloud_url: ['basic'],
+  jira_cloud_ssl_verify: ['basic'],
+  jira_pat: ['pat'],
+  jira_server_url: ['pat'],
+  jira_server_ssl_verify: ['pat'],
+  jira_atst_token: ['atst'],
+}
+
 const baseSettings = (): TestSetting[] => [
   mk('public_base_url', 'Server', 'https://rootcoz.example.com'),
   mk('wait_for_completion', 'Server', 'true', { type: 'boolean' }),
-  mk('ai_provider', 'AI', 'gemini'),
-  mk('ai_model', 'AI', 'gemini-2.5-pro'),
-  mk('active_server_providers', 'AI', '', { options: ['gemini', 'openai', 'vertex-claude'] }),
+  mk('ai_provider', 'Analysis', 'gemini'),
+  mk('ai_model', 'Analysis', 'gemini-2.5-pro'),
+  mk('active_server_providers', 'Analysis', '', { options: ['gemini', 'openai', 'vertex-claude'] }),
   mk('jenkins_url', 'Jenkins', 'https://jenkins.example.com'),
   mk('jenkins_user', 'Jenkins', 'bot'),
   mk('jenkins_password', 'Jenkins', 'secret', { sensitive: true }),
@@ -116,14 +137,16 @@ const baseSettings = (): TestSetting[] => [
   mk('jira_atst_token', 'Jira', '', { sensitive: true }),
   mk('jira_server_url', 'Jira', 'https://jira.example.com'),
   mk('jira_server_ssl_verify', 'Jira', 'true', { type: 'boolean' }),
-  mk('github_token', 'GitHub', 'gh_tok', { sensitive: true }),
+  mk('github_token', 'GitHub issues', 'gh_tok', { sensitive: true }),
   mk('reportportal_url', 'Report Portal', 'https://rp.example.com'),
   mk('datadog_api_key', 'Datadog', '', { sensitive: true }),
   mk('enable_datadog', 'Datadog', 'false', { type: 'boolean' }),
   mk('prow_url', 'Prow', 'https://prow.example.com'),
   mk('admin_key', 'Auth & Security', 'key', { sensitive: true }),
-  mk('vapid_public_key', 'Web Push', 'vk'),
-]
+  mk('vapid_public_key', 'Notifications', 'vk'),
+].map(s => JIRA_MODES[s.key]
+  ? { ...s, visible_when: { key: 'jira_auth_mode', in: JIRA_MODES[s.key] } }
+  : s)
 
 const get = vi.mocked(api.get)
 const put = vi.mocked(api.put)
@@ -200,9 +223,11 @@ describe('ServerSettingsPage tabs and search', () => {
     await waitForRow('public_base_url')
 
     const tabs = screen.getAllByRole('tab')
+    // The fixture's categories, in the shipped order (the full 14-tab strip is
+    // asserted against the backend taxonomy in the #585 E2E block below).
     expect(tabs.map((t) => t.textContent)).toEqual([
-      'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow',
-      'Auth & Security', 'Web Push',
+      'Jenkins', 'Analysis', 'Jira', 'GitHub issues', 'Report Portal', 'Datadog',
+      'Auth & Security', 'Prow', 'Server', 'Notifications',
     ])
 
     // Default (Server) tab shows only Server settings
@@ -803,11 +828,11 @@ describe('ServerSettingsPage test connection buttons', () => {
     renderPage()
     await waitForRow('public_base_url')
 
-    for (const tab of ['Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow']) {
+    for (const tab of ['Jenkins', 'Jira', 'GitHub issues', 'Report Portal', 'Datadog', 'Prow']) {
       fireEvent.click(screen.getByRole('tab', { name: tab }))
       expect(await screen.findByRole('button', { name: /test connection/i })).toBeInTheDocument()
     }
-    for (const tab of ['Server', 'AI', 'Auth & Security', 'Web Push']) {
+    for (const tab of ['Server', 'Analysis', 'Auth & Security', 'Notifications']) {
       fireEvent.click(screen.getByRole('tab', { name: tab }))
       await waitFor(() =>
         expect(screen.queryByRole('button', { name: /test connection/i })).toBeNull(),
@@ -890,9 +915,9 @@ describe('ServerSettingsPage test connection buttons', () => {
 })
 
 describe('ServerSettingsPage active server providers', () => {
-  async function openAiTab() {
+  async function openAnalysisTab() {
     renderPage()
-    fireEvent.click(await screen.findByRole('tab', { name: 'AI' }))
+    fireEvent.click(await screen.findByRole('tab', { name: 'Analysis' }))
     await waitForRow('active_server_providers')
   }
 
@@ -909,7 +934,7 @@ describe('ServerSettingsPage active server providers', () => {
   }
 
   it('renders the provider checkboxes immediately, all checked for an empty value', async () => {
-    await openAiTab()
+    await openAnalysisTab()
 
     for (const box of providerBoxes()) expect(box).toBeChecked()
     expect(screen.queryByRole('button', { name: 'Configure providers' })).not.toBeInTheDocument()
@@ -921,7 +946,7 @@ describe('ServerSettingsPage active server providers', () => {
     get.mockImplementation(async (url: unknown) => {
       const settings = [
         ...baseSettings(),
-        mk('ambient_auth_providers', 'AI', 'vertex-claude', {
+        mk('ambient_auth_providers', 'Analysis', 'vertex-claude', {
           options: null,
           options_source: 'providers',
           multiple: true,
@@ -931,7 +956,7 @@ describe('ServerSettingsPage active server providers', () => {
       return settings as never
     })
 
-    await openAiTab()
+    await openAnalysisTab()
     expect(shown('ambient_auth_providers')).toBe(true)
     expect(screen.getByRole('button', { name: 'Remove vertex-claude' })).toBeInTheDocument()
   })
@@ -939,7 +964,7 @@ describe('ServerSettingsPage active server providers', () => {
   it('renders the stored restriction as the checked subset', async () => {
     get.mockResolvedValue(restricted('gemini,vertex-claude') as never)
 
-    await openAiTab()
+    await openAnalysisTab()
     const [gemini, openai, claude] = providerBoxes()
     expect(gemini).toBeChecked()
     expect(openai).not.toBeChecked()
@@ -947,7 +972,7 @@ describe('ServerSettingsPage active server providers', () => {
   })
 
   it('toggling changes only the draft — no save fires before Save', async () => {
-    await openAiTab()
+    await openAnalysisTab()
 
     fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
     expect(screen.getByRole('checkbox', { name: 'openai' })).not.toBeChecked()
@@ -957,7 +982,7 @@ describe('ServerSettingsPage active server providers', () => {
   })
 
   it('Save persists the checked ids when some providers are unchecked', async () => {
-    await openAiTab()
+    await openAnalysisTab()
 
     fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
@@ -976,7 +1001,7 @@ describe('ServerSettingsPage active server providers', () => {
       restricted('gemini,vertex-claude', { options: ['gemini', 'openai'] }) as never,
     )
 
-    await openAiTab()
+    await openAnalysisTab()
     expect(screen.queryByRole('checkbox', { name: 'vertex-claude' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
@@ -991,7 +1016,7 @@ describe('ServerSettingsPage active server providers', () => {
   it('Save persists an empty value when everything ends up checked (all active)', async () => {
     get.mockResolvedValue(restricted('gemini') as never)
 
-    await openAiTab()
+    await openAnalysisTab()
     fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
     fireEvent.click(screen.getByRole('checkbox', { name: 'vertex-claude' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
@@ -1012,7 +1037,7 @@ describe('ServerSettingsPage active server providers', () => {
       restricted('gemini,vertex-claude', { options: ['gemini', 'openai'] }) as never,
     )
 
-    await openAiTab()
+    await openAnalysisTab()
     fireEvent.click(screen.getByRole('checkbox', { name: 'gemini' }))
 
     expect(
@@ -1034,7 +1059,7 @@ describe('ServerSettingsPage active server providers', () => {
       restricted('gemini,vertex-claude', { options: ['gemini', 'openai'] }) as never,
     )
 
-    await openAiTab()
+    await openAnalysisTab()
     fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
     fireEvent.click(screen.getByRole('checkbox', { name: 'gemini' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
@@ -1047,7 +1072,7 @@ describe('ServerSettingsPage active server providers', () => {
   })
 
   it('unchecking everything saves the empty value (empty = all, never "none")', async () => {
-    await openAiTab()
+    await openAnalysisTab()
 
     for (const provider of ['gemini', 'openai', 'vertex-claude']) {
       fireEvent.click(screen.getByRole('checkbox', { name: provider }))
@@ -1067,7 +1092,7 @@ describe('ServerSettingsPage active server providers', () => {
   it('Cancel restores the stored value and fires no save', async () => {
     get.mockResolvedValue(restricted('gemini') as never)
 
-    await openAiTab()
+    await openAnalysisTab()
     fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
     expect(screen.getByRole('checkbox', { name: 'openai' })).toBeChecked()
 
@@ -1081,7 +1106,7 @@ describe('ServerSettingsPage active server providers', () => {
   it('hides Save and Cancel once the draft matches the stored value again', async () => {
     get.mockResolvedValue(restricted('gemini') as never)
 
-    await openAiTab()
+    await openAnalysisTab()
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
@@ -1096,7 +1121,7 @@ describe('ServerSettingsPage active server providers', () => {
   it('matches saved provider IDs case-insensitively and saves canonical spelling', async () => {
     get.mockResolvedValue(restricted('Gemini,OpenAI') as never)
 
-    await openAiTab()
+    await openAnalysisTab()
     expect(screen.getByRole('checkbox', { name: 'gemini' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'openai' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'vertex-claude' })).not.toBeChecked()
@@ -1120,7 +1145,7 @@ describe('ServerSettingsPage active server providers', () => {
       return {}
     })
 
-    await openAiTab()
+    await openAnalysisTab()
     fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
 
@@ -1137,7 +1162,7 @@ describe('ServerSettingsPage active server providers', () => {
   it('shows updated_by and the history toggle for a db-sourced value', async () => {
     get.mockResolvedValue(restricted('gemini', { source: 'db', updated_by: 'admin' }) as never)
 
-    await openAiTab()
+    await openAnalysisTab()
     expect(screen.getByText('Modified by admin')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Show history' })).toBeInTheDocument()
   })
@@ -1145,15 +1170,19 @@ describe('ServerSettingsPage active server providers', () => {
   it('shows a hint when no server providers are available', async () => {
     get.mockResolvedValue(restricted('', { options: [] }) as never)
 
-    await openAiTab()
+    await openAnalysisTab()
     expect(screen.getByText('No server providers available')).toBeInTheDocument()
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
   })
 
-  it('renders the description served by the settings API with the picker', async () => {
-    await openAiTab()
-    // No hardcoded copy in the page: the backend description is the single source.
-    expect(screen.getByText('Description for active_server_providers')).toBeInTheDocument()
+  it('renders the description served by the settings API in the label tooltip', async () => {
+    await openAnalysisTab()
+    // No hardcoded copy in the page: the backend description is the single
+    // source, and since #585 it lives in the label tooltip, not on the row.
+    const tooltip = await labelTooltip('active server providers')
+    expect(tooltip.querySelector('[data-setting-description]')?.textContent).toBe(
+      'Description for active_server_providers',
+    )
   })
 
   it('keeps the stored value read-only with a reset when discovery is unavailable', async () => {
@@ -1161,7 +1190,7 @@ describe('ServerSettingsPage active server providers', () => {
       restricted('gemini', { options: [], source: 'db', updated_by: 'admin' }) as never,
     )
 
-    await openAiTab()
+    await openAnalysisTab()
     expect(screen.getByText('Restricted to:')).toBeInTheDocument()
     expect(screen.getByText(/Provider discovery is currently unavailable/)).toBeInTheDocument()
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
@@ -1180,7 +1209,7 @@ describe('ServerSettingsPage active server providers', () => {
 describe('ServerSettingsPage AI model field width (#372)', () => {
   it('lets the AI model combobox grow instead of capping it at max-w-md', async () => {
     renderPage()
-    fireEvent.click(await screen.findByRole('tab', { name: 'AI' }))
+    fireEvent.click(await screen.findByRole('tab', { name: 'Analysis' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Configure model' }))
 
     const combobox = await screen.findByTestId('model-combobox')
@@ -1550,15 +1579,16 @@ describe('ServerSettingsPage env parity (#347)', () => {
       // Restart-tagged settings promoted from _SERVER_ONLY_SETTINGS
       mk('default_user_role', 'Auth & Security', 'user', { restart_required: true }),
       mk('session_ttl_hours', 'Auth & Security', '24', { type: 'integer' }),
-      // Sidecar settings (restart-required) in their own category
-      mk('sidecar_host', 'Sidecar', '127.0.0.1', { restart_required: true }),
-      mk('sidecar_port', 'Sidecar', '8087', { type: 'integer', restart_required: true }),
-      mk('sidecar_url', 'Sidecar', '', { restart_required: true }),
-      mk('acpx_agents', 'Sidecar', '', { restart_required: true }),
-      mk('cli_agents', 'Sidecar', '', { restart_required: true }),
-      mk('pi_sidecar_log_level', 'Sidecar', 'info', { restart_required: true }),
-      mk('node_binary', 'Sidecar', '', { restart_required: true }),
-      mk('pi_sidecar_transcripts_dir', 'Sidecar', '', { restart_required: true }),
+      // Sidecar settings (restart-required) on the Advanced tab, except the log
+      // level, which ships on Logging beside the other log settings.
+      mk('sidecar_host', 'Advanced', '127.0.0.1', { restart_required: true }),
+      mk('sidecar_port', 'Advanced', '8087', { type: 'integer', restart_required: true }),
+      mk('sidecar_url', 'Advanced', '', { restart_required: true }),
+      mk('acpx_agents', 'Advanced', '', { restart_required: true }),
+      mk('cli_agents', 'Advanced', '', { restart_required: true }),
+      mk('pi_sidecar_log_level', 'Logging', 'info', { restart_required: true }),
+      mk('node_binary', 'Advanced', '', { restart_required: true }),
+      mk('pi_sidecar_transcripts_dir', 'Advanced', '', { restart_required: true }),
       // Promoted Notifications settings
       mk('smtp_host', 'Notifications', 'smtp.example.com'),
       mk('smtp_port', 'Notifications', '587', { type: 'integer' }),
@@ -1570,19 +1600,23 @@ describe('ServerSettingsPage env parity (#347)', () => {
     ]
   }
 
-  it('renders the Sidecar and Notifications categories as tabs with their rows', async () => {
+  it('renders the Advanced, Logging and Notifications categories as tabs with their rows', async () => {
     get.mockResolvedValue(paritySettings() as never)
     renderPage()
     await waitForRow('public_base_url')
 
     const tabs = screen.getAllByRole('tab').map((t) => t.textContent)
-    expect(tabs).toContain('Sidecar')
+    expect(tabs).toContain('Advanced')
+    expect(tabs).toContain('Logging')
     expect(tabs).toContain('Notifications')
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Sidecar' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }))
     await waitForRow('sidecar_host')
     expect(shown('sidecar_port')).toBe(true)
-    expect(shown('pi_sidecar_log_level')).toBe(true)
+
+    // pi_sidecar_log_level ships on Logging, beside the other log settings.
+    fireEvent.click(screen.getByRole('tab', { name: 'Logging' }))
+    await waitForRow('pi_sidecar_log_level')
 
     fireEvent.click(screen.getByRole('tab', { name: 'Notifications' }))
     await waitForRow('smtp_host')
@@ -1594,10 +1628,15 @@ describe('ServerSettingsPage env parity (#347)', () => {
     renderPage()
     await waitForRow('public_base_url')
 
-    // Sidecar tab: all 8 sidecar settings are restart-tagged
-    fireEvent.click(screen.getByRole('tab', { name: 'Sidecar' }))
+    // Advanced: the 7 sidecar settings it keeps are all restart-tagged
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }))
     await waitForRow('sidecar_host')
-    expect(screen.getAllByLabelText('Restart required')).toHaveLength(8)
+    expect(screen.getAllByLabelText('Restart required')).toHaveLength(7)
+
+    // Logging: pi_sidecar_log_level is restart-tagged too
+    fireEvent.click(screen.getByRole('tab', { name: 'Logging' }))
+    await waitForRow('pi_sidecar_log_level')
+    expect(screen.getAllByLabelText('Restart required')).toHaveLength(1)
 
     // Auth & Security: default_user_role carries the badge too
     fireEvent.click(screen.getByRole('tab', { name: 'Auth & Security' }))
@@ -1672,7 +1711,7 @@ describe('ServerSettingsPage env parity (#347)', () => {
     } as never)
 
     renderPage()
-    fireEvent.click(await screen.findByRole('tab', { name: 'Sidecar' }))
+    fireEvent.click(await screen.findByRole('tab', { name: 'Advanced' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Edit SIDECAR_HOST' }))
 
     fireEvent.change(screen.getByLabelText('Edit SIDECAR_HOST'), { target: { value: '0.0.0.0' } })
@@ -1685,9 +1724,9 @@ describe('ServerSettingsPage env parity (#347)', () => {
     await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
   })
 
-  it('no longer renders the standalone Free AI models card in the AI tab', async () => {
+  it('no longer renders the standalone Free AI models card in the Analysis tab', async () => {
     renderPage()
-    fireEvent.click(await screen.findByRole('tab', { name: 'AI' }))
+    fireEvent.click(await screen.findByRole('tab', { name: 'Analysis' }))
     await waitForRow('active_server_providers')
     expect(screen.queryByText(/Free AI models/)).not.toBeInTheDocument()
   })
@@ -1879,7 +1918,7 @@ describe('ServerSettingsPage save env setting to DB', () => {
   it('never offers Save to DB for derived settings (persistable: false), even when env-sourced', async () => {
     const settings = baseSettings()
     settings.push(
-      mk('sidecar_url', 'Sidecar', 'http://127.0.0.1:9100', {
+      mk('sidecar_url', 'Advanced', 'http://127.0.0.1:9100', {
         source: 'env',
         persistable: false,
       }),
@@ -1887,7 +1926,7 @@ describe('ServerSettingsPage save env setting to DB', () => {
     get.mockResolvedValue(settings as never)
     renderPage()
 
-    fireEvent.click(await screen.findByRole('tab', { name: 'Sidecar' }))
+    fireEvent.click(await screen.findByRole('tab', { name: 'Advanced' }))
     await waitForRow('sidecar_url')
     expect(screen.queryByRole('button', { name: 'Save to DB' })).not.toBeInTheDocument()
   })
@@ -2161,7 +2200,7 @@ describe('ServerSettingsPage enumerated setting pickers', () => {
         options_source: 'exporters',
         multiple: true,
       }),
-      mk('ambient_auth_providers', 'AI', '', {
+      mk('ambient_auth_providers', 'Analysis', '', {
         options: null,
         options_source: 'providers',
         multiple: true,
@@ -2354,7 +2393,7 @@ describe('ServerSettingsPage enumerated setting pickers', () => {
   it('lists the provider catalog for the ambient auth multiselect and saves the selection', async () => {
     mockEnumSettings()
     renderPage()
-    fireEvent.click(await screen.findByRole('tab', { name: 'AI' }))
+    fireEvent.click(await screen.findByRole('tab', { name: 'Analysis' }))
     await waitForRow('ambient_auth_providers')
 
     openPicker('AMBIENT_AUTH_PROVIDERS')
@@ -2486,10 +2525,18 @@ describe('ServerSettingsPage enumerated setting pickers', () => {
 // E2E-F27 — rows are named for humans; E2E-F28..F30 — inline editors
 // ---------------------------------------------------------------------------
 
+/**
+ * The label tooltip of a row (hover): the one affordance carrying both the
+ * description and the env var (#585).
+ */
+async function labelTooltip(label: string): Promise<HTMLElement> {
+  await userEvent.setup().hover(screen.getByText(label))
+  return screen.findByRole('tooltip')
+}
+
 /** The env var of a row, revealed by hovering its label (the only affordance). */
 async function envVarTooltip(label: string): Promise<string> {
-  await userEvent.setup().hover(screen.getByText(label))
-  return (await screen.findByRole('tooltip')).textContent ?? ''
+  return (await labelTooltip(label)).querySelector('[data-setting-env-var]')?.textContent ?? ''
 }
 
 /** No row prints its env var: the line slot and its reserved height are gone. */
@@ -2498,18 +2545,18 @@ const expectNoEnvVarLine = () => {
   expect(document.querySelector('[data-setting-env-var]')).toBeNull()
 }
 
-/** The two structured editors live in the AI category. */
+/** The two structured editors live in the Analysis category. */
 function structuredSettings(extra: Partial<Record<'additional_repos' | 'peer_ai_configs', string>> = {}) {
   return [
-    mk('additional_repos', 'AI', extra.additional_repos ?? '', { label: 'Additional repositories' }),
-    mk('peer_ai_configs', 'AI', extra.peer_ai_configs ?? '', { label: 'Peer AI configurations' }),
-    mk('peer_analysis_max_rounds', 'AI', '3', { type: 'integer', label: 'Peer analysis max rounds' }),
+    mk('additional_repos', 'Analysis', extra.additional_repos ?? '', { label: 'Additional repositories' }),
+    mk('peer_ai_configs', 'Analysis', extra.peer_ai_configs ?? '', { label: 'Peer AI configurations' }),
+    mk('peer_analysis_max_rounds', 'Analysis', '3', { type: 'integer', label: 'Peer analysis max rounds' }),
   ]
 }
 
-async function openAiTab() {
+async function openAnalysisTab() {
   renderPage()
-  fireEvent.click(await screen.findByRole('tab', { name: 'AI' }))
+  fireEvent.click(await screen.findByRole('tab', { name: 'Analysis' }))
 }
 
 describe('ServerSettingsPage human labels (E2E-F27)', () => {
@@ -2557,8 +2604,9 @@ describe('ServerSettingsPage human labels (E2E-F27)', () => {
     expect(without.textContent).not.toContain('SESSION_TTL_HOURS')
   })
 
-  it('gives an env-var-less row no tooltip at all', async () => {
-    // jira_auth_mode ships without an env var: nothing to reveal, no dead hover.
+  it('gives an env-var-less row a description tooltip and nothing else', async () => {
+    // jira_auth_mode ships without an env var: the tooltip carries only the
+    // description — no empty env-var slot (#585).
     get.mockResolvedValue([
       mk('jira_auth_mode', 'Jira', 'pat', { env_var: '', label: 'Jira auth method' }),
       mk('jira_project_key', 'Jira', 'RC', { env_var: '', label: 'Jira project key' }),
@@ -2566,9 +2614,11 @@ describe('ServerSettingsPage human labels (E2E-F27)', () => {
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
 
-    await userEvent.setup().hover(await screen.findByText('Jira project key'))
-    await new Promise((resolve) => setTimeout(resolve, 300))
-    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+    const tooltip = await labelTooltip('Jira project key')
+    expect(tooltip.querySelector('[data-setting-description]')?.textContent).toBe(
+      'Description for jira_project_key',
+    )
+    expect(tooltip.querySelector('[data-setting-env-var]')).toBeNull()
   })
 
   it('gives jira_auth_mode no row of its own: label and env var live in the Jira card', async () => {
@@ -2587,11 +2637,11 @@ describe('ServerSettingsPage human labels (E2E-F27)', () => {
 
   it('finds a row by its env var as well as by its label', async () => {
     get.mockResolvedValue([
-      mk('ai_call_timeout', 'AI', '600', { type: 'integer', label: 'AI call timeout' }),
+      mk('ai_call_timeout', 'Analysis', '600', { type: 'integer', label: 'AI call timeout' }),
       mk('jenkins_url', 'Jenkins', 'https://jenkins.example.com', { label: 'Jenkins URL' }),
     ] as never)
     renderPage()
-    fireEvent.click(await screen.findByRole('tab', { name: 'AI' }))
+    fireEvent.click(await screen.findByRole('tab', { name: 'Analysis' }))
     const search = await screen.findByLabelText('Search settings')
 
     // The env var is no longer visible, so search must find it (any case).
@@ -2614,7 +2664,7 @@ describe('ServerSettingsPage human labels (E2E-F27)', () => {
 describe('ServerSettingsPage inline editors (E2E-F28..F30)', () => {
   it('shows the repositories editor inline, with nothing to save while it is empty', async () => {
     get.mockResolvedValue(structuredSettings() as never)
-    await openAiTab()
+    await openAnalysisTab()
 
     const repos = await waitFor(() => {
       const found = row('additional_repos')
@@ -2631,7 +2681,7 @@ describe('ServerSettingsPage inline editors (E2E-F28..F30)', () => {
 
   it('shows Save/Cancel after the first add and Cancel returns to the empty state', async () => {
     get.mockResolvedValue(structuredSettings() as never)
-    await openAiTab()
+    await openAnalysisTab()
 
     const repos = (await waitFor(() => row('additional_repos'))) as HTMLElement
     fireEvent.click(within(repos).getByRole('button', { name: /Add Repository/i }))
@@ -2653,7 +2703,7 @@ describe('ServerSettingsPage inline editors (E2E-F28..F30)', () => {
     get.mockResolvedValue(
       structuredSettings({ additional_repos: 'grafana:https://github.com/acme/grafana:main' }) as never,
     )
-    await openAiTab()
+    await openAnalysisTab()
 
     const repos = (await waitFor(() => row('additional_repos'))) as HTMLElement
     // A stored value is a clean state too.
@@ -2673,7 +2723,7 @@ describe('ServerSettingsPage inline editors (E2E-F28..F30)', () => {
 
   it('shows the peer editor inline, with nothing to save while it is empty', async () => {
     get.mockResolvedValue(structuredSettings() as never)
-    await openAiTab()
+    await openAnalysisTab()
 
     const peers = await waitFor(() => {
       const found = row('peer_ai_configs')
@@ -2690,7 +2740,7 @@ describe('ServerSettingsPage inline editors (E2E-F28..F30)', () => {
     get.mockResolvedValue(
       structuredSettings({ peer_ai_configs: 'gemini:gemini-2.5-pro,cursor:claude-4-sonnet' }) as never,
     )
-    await openAiTab()
+    await openAnalysisTab()
 
     const peers = (await waitFor(() => row('peer_ai_configs'))) as HTMLElement
     expect(within(peers).getByText('Peer 2')).toBeInTheDocument()
@@ -2711,7 +2761,7 @@ describe('ServerSettingsPage inline editors (E2E-F28..F30)', () => {
     get.mockResolvedValue(
       structuredSettings({ peer_ai_configs: 'gemini:gemini-2.5-pro,cursor:claude-4-sonnet' }) as never,
     )
-    await openAiTab()
+    await openAnalysisTab()
 
     const peers = (await waitFor(() => row('peer_ai_configs'))) as HTMLElement
     fireEvent.click(within(peers).getByRole('button', { name: /Add peer configuration/i }))
@@ -2731,7 +2781,7 @@ describe('ServerSettingsPage inline editors (E2E-F28..F30)', () => {
     get.mockResolvedValue(
       structuredSettings({ peer_ai_configs: 'gemini:gemini-2.5-pro' }) as never,
     )
-    await openAiTab()
+    await openAnalysisTab()
 
     const peers = (await waitFor(() => row('peer_ai_configs'))) as HTMLElement
     // The rounds input moved out of the card: one control per setting.
@@ -2770,10 +2820,10 @@ const SIZE_LABEL = 'Pi sidecar transcripts max size (MB)'
 function retentionSettings(): TestSetting[] {
   return [
     ...baseSettings(),
-    mk('pi_sidecar_transcripts_dir', 'Sidecar', '/data/pi-sidecar/transcripts', {
+    mk('pi_sidecar_transcripts_dir', 'Advanced', '/data/pi-sidecar/transcripts', {
       restart_required: true,
     }),
-    mk(AGE_KEY, 'Sidecar', '0', {
+    mk(AGE_KEY, 'Data & retention', '0', {
       type: 'integer',
       restart_required: true,
       label: AGE_LABEL,
@@ -2781,7 +2831,7 @@ function retentionSettings(): TestSetting[] {
         'Delete recorded pi-sidecar session transcripts older than this many days. ' +
         '0 disables age-based pruning. Active sessions are never deleted. Restart required.',
     }),
-    mk(SIZE_KEY, 'Sidecar', '0', {
+    mk(SIZE_KEY, 'Data & retention', '0', {
       type: 'integer',
       restart_required: true,
       label: SIZE_LABEL,
@@ -2807,28 +2857,31 @@ function mockWithDisk(disk: Record<string, unknown> | 'fail') {
 const statusProbeCalls = () =>
   get.mock.calls.filter(([url]) => String(url) === '/api/admin/server-status').length
 
-async function openSidecarTab() {
+async function openRetentionTab() {
   renderPage()
-  fireEvent.click(await screen.findByRole('tab', { name: 'Sidecar' }))
+  fireEvent.click(await screen.findByRole('tab', { name: 'Data & retention' }))
   await waitForRow(AGE_KEY)
 }
 
 describe('ServerSettingsPage transcript retention (#570)', () => {
-  it('renders both budgets as restart rows with the 0-disables copy and no env var in row text', async () => {
+  it('renders both budgets as restart rows with the 0-disables description in the tooltip', async () => {
     get.mockResolvedValue(retentionSettings() as never)
-    await openSidecarTab()
+    await openRetentionTab()
 
-    for (const [key, envVar] of [[AGE_KEY, AGE_ENV], [SIZE_KEY, SIZE_ENV]] as const) {
+    for (const [key, envVar, label] of [
+      [AGE_KEY, AGE_ENV, AGE_LABEL],
+      [SIZE_KEY, SIZE_ENV, SIZE_LABEL],
+    ] as const) {
       const settingRow = row(key)!
       expect(within(settingRow).getByLabelText('Restart required')).toBeInTheDocument()
-      expect(settingRow.textContent).toContain('0 disables')
+      // The description is a tooltip now, not a permanent line on the row.
+      expect(settingRow.textContent).not.toContain('0 disables')
       // The env var lives in the label tooltip, never in permanent row text.
       expect(settingRow.textContent).not.toContain(envVar)
+      const tooltip = await labelTooltip(label)
+      expect(tooltip.querySelector('[data-setting-description]')?.textContent).toContain('0 disables')
+      expect(tooltip.querySelector('[data-setting-env-var]')?.textContent).toBe(envVar)
     }
-
-    // The label tooltip carries the identifier (the operator's link to .env).
-    expect(await envVarTooltip(AGE_LABEL)).toBe(AGE_ENV)
-    expect(await envVarTooltip(SIZE_LABEL)).toBe(SIZE_ENV)
   })
 
   it('saves a budget, and resets the DB override it became', async () => {
@@ -2845,7 +2898,7 @@ describe('ServerSettingsPage transcript retention (#570)', () => {
       stored = { value: '14', source: 'db' }
       return {} as never
     })
-    await openSidecarTab()
+    await openRetentionTab()
 
     fireEvent.click(screen.getByRole('button', { name: `Edit ${AGE_ENV}` }))
     fireEvent.change(screen.getByLabelText(`Edit ${AGE_ENV}`), { target: { value: '14' } })
@@ -2870,7 +2923,7 @@ describe('ServerSettingsPage transcript retention (#570)', () => {
     err.status = 400
     err.body = { detail: `${AGE_KEY}: must be >= 0` }
     put.mockRejectedValueOnce(err as never)
-    await openSidecarTab()
+    await openRetentionTab()
 
     fireEvent.click(screen.getByRole('button', { name: `Edit ${AGE_ENV}` }))
     fireEvent.change(screen.getByLabelText(`Edit ${AGE_ENV}`), { target: { value: '-1' } })
@@ -2881,7 +2934,7 @@ describe('ServerSettingsPage transcript retention (#570)', () => {
     expect(screen.getByLabelText(`Edit ${AGE_ENV}`)).toHaveValue(-1)
   })
 
-  it('fetches the transcript usage only while the Sidecar rows are visible', async () => {
+  it('fetches the transcript usage only while the transcript rows are visible', async () => {
     mockWithDisk({
       available: true,
       transcripts_bytes: 2048,
@@ -2896,7 +2949,7 @@ describe('ServerSettingsPage transcript retention (#570)', () => {
     await waitForRow('jenkins_url')
     expect(statusProbeCalls()).toBe(0)
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Sidecar' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Data & retention' }))
     expect(await screen.findByText('2.0 KiB · 3 files · oldest: 2d 0h')).toBeInTheDocument()
     expect(statusProbeCalls()).toBe(1)
 
@@ -2920,14 +2973,14 @@ describe('ServerSettingsPage transcript retention (#570)', () => {
       return retentionSettings() as never
     })
     renderPage()
-    fireEvent.click(await screen.findByRole('tab', { name: 'Sidecar' }))
+    fireEvent.click(await screen.findByRole('tab', { name: 'Data & retention' }))
     await waitForRow(AGE_KEY)
     await waitFor(() => expect(statusProbeCalls()).toBe(1))
 
     // Leave and come straight back before the first probe resolves: the card is
     // visible again, so it must ask again instead of waiting for a manual refresh.
     fireEvent.click(screen.getByRole('tab', { name: 'Jenkins' }))
-    fireEvent.click(screen.getByRole('tab', { name: 'Sidecar' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Data & retention' }))
     await waitFor(() => expect(statusProbeCalls()).toBe(2))
     expect(await screen.findByText('1.0 KiB · 1 file · oldest: 1m 0s')).toBeInTheDocument()
 
@@ -2945,7 +2998,7 @@ describe('ServerSettingsPage transcript retention (#570)', () => {
       transcripts_files: 0,
       transcripts_oldest_age_seconds: null,
     })
-    await openSidecarTab()
+    await openRetentionTab()
     expect(await screen.findByText('0 B · 0 files · oldest: none')).toBeInTheDocument()
   })
 
@@ -2956,13 +3009,270 @@ describe('ServerSettingsPage transcript retention (#570)', () => {
       transcripts_files: null,
       transcripts_oldest_age_seconds: null,
     })
-    await openSidecarTab()
+    await openRetentionTab()
     expect(await screen.findByText('not visible in this container')).toBeInTheDocument()
   })
 
   it('says the probe is not visible when the status request fails', async () => {
     mockWithDisk('fail')
-    await openSidecarTab()
+    await openRetentionTab()
     expect(await screen.findByText('not visible in this container')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #585 — descriptions as tooltips, visible traps, Jira fields by auth mode
+// ---------------------------------------------------------------------------
+
+describe('ServerSettingsPage descriptions as tooltips (#585)', () => {
+  const DESCRIPTION = 'Timeout for a single Jenkins API request, in seconds. Default 30. Jenkins only.'
+
+  function jenkinsTimeout(): TestSetting[] {
+    return [
+      mk('jenkins_timeout', 'Jenkins', '30', {
+        type: 'integer',
+        label: 'Jenkins timeout',
+        description: DESCRIPTION,
+      }),
+    ]
+  }
+
+  it('keeps the description off the row and puts it in the label tooltip', async () => {
+    get.mockResolvedValue(jenkinsTimeout() as never)
+    renderPage()
+
+    const settingRow = await waitFor(() => {
+      const found = row('jenkins_timeout')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+    // The row collapses to title + control: no inline description paragraph.
+    expect(settingRow.textContent).not.toContain(DESCRIPTION)
+    expect(settingRow.querySelector('[data-setting-description]')).toBeNull()
+    // The label still paints as text, so the tooltip trigger is the label itself.
+    expect(settingRow.textContent).toContain('Jenkins timeout')
+
+    const tooltip = await labelTooltip('Jenkins timeout')
+    expect(tooltip.querySelector('[data-setting-description]')?.textContent).toBe(DESCRIPTION)
+    expect(tooltip.querySelector('[data-setting-env-var]')?.textContent).toBe('JENKINS_TIMEOUT')
+  })
+
+  it('opens the description tooltip on focus, so it is reachable without a pointer', async () => {
+    get.mockResolvedValue(jenkinsTimeout() as never)
+    renderPage()
+    await waitForRow('jenkins_timeout')
+
+    const trigger = row('jenkins_timeout')!.querySelector('[data-setting-title]') as HTMLElement
+    expect(trigger).toHaveAttribute('tabindex', '0')
+
+    // Keyboard entry — no hover anywhere in this test.
+    act(() => trigger.focus())
+    expect(trigger).toHaveFocus()
+    const tooltip = await screen.findByRole('tooltip')
+    expect(tooltip.querySelector('[data-setting-description]')?.textContent).toBe(DESCRIPTION)
+  })
+})
+
+describe('ServerSettingsPage visible value traps (#585)', () => {
+  const TRAP = '0 means wait forever'
+  const DESCRIPTION = 'Stop waiting after this many minutes and analyse what exists. 0 waits indefinitely. Jenkins only.'
+
+  function waitSettings(value: string): TestSetting[] {
+    return [
+      mk('max_wait_minutes', 'Jenkins', value, {
+        type: 'integer',
+        label: 'Max wait (minutes)',
+        description: DESCRIPTION,
+      }),
+    ]
+  }
+
+  async function openJenkinsTab() {
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jenkins' }))
+    await waitForRow('max_wait_minutes')
+  }
+
+  it('renders the "0 waits forever" trap beside the control, not only in the tooltip', async () => {
+    get.mockResolvedValue(waitSettings('0') as never)
+    await openJenkinsTab()
+
+    // Visible without hovering anything.
+    expect(row('max_wait_minutes')!.querySelector('[data-setting-trap]')?.textContent).toContain(TRAP)
+    // ... and the description (which also warns) is available on the label.
+    expect(
+      (await labelTooltip('Max wait (minutes)')).querySelector('[data-setting-description]')?.textContent,
+    ).toBe(DESCRIPTION)
+  })
+
+  it('shows no trap for a real limit, and follows the value while editing', async () => {
+    get.mockResolvedValue(waitSettings('30') as never)
+    await openJenkinsTab()
+    expect(row('max_wait_minutes')!.querySelector('[data-setting-trap]')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit MAX_WAIT_MINUTES' }))
+    const input = screen.getByLabelText('Edit MAX_WAIT_MINUTES')
+    fireEvent.change(input, { target: { value: '0' } })
+    expect(row('max_wait_minutes')!.querySelector('[data-setting-trap]')?.textContent).toContain(TRAP)
+
+    fireEvent.change(input, { target: { value: '5' } })
+    expect(row('max_wait_minutes')!.querySelector('[data-setting-trap]')).toBeNull()
+    // Nothing was written: the trap follows the draft, it does not save it.
+    expect(put).not.toHaveBeenCalled()
+  })
+})
+
+describe('ServerSettingsPage Jira fields by auth mode (#585)', () => {
+  // The six settings every mode shows; jira_auth_mode itself is the card's
+  // selector, so it has no row of its own (E2E-F33).
+  const ALWAYS_VISIBLE = ['enable_jira', 'enable_jira_issues', 'jira_project_key', 'jira_site_url', 'jira_max_results']
+  const CONDITIONAL = Object.keys(JIRA_MODES)
+
+  async function openJiraTab() {
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
+    await waitForRow('jira_project_key')
+  }
+
+  // The table from the issue, per mode — the page derives it from `visible_when`.
+  const MODE_FIELDS: Record<string, string[]> = {
+    basic: ['jira_email', 'jira_api_token', 'jira_cloud_url', 'jira_cloud_ssl_verify'],
+    pat: ['jira_pat', 'jira_server_url', 'jira_server_ssl_verify'],
+    oauth: ['jira_oauth_client_secret', 'atlassian_oauth_client_id', 'atlassian_oauth_cloud_id', 'jira_oauth_ssl_verify'],
+    atst: ['jira_atst_token', 'atlassian_oauth_cloud_id', 'jira_oauth_ssl_verify'],
+  }
+
+  for (const [mode, fields] of Object.entries(MODE_FIELDS)) {
+    it(`shows only the ${mode} fields plus the always-visible ones`, async () => {
+      mockJiraModeSettings(mode)
+      await openJiraTab()
+
+      // The mode's own fields, driven by the `visible_when` the API ships.
+      for (const key of fields) expect(shown(key)).toBe(true)
+      // Every other conditional field is hidden in this mode.
+      for (const key of CONDITIONAL.filter((k) => !fields.includes(k))) {
+        expect(shown(key)).toBe(false)
+      }
+      // The six always-visible settings, one of them as the mode selector.
+      for (const key of ALWAYS_VISIBLE) expect(shown(key)).toBe(true)
+      expect(row('jira_auth_mode')).toBeNull()
+      expect(jiraAuthSelect()).toBeInTheDocument()
+    })
+  }
+
+  it('shows no conditional field while no mode is selected', async () => {
+    mockJiraModeSettings('')
+    await openJiraTab()
+
+    for (const key of CONDITIONAL) expect(shown(key)).toBe(false)
+    for (const key of ALWAYS_VISIBLE) expect(shown(key)).toBe(true)
+  })
+
+  it('re-renders the new mode\'s fields without writing a value it hides', async () => {
+    mockJiraModeSettings('basic')
+    await openJiraTab()
+    expect(shown('jira_email')).toBe(true)
+    expect(shown('jira_pat')).toBe(false)
+
+    chooseJiraMethod('PAT (Bearer)')
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
+    await waitFor(() => expect(shown('jira_pat')).toBe(true))
+    expect(shown('jira_email')).toBe(false)
+
+    // Hiding is rendering only: the sole write is the mode itself, and no
+    // hidden credential was cleared or deleted (#585 decision 6).
+    const writes = put.mock.calls.map(
+      ([, body]) => (body as { settings: Record<string, string> }).settings,
+    )
+    expect(writes).toEqual([{ jira_auth_mode: 'pat' }])
+    expect(vi.mocked(api.delete)).not.toHaveBeenCalled()
+
+    // Switching back proves the hidden value survived untouched (pat is not the
+    // verified method here, so the switch applies without a confirmation).
+    chooseJiraMethod('Email + API token')
+    await waitFor(() => expect(shown('jira_email')).toBe(true))
+    expect(screen.getByRole('button', { name: 'Edit JIRA_EMAIL' })).toHaveTextContent('admin@example.com')
+    expect(put).toHaveBeenCalledTimes(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #585 E2E — the tab strip and the per-tab cards follow the shipped taxonomy
+// ---------------------------------------------------------------------------
+
+// Exactly the tabs _SETTINGS_CATEGORIES declares, in its order
+// (src/rootcoz/main.py) — the backend is authoritative, the page mirrors it.
+const SHIPPED_CATEGORIES = [
+  'Jenkins', 'Analysis', 'Jira', 'GitHub issues', 'Report Portal', 'Datadog',
+  'Auth & Security', 'Prow', 'Server', 'Notifications', 'Data & retention',
+  'Repos & workspace', 'Logging', 'Advanced',
+]
+
+/** One setting per shipped category, so every tab exists. */
+function shippedSettings(): TestSetting[] {
+  return SHIPPED_CATEGORIES.map(cat => mk(`${cat.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_setting`, cat))
+}
+
+describe('ServerSettingsPage shipped tab taxonomy (#585 E2E)', () => {
+  it('renders all 14 shipped tabs, in the backend order', async () => {
+    get.mockResolvedValue(shippedSettings() as never)
+    renderPage()
+    // The Server tab is still the one an admin lands on.
+    await waitForRow('server_setting')
+
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(SHIPPED_CATEGORIES)
+  })
+
+  it('renders the server providers card on the Analysis tab, and nowhere else', async () => {
+    get.mockResolvedValue(baseSettings() as never)
+    renderPage()
+    await waitForRow('public_base_url')
+    expect(screen.queryByTestId('server-providers-card')).toBeNull()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Analysis' }))
+    await waitForRow('ai_provider')
+    expect(screen.getByTestId('server-providers-card')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Jenkins' }))
+    await waitForRow('jenkins_url')
+    expect(screen.queryByTestId('server-providers-card')).toBeNull()
+  })
+
+  it('renders the transcripts card wherever the transcript rows are', async () => {
+    mockWithDisk({
+      available: true,
+      transcripts_bytes: 2048,
+      transcripts_files: 3,
+      transcripts_oldest_age_seconds: 172800,
+    })
+    renderPage()
+    await waitForRow('public_base_url')
+
+    // The budgets ship on Data & retention, the directory on Advanced: the card
+    // follows the rows, so it shows on both and on no unrelated tab.
+    fireEvent.click(screen.getByRole('tab', { name: 'Data & retention' }))
+    await waitForRow(AGE_KEY)
+    expect(await screen.findByText('2.0 KiB · 3 files · oldest: 2d 0h')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }))
+    await waitForRow('pi_sidecar_transcripts_dir')
+    expect(await screen.findByText('2.0 KiB · 3 files · oldest: 2d 0h')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Jenkins' }))
+    await waitForRow('jenkins_url')
+    expect(screen.queryByText(/oldest:/)).toBeNull()
+  })
+
+  it('resolves the GitHub test connection on the GitHub issues tab', async () => {
+    get.mockResolvedValue(baseSettings() as never)
+    renderPage()
+    await waitForRow('public_base_url')
+
+    fireEvent.click(screen.getByRole('tab', { name: 'GitHub issues' }))
+    await waitForRow('github_token')
+    fireEvent.click(screen.getByRole('button', { name: /test connection/i }))
+
+    await waitFor(() => expect(testIntegration).toHaveBeenCalledWith('github'))
+    expect(await screen.findByRole('status')).toHaveTextContent('Connection successful')
   })
 })

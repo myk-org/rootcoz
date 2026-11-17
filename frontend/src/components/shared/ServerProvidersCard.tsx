@@ -41,7 +41,7 @@ type RemoveWarning = { models: string[]; free: string[] }
 const DISCOVERED_MODEL_HINT = 'No models listed for this provider — a model will be discovered from the credential to verify against.'
 
 /**
- * Admin management of server AI providers (Server Settings → AI).
+ * Admin management of server AI providers (Server Settings → Analysis).
  *
  * Mirrors the user provider-keys flow (AiCredentials): provider from the live
  * catalog → key → verification model → Test provider, with Add gated on a

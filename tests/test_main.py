@@ -15670,7 +15670,7 @@ class TestAdminSettingsEndpoints:
             s for s in test_client.get("/api/admin/settings").json() if s["key"] == key
         )
         assert (item["category"], item["type"], item["default"]) == (
-            "Server",
+            "Repos & workspace",
             "integer",
             "10",
         )
@@ -16350,7 +16350,11 @@ class TestAdminSettingsEndpoints:
         item = next(
             s for s in test_client.get("/api/admin/settings").json() if s["key"] == key
         )
-        assert (item["category"], item["type"], item["default"]) == ("AI", "string", "")
+        assert (item["category"], item["type"], item["default"]) == (
+            "Analysis",
+            "string",
+            "",
+        )
         assert not item["sensitive"] and not item["restart_required"]
         # Options come from the sidecar catalog (test fixture: claude, gemini).
         assert item["options"] == ["claude", "gemini"]

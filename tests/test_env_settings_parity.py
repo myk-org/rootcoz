@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from rootcoz import main, monitoring, storage, transcripts
 from rootcoz.config import (
+    JIRA_AUTH_MODES,
     RESULTS_RETENTION_DAYS_MAX,
     SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS,
     SIDECAR_TRANSCRIPTS_MAX_SIZE_MB,
@@ -143,8 +144,12 @@ def test_sidecar_settings_metadata_category_and_restart(client):
     assert response.status_code == 200
     by_key = {item["key"]: item for item in response.json()}
     for key in main._SIDECAR_BRIDGE_SETTINGS:
-        assert by_key[key]["category"] == "Sidecar", key
         assert by_key[key]["restart_required"] is True, key
+    # The bridge keys split by purpose (#585): what the sidecar process binds
+    # and runs, its own log level, and where its transcripts land.
+    assert by_key["sidecar_host"]["category"] == "Advanced"
+    assert by_key["pi_sidecar_log_level"]["category"] == "Logging"
+    assert by_key["pi_sidecar_transcripts_dir"]["category"] == "Advanced"
     assert by_key["sidecar_host"]["restart_required"] is True
     # Notifications category with a sensitive SMTP password.
     assert by_key["smtp_host"]["category"] == "Notifications"
@@ -886,17 +891,14 @@ def test_results_retention_settings_metadata(client):
     assert response.status_code == 200
     by_key = {item["key"]: item for item in response.json()}
     for key in ("results_retention_days", "results_max_rows"):
-        assert by_key[key]["category"] == "Storage", key
+        assert by_key[key]["category"] == "Data & retention", key
         assert by_key[key]["default"] == "0", key
         assert by_key[key]["sensitive"] is False, key
         assert by_key[key]["restart_required"] is False, key
         assert by_key[key]["server_only"] is False, key
     assert by_key["results_retention_days"]["env_var"] == "RESULTS_RETENTION_DAYS"
     assert by_key["results_max_rows"]["env_var"] == "RESULTS_MAX_ROWS"
-    # Storage sits before Workspace, which stays last on the page.
-    categories = list(main._SETTINGS_CATEGORIES)
-    assert categories.index("Storage") < categories.index("Workspace")
-    assert categories[-1] == "Workspace"
+    # Rows and files pruned by the same pass share one tab (#585).
 
 
 def test_results_retention_write_path_bounds(client):
@@ -972,12 +974,12 @@ def test_results_retention_bounds_are_single_sourced():
 
 
 def test_max_concurrent_analyses_metadata(client):
-    """T16: one Server-category integer, env-backed and runtime-applied."""
+    """T16: one Analysis-category integer, env-backed and runtime-applied."""
     response = client.get("/api/admin/settings", headers=_admin_headers())
     assert response.status_code == 200
     item = {row["key"]: row for row in response.json()}["max_concurrent_analyses"]
 
-    assert item["category"] == "Server"
+    assert item["category"] == "Analysis"
     assert item["default"] == "10"
     assert item["type"] == "integer"
     assert item["sensitive"] is False
@@ -985,10 +987,8 @@ def test_max_concurrent_analyses_metadata(client):
     assert item["server_only"] is False
     assert item["env_var"] == "MAX_CONCURRENT_ANALYSES"
     assert item["label"] == "Max concurrent analyses"
-    # Beside the other concurrency limits, not on a page of its own.
-    assert list(main._SETTINGS_CATEGORIES).index("Server") < list(
-        main._SETTINGS_CATEGORIES
-    ).index("Web Push")
+    # Beside the concurrency limits it belongs with, not on a page of its own.
+    assert "max_concurrent_analyses" in main._SETTINGS_CATEGORIES["Analysis"]
 
 
 def test_max_concurrent_analyses_rejects_zero_and_applies_a_db_override(client):
@@ -1047,16 +1047,18 @@ def test_queue_is_an_advertised_sparse_field(client):
     assert "queue" in RESULT_FIELD_PATHS
 
 
-def test_repo_clone_timeout_is_a_server_setting(client):
+def test_repo_clone_timeout_is_a_repos_setting(client):
     """Registered, default 900, env-supplied, and 0 (no deadline at all) is refused."""
-    assert "repo_clone_timeout_seconds" in main._SETTINGS_CATEGORIES["Server"]
+    assert (
+        "repo_clone_timeout_seconds" in main._SETTINGS_CATEGORIES["Repos & workspace"]
+    )
     by_key = {
         item["key"]: item
         for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
     }
     row = by_key["repo_clone_timeout_seconds"]
     assert (row["category"], row["default"], row["env_var"]) == (
-        "Server",
+        "Repos & workspace",
         "900",
         "REPO_CLONE_TIMEOUT_SECONDS",
     )
@@ -1078,16 +1080,16 @@ def test_repo_clone_timeout_is_a_server_setting(client):
 # --- chat clone depth (#547) ---
 
 
-def test_chat_clone_depth_is_a_server_setting(client, monkeypatch):
+def test_chat_clone_depth_is_a_repos_setting(client, monkeypatch):
     """Registered, default 1, env-supplied default, DB override wins, ≥ 1 enforced."""
-    assert "chat_clone_depth" in main._SETTINGS_CATEGORIES["Server"]
+    assert "chat_clone_depth" in main._SETTINGS_CATEGORIES["Repos & workspace"]
     by_key = {
         item["key"]: item
         for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
     }
     row = by_key["chat_clone_depth"]
     assert (row["category"], row["default"], row["env_var"]) == (
-        "Server",
+        "Repos & workspace",
         "1",
         "CHAT_CLONE_DEPTH",
     )
@@ -1168,15 +1170,15 @@ def test_boolean_is_refused_for_any_integer_setting(client):
 def test_feedback_repo_url_is_a_github_setting_with_blank_coercion_and_userinfo_strip(
     client, monkeypatch
 ):
-    """Registered under GitHub, defaults to upstream repo, blank coerces, userinfo stripped."""
-    assert "feedback_repo_url" in main._SETTINGS_CATEGORIES["GitHub"]
+    """Registered under GitHub issues, defaults to upstream repo, blank coerces, userinfo stripped."""
+    assert "feedback_repo_url" in main._SETTINGS_CATEGORIES["GitHub issues"]
     by_key = {
         item["key"]: item
         for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
     }
     row = by_key["feedback_repo_url"]
     assert (row["category"], row["default"], row["env_var"]) == (
-        "GitHub",
+        "GitHub issues",
         "https://github.com/myk-org/rootcoz",
         "FEEDBACK_REPO_URL",
     )
@@ -1241,7 +1243,7 @@ def test_sidecar_transcript_retention_metadata_and_defaults_exclusion(client):
         ("pi_sidecar_transcripts_max_size_mb", "PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB"),
     ):
         item = by_key[key]
-        assert item["category"] == "Sidecar", key
+        assert item["category"] == "Data & retention", key
         assert item["type"] == "integer", key
         assert item["default"] == "0", key
         assert item["restart_required"] is True, key
@@ -1374,3 +1376,287 @@ def test_retention_budget_env_values_the_sidecar_accepted_do_not_block_boot(
         monkeypatch.delenv("PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS")
         monkeypatch.delenv("PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB")
         clear_settings_cache()
+
+
+# --- Server Settings reorganisation (#585) ---------------------------------
+
+# The agreed tab layout (#585): one source per tab — Jenkins-only settings on
+# the Jenkins tab, Prow-only on Prow — no "Sources" and no "General" tab, and
+# Server keeps exactly two settings.
+_EXPECTED_CATEGORIES: dict[str, set[str]] = {
+    "Jenkins": {
+        "jenkins_url",
+        "jenkins_user",
+        "jenkins_password",
+        "jenkins_ssl_verify",
+        "jenkins_timeout",
+        "jenkins_artifacts_max_size_mb",
+        "wait_for_completion",
+        "poll_interval_minutes",
+        "max_wait_minutes",
+    },
+    "Analysis": {
+        "ai_provider",
+        "ai_model",
+        "ai_call_timeout",
+        "max_concurrent_ai_calls",
+        "peer_ai_configs",
+        "peer_analysis_max_rounds",
+        "enable_free_models",
+        "ambient_auth_providers",
+        "active_server_providers",
+        "record_transcripts",
+        "enable_auto_review",
+        "max_concurrent_analyses",
+        "metadata_rules_file",
+        # The only setting both sources read (Jenkins and Prow).
+        "get_job_artifacts",
+    },
+    "Jira": {
+        "jira_auth_mode",
+        "jira_email",
+        "jira_api_token",
+        "jira_cloud_url",
+        "jira_cloud_ssl_verify",
+        "jira_pat",
+        "jira_server_url",
+        "jira_server_ssl_verify",
+        "jira_oauth_client_secret",
+        "atlassian_oauth_cloud_id",
+        "atlassian_oauth_client_id",
+        "jira_atst_token",
+        "jira_oauth_ssl_verify",
+        "jira_site_url",
+        "jira_project_key",
+        "jira_max_results",
+        "enable_jira",
+        "enable_jira_issues",
+    },
+    "GitHub issues": {
+        "github_token",
+        "feedback_repo_url",
+        "enable_github_issues",
+    },
+    "Report Portal": {
+        "reportportal_url",
+        "reportportal_api_token",
+        "reportportal_project",
+        "reportportal_verify_ssl",
+        "enable_reportportal",
+        "rp_push_classifications",
+        "rp_push_rootcoz_url",
+        "rp_push_tracker_links",
+        "rp_allow_unreviewed_push",
+    },
+    "Datadog": {
+        "datadog_api_key",
+        "datadog_app_key",
+        "datadog_site",
+        "datadog_service",
+        "datadog_env",
+        "enable_datadog",
+        "dd_push_classifications",
+        "dd_push_rootcoz_url",
+        "dd_push_tracker_links",
+        "dd_allow_unreviewed_push",
+    },
+    "Auth & Security": {
+        "admin_key",
+        "secure_cookies",
+        "trust_proxy_headers",
+        "require_approval",
+        "admin_wait_approve_msg",
+        "allowed_users",
+        "default_user_role",
+        "session_ttl_hours",
+        "login_lockout_enabled",
+        "login_lockout_threshold",
+    },
+    "Prow": {
+        "prow_url",
+        "gcs_bucket",
+        "prow_artifacts_max_size_mb",
+        "prow_artifact_max_file_size_mb",
+        "prow_artifacts_max_objects",
+    },
+    "Server": {"public_base_url", "auto_push_exporters"},
+    "Notifications": {
+        "smtp_host",
+        "smtp_port",
+        "smtp_user",
+        "smtp_password",
+        "smtp_from",
+        "alert_email_to",
+        "slack_webhook_url",
+        "enable_health_monitor",
+        "health_monitor_interval_seconds",
+        "health_alert_unhealthy_seconds",
+        "health_alert_error_rate_percent",
+        "health_alert_error_rate_seconds",
+        "health_alert_stuck_analysis_seconds",
+        "vapid_public_key",
+        "vapid_private_key",
+        "vapid_claim_email",
+    },
+    "Data & retention": {
+        "audit_retention_days",
+        "audit_max_rows",
+        "audit_auth_failure_max_per_minute",
+        "results_retention_days",
+        "results_max_rows",
+        "pi_sidecar_transcripts_max_age_days",
+        "pi_sidecar_transcripts_max_size_mb",
+    },
+    "Repos & workspace": {
+        "tests_repo_url",
+        "tests_repo_token",
+        "additional_repos",
+        "max_concurrent_repo_clones",
+        "chat_clone_depth",
+        "repo_clone_timeout_seconds",
+        "max_workspace_graph_mb",
+    },
+    "Logging": {
+        "log_level",
+        "log_max_bytes",
+        "log_backup_count",
+        "log_min_free_bytes",
+        "pi_sidecar_log_level",
+    },
+    "Advanced": {
+        "sidecar_host",
+        "sidecar_port",
+        "sidecar_url",
+        "acpx_agents",
+        "cli_agents",
+        "node_binary",
+        "pi_sidecar_transcripts_dir",
+    },
+}
+
+# The fields only the selected Jira auth mode shows (#585). The shared ones
+# list every mode that uses them.
+_JIRA_VISIBLE_WHEN: dict[str, list[str]] = {
+    "jira_email": ["basic"],
+    "jira_api_token": ["basic"],
+    "jira_cloud_url": ["basic"],
+    "jira_cloud_ssl_verify": ["basic"],
+    "jira_pat": ["pat"],
+    "jira_server_url": ["pat"],
+    "jira_server_ssl_verify": ["pat"],
+    "jira_oauth_client_secret": ["oauth"],
+    "atlassian_oauth_client_id": ["oauth"],
+    "atlassian_oauth_cloud_id": ["oauth", "atst"],
+    "jira_oauth_ssl_verify": ["oauth", "atst"],
+    "jira_atst_token": ["atst"],
+}
+
+# Rows that stay visible whatever the auth mode is.
+_JIRA_ALWAYS_VISIBLE = {
+    "enable_jira",
+    "enable_jira_issues",
+    "jira_auth_mode",
+    "jira_project_key",
+    "jira_site_url",
+    "jira_max_results",
+}
+
+
+def test_settings_categories_match_the_agreed_tabs():
+    """Every one of the 122 settings sits in its agreed tab (#585)."""
+    actual = {cat: set(fields) for cat, fields in main._SETTINGS_CATEGORIES.items()}
+    assert actual == _EXPECTED_CATEGORIES
+    # Tab order is the page order — pinned so a reorder is a visible change.
+    assert list(main._SETTINGS_CATEGORIES) == list(_EXPECTED_CATEGORIES)
+    assert "Sources" not in main._SETTINGS_CATEGORIES
+    assert "General" not in main._SETTINGS_CATEGORIES
+    assert set(main._SETTINGS_CATEGORIES["Server"]) == {
+        "public_base_url",
+        "auto_push_exporters",
+    }
+    assert "get_job_artifacts" in main._SETTINGS_CATEGORIES["Analysis"]
+    placed = [key for fields in _EXPECTED_CATEGORIES.values() for key in fields]
+    assert len(placed) == len(set(placed)), "a setting sits in two tabs"
+    assert set(placed) == set(Settings.model_fields)
+    assert len(placed) == 122
+
+
+def test_every_setting_has_a_description():
+    """A setting may not ship bare (#585 decision 5)."""
+    for category, fields in main._SETTINGS_CATEGORIES.items():
+        for key in fields:
+            description = (Settings.model_fields[key].description or "").strip()
+            assert description, f"{category}/{key} has no description"
+            assert description != main._setting_label(key), key
+
+
+def test_jira_visible_when_shape():
+    """The rule sits beside the setting, keyed on jira_auth_mode (#585)."""
+    for key, modes in _JIRA_VISIBLE_WHEN.items():
+        assert main._SETTING_VISIBLE_WHEN[key] == {
+            "key": "jira_auth_mode",
+            "in": modes,
+        }, key
+    jira_fields = set(main._SETTINGS_CATEGORIES["Jira"])
+    assert jira_fields - _JIRA_ALWAYS_VISIBLE == set(_JIRA_VISIBLE_WHEN)
+    assert not _JIRA_ALWAYS_VISIBLE & set(main._SETTING_VISIBLE_WHEN)
+
+
+def test_jira_visible_when_is_emitted_only_where_declared(client):
+    response = client.get("/api/admin/settings", headers=_admin_headers())
+    assert response.status_code == 200
+    by_key = {item["key"]: item for item in response.json()}
+    for key, modes in _JIRA_VISIBLE_WHEN.items():
+        assert by_key[key]["visible_when"] == {
+            "key": "jira_auth_mode",
+            "in": modes,
+        }, key
+    # Most settings carry no such key at all — never a null to render.
+    for key, item in by_key.items():
+        if key not in _JIRA_VISIBLE_WHEN:
+            assert "visible_when" not in item, key
+
+
+def test_every_conditional_jira_field_declares_a_mode():
+    """A hidden-forever field is unusable."""
+    for key, rule in main._SETTING_VISIBLE_WHEN.items():
+        assert rule["in"], key
+
+
+def test_every_jira_mode_surfaces_at_least_one_field():
+    """Every selectable mode shows something (#585)."""
+    surfaced = {
+        mode for rule in main._SETTING_VISIBLE_WHEN.values() for mode in rule["in"]
+    }
+    assert surfaced == set(JIRA_AUTH_MODES)
+
+
+def test_switching_jira_auth_mode_keeps_the_other_modes_secret(client):
+    """Hiding a field never clears it (#585 decision 6)."""
+    secret = "basic-mode-api-token"  # pragma: allowlist secret
+    saved = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"jira_email": "ops@example.com", "jira_api_token": secret}},
+    )
+    assert saved.status_code == 200, saved.text
+    switched = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"jira_auth_mode": "pat"}},
+    )
+    assert switched.status_code == 200, switched.text
+    revealed = client.get(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        params={"reveal_key": "__all__"},
+    ).json()
+    by_key = {item["key"]: item for item in revealed}
+    # The basic-mode fields are now hidden by visible_when, and both values
+    # are still stored exactly as saved.
+    assert by_key["jira_api_token"]["visible_when"] == {
+        "key": "jira_auth_mode",
+        "in": ["basic"],
+    }
+    assert by_key["jira_api_token"]["value"] == secret
+    assert by_key["jira_email"]["value"] == "ops@example.com"

@@ -113,23 +113,32 @@ That creates an active operator who can submit analyses, and one server setting 
 
 9. **Change a server setting.**
 
-   Open `Settings` in the admin sidebar. Settings are grouped into collapsible categories, and the header reports how many settings and categories exist. Search narrows the list across all categories.
+   Open `Settings` in the admin sidebar. Settings are grouped into collapsible tabs, and the header reports how many settings and categories exist. Search narrows the list across all categories.
 
-   | Category | Settings it holds |
+   Tabs follow the task a setting configures, not the product behind it: a Jenkins-only setting sits on `Jenkins`, a Prow-only setting on `Prow`, and a setting both sources read (`get_job_artifacts`) sits with the analysis. There is no `Sources` tab and no `General` tab. Every tab name below comes from `_SETTINGS_CATEGORIES` in the server, so the page cannot drift from it.
+
+   | Tab | Settings it holds |
    | --- | --- |
-   | `Jenkins` | `jenkins_url`, `jenkins_user`, `jenkins_password`, `jenkins_ssl_verify`, `jenkins_timeout`, `jenkins_artifacts_max_size_mb`, `get_job_artifacts` |
-   | `AI` | `ai_provider`, `ai_model`, `ai_call_timeout`, `max_concurrent_ai_calls`, `peer_ai_configs`, `peer_analysis_max_rounds` |
-   | `Jira` | `jira_email`, `jira_api_token`, `jira_cloud_url`, `jira_cloud_ssl_verify`, `jira_pat`, `jira_server_url`, `jira_server_ssl_verify`, `jira_oauth_client_secret`, `atlassian_oauth_cloud_id`, `atlassian_oauth_client_id`, `jira_atst_token`, `jira_oauth_ssl_verify`, `jira_site_url`, `jira_project_key`, `jira_max_results`, `enable_jira`, `enable_jira_issues` |
-   | `GitHub` | `github_token`, `tests_repo_url`, `tests_repo_token`, `feedback_repo_url`, `enable_github_issues` |
-   | `Report Portal` | `reportportal_url`, `reportportal_api_token`, `reportportal_project`, `reportportal_verify_ssl`, `enable_reportportal`, `rp_push_classifications`, `rp_push_rootcoz_url`, `rp_push_tracker_links` |
+   | `Jenkins` | `jenkins_url`, `jenkins_user`, `jenkins_password`, `jenkins_ssl_verify`, `jenkins_timeout`, `jenkins_artifacts_max_size_mb`, `wait_for_completion`, `poll_interval_minutes`, `max_wait_minutes` |
+   | `Analysis` | `ai_provider`, `ai_model`, `ai_call_timeout`, `max_concurrent_ai_calls`, `peer_ai_configs`, `peer_analysis_max_rounds`, `enable_free_models`, `ambient_auth_providers`, `active_server_providers`, `record_transcripts`, `enable_auto_review`, `max_concurrent_analyses`, `metadata_rules_file`, `get_job_artifacts` |
+   | `Jira` | `jira_auth_mode`, `enable_jira`, `enable_jira_issues`, `jira_project_key`, `jira_site_url`, `jira_max_results`, plus the credential rows of the selected auth method (see Jira auth modes below) |
+   | `GitHub issues` | `github_token`, `feedback_repo_url`, `enable_github_issues` |
+   | `Report Portal` | `reportportal_url`, `reportportal_api_token`, `reportportal_project`, `reportportal_verify_ssl`, `enable_reportportal`, `rp_push_classifications`, `rp_push_rootcoz_url`, `rp_push_tracker_links`, `rp_allow_unreviewed_push` |
    | `Datadog` | `datadog_api_key`, `datadog_app_key`, `datadog_site`, `datadog_service`, `datadog_env`, `enable_datadog`, `dd_push_classifications`, `dd_push_rootcoz_url`, `dd_push_tracker_links`, `dd_allow_unreviewed_push` |
-   | `Auth & Security` | `admin_key` (displayed masked, read-only), `secure_cookies`, `trust_proxy_headers`, `require_approval`, `admin_wait_approve_msg`, `allowed_users`, `default_user_role`, `login_lockout_enabled`, `login_lockout_threshold`, `audit_retention_days`, `audit_max_rows`, `audit_auth_failure_max_per_minute` |
-   | `Prow` | `prow_url`, `gcs_bucket` |
-   | `Server` | `public_base_url`, `additional_repos`, `max_concurrent_repo_clones`, `max_concurrent_analyses`, `chat_clone_depth`, `repo_clone_timeout_seconds`, `wait_for_completion`, `poll_interval_minutes`, `max_wait_minutes`, `metadata_rules_file`, `enable_auto_review`, `auto_push_exporters` |
-   | `Web Push` | `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
-   | `Notifications` | `smtp_host`, `smtp_port`, `smtp_user`, `smtp_password`, `smtp_from`, `alert_email_to`, `slack_webhook_url`, `enable_health_monitor`, `health_monitor_interval_seconds`, `health_alert_unhealthy_seconds`, `health_alert_error_rate_percent`, `health_alert_error_rate_seconds`, `health_alert_stuck_analysis_seconds` |
-   | `Sidecar` | `sidecar_host`, `sidecar_port`, `sidecar_url`, `acpx_agents`, `cli_agents`, `pi_sidecar_log_level`, `node_binary`, `pi_sidecar_transcripts_dir`, `pi_sidecar_transcripts_max_age_days`, `pi_sidecar_transcripts_max_size_mb`. The last three carry the recorded-transcripts usage card (total size, file count, oldest file age) below them. |
-   | `Storage` | `results_retention_days`, `results_max_rows` |
+   | `Auth & Security` | `admin_key` (displayed masked, read-only), `secure_cookies`, `trust_proxy_headers`, `require_approval`, `admin_wait_approve_msg`, `allowed_users`, `default_user_role`, `session_ttl_hours`, `login_lockout_enabled`, `login_lockout_threshold` |
+   | `Prow` | `prow_url`, `gcs_bucket`, `prow_artifacts_max_size_mb`, `prow_artifact_max_file_size_mb`, `prow_artifacts_max_objects` |
+   | `Server` | `public_base_url`, `auto_push_exporters` — exactly these two |
+   | `Notifications` | `smtp_host`, `smtp_port`, `smtp_user`, `smtp_password`, `smtp_from`, `alert_email_to`, `slack_webhook_url`, `enable_health_monitor`, `health_monitor_interval_seconds`, `health_alert_unhealthy_seconds`, `health_alert_error_rate_percent`, `health_alert_error_rate_seconds`, `health_alert_stuck_analysis_seconds`, `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
+   | `Data & retention` | `audit_retention_days`, `audit_max_rows`, `audit_auth_failure_max_per_minute`, `results_retention_days`, `results_max_rows`, `pi_sidecar_transcripts_max_age_days`, `pi_sidecar_transcripts_max_size_mb` |
+   | `Repos & workspace` | `tests_repo_url`, `tests_repo_token`, `additional_repos`, `max_concurrent_repo_clones`, `chat_clone_depth`, `repo_clone_timeout_seconds`, `max_workspace_graph_mb` |
+   | `Logging` | `log_level`, `log_max_bytes`, `log_backup_count`, `log_min_free_bytes`, `pi_sidecar_log_level` |
+   | `Advanced` | `sidecar_host`, `sidecar_port`, `sidecar_url`, `acpx_agents`, `cli_agents`, `node_binary`, `pi_sidecar_transcripts_dir` |
+
+   Every setting carries a description; it opens as a tooltip on the setting's label on hover or keyboard focus. A setting without one fails the test suite, so no row ships bare.
+
+   **Jira auth modes filter the `Jira` tab.** `jira_auth_mode` is the switch: `basic` shows `jira_email`, `jira_api_token`, `jira_cloud_url` and `jira_cloud_ssl_verify`; `pat` shows `jira_pat`, `jira_server_url` and `jira_server_ssl_verify`; `oauth` shows `jira_oauth_client_secret`, `atlassian_oauth_client_id`, `atlassian_oauth_cloud_id` and `jira_oauth_ssl_verify`; `atst` shows `jira_atst_token`, `atlassian_oauth_cloud_id` and `jira_oauth_ssl_verify`. Six rows stay visible in every mode: `enable_jira`, `enable_jira_issues`, `jira_auth_mode`, `jira_project_key`, `jira_site_url` and `jira_max_results`. Which fields a mode shows comes from the server, per row (`visible_when` on `GET /api/admin/settings`), so switching mode re-renders the rows as soon as the new mode is saved. There are no sub-sections — one flat list per mode.
+
+   **Hiding a field never clears it.** A credential hidden because its mode is not selected keeps its stored value untouched: switching away from `basic` and back shows the same API token. Nothing is deleted, nulled or migrated. Removing a credential is a separate, explicit action — reset the setting, or clear it and save.
 
    Each row shows the environment variable name, a source badge, and where relevant three other signals:
 
@@ -167,7 +176,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | Page | Shows |
    | --- | --- |
    | `Tokens` | Token usage broken down by provider, model, job, or day, with calls, input, output, cache read/write, cost, and average duration. Filter by date range and provider. |
-   | `Logs` | The server log, filterable by level and text. Authenticated lines carry `[user=<actor>]` — `[job_id=<id>][user=<actor>]` on job-scoped routes, and no tag at all on unauthenticated or background lines — identically on stderr, in `<data dir>/logs/rootcoz.log`, and in the live `/api/admin/logs/stream` feed. Tag characters (`[`, `]`, whitespace and control characters) are stripped when a line is rendered, so a job id or username cannot forge a tag or split a line. The initial tail — and so everything the page shows after a reload — is read from the application **log file**, which every `rootcoz` module logger writes to. The file is bounded to 1 % of the filesystem holding the data directory (capped at 100 MiB x 21 files) and pauses when free space drops below its floor; *Log file size (bytes)*, *Rotated log files kept* and *Log free-space floor (bytes)* on the **Server** tab tune it, at runtime. The live stream over SSE follows every logger as well, including third-party ones, so third-party lines are visible live but are gone after a reload. |
+   | `Logs` | The server log, filterable by level and text. Authenticated lines carry `[user=<actor>]` — `[job_id=<id>][user=<actor>]` on job-scoped routes, and no tag at all on unauthenticated or background lines — identically on stderr, in `<data dir>/logs/rootcoz.log`, and in the live `/api/admin/logs/stream` feed. Tag characters (`[`, `]`, whitespace and control characters) are stripped when a line is rendered, so a job id or username cannot forge a tag or split a line. The initial tail — and so everything the page shows after a reload — is read from the application **log file**, which every `rootcoz` module logger writes to. The file is bounded to 1 % of the filesystem holding the data directory (capped at 100 MiB x 21 files) and pauses when free space drops below its floor; *Log file size (bytes)*, *Rotated log files kept* and *Log free-space floor (bytes)* on the **Logging** tab tune it, at runtime. The live stream over SSE follows every logger as well, including third-party ones, so third-party lines are visible live but are gone after a reload. |
    | `Server Status` | A live snapshot of the container this server runs in — see below. |
 
    **Server Status answers "is anything wrong" before "what are the numbers".** The page renders warnings above the cards from the server's own resource probes: the data directory at 75 % / 90 %, the container's memory working set at 90 % of its limit, an event-loop stall over 5 s, and an unreachable AI sidecar. The `Health monitor` card reports the health monitor's state separately — a firing monitor condition adds no warning. Each one is a badge plus its text (`Critical` / `Warning`), never colour alone. The page refreshes every 30 s while the tab is visible and never runs two requests at once. The CLI mirrors it: `rootcoz admin server-status` (`--json` for the raw snapshot).
@@ -195,7 +204,7 @@ That creates an active operator who can submit analyses, and one server setting 
 
    **Row counts and sizes are snapshot numbers.** The counts are cached for five minutes on the server, so a card can lag the database; the size is read fresh. The compression ratio is `—` until the feature behind it lands, never a placeholder number.
 
-   **The `Sidecar` tab also reports transcript disk usage.** Below the three transcript rows, Server Settings → `Sidecar` shows the recorded transcripts' total size, their `.jsonl` file count and the oldest file's age — read from the same stat-only server-status probe (no transcript content is opened, no budget is echoed back). The card is fetched only while those rows are on screen and has its own `Refresh`. `not visible in this container` means the directory could not be read; an empty directory shows `0 B · 0 files · oldest: none`, which is a real answer and not the same thing.
+   **The transcript rows also report disk usage.** Below `pi_sidecar_transcripts_dir` and the two transcript budgets (`pi_sidecar_transcripts_max_age_days`, `pi_sidecar_transcripts_max_size_mb`, on the `Data & retention` tab) Server Settings shows the recorded transcripts' total size, their `.jsonl` file count and the oldest file's age — read from the same stat-only server-status probe (no transcript content is opened, no budget is echoed back). The card is fetched only while those rows are on screen and has its own `Refresh`. `not visible in this container` means the directory could not be read; an empty directory shows `0 B · 0 files · oldest: none`, which is a real answer and not the same thing.
 
 13. **Review the audit log.**
 
