@@ -337,17 +337,60 @@ class Settings(BaseSettings):
 
     # Jenkins configuration (optional; can be provided per-request via API body).
     # Empty string means "not configured"; checked with `if not self.jenkins_url`.
-    jenkins_url: str = ""
-    jenkins_user: str = ""
-    jenkins_password: str = Field(default="", repr=False)
-    jenkins_ssl_verify: bool = True
+    jenkins_url: str = Field(
+        default="",
+        description=(
+            "Default Jenkins server URL, used when a request does not supply "
+            "one. Empty means every request must name its Jenkins."
+        ),
+    )
+    jenkins_user: str = Field(
+        default="",
+        description=(
+            "Username paired with jenkins_password for the Jenkins API. "
+            "Empty means unauthenticated Jenkins access."
+        ),
+    )
+    jenkins_password: str = Field(
+        default="",
+        repr=False,
+        description=(
+            "Password or API token for jenkins_user. Empty means "
+            "unauthenticated Jenkins access."
+        ),
+    )
+    jenkins_ssl_verify: bool = Field(
+        default=True,
+        description=(
+            "Verify TLS certificates for Jenkins connections. Turn off only "
+            "for a Jenkins with a self-signed certificate."
+        ),
+    )
     jenkins_timeout: int = Field(
-        default=30, gt=0, description="Jenkins API request timeout in seconds"
+        default=30,
+        gt=0,
+        description=(
+            "Timeout for a single Jenkins API request, in seconds. Default 30. "
+            "Jenkins only."
+        ),
     )
 
     # Optional defaults (can be overridden per-request in webhook)
-    tests_repo_url: str | None = None
-    tests_repo_token: SecretStr | None = None  # NEW
+    tests_repo_url: str | None = Field(
+        default=None,
+        description=(
+            "Repository cloned for the tests under analysis, and the issue "
+            "target for GitHub. Empty means a request must supply one."
+        ),
+    )
+    tests_repo_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "GitHub token for the tests repository, used when a request does "
+            "not supply its own. Empty means a private repo needs a "
+            "per-request token."
+        ),
+    )
     feedback_repo_url: str = Field(
         default=DEFAULT_FEEDBACK_REPO_URL,
         description=(
@@ -359,11 +402,42 @@ class Settings(BaseSettings):
     # self-contained definition — its own URL and TLS verification. The
     # ONLY settings shared across methods: jira_project_key,
     # jira_max_results, jira_site_url, enable_jira, enable_jira_issues.
-    jira_email: str | None = None
-    jira_api_token: SecretStr | None = None
-    jira_pat: SecretStr | None = None
-    jira_project_key: str | None = None
-    jira_max_results: int = Field(default=5, gt=0)
+    jira_email: str | None = Field(
+        default=None,
+        description=(
+            "Atlassian account email for the basic auth method, paired with "
+            "the API token. Empty means basic auth cannot be used."
+        ),
+    )
+    jira_api_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Atlassian API token for the basic auth method, paired with the "
+            "email. Empty means basic auth cannot be used."
+        ),
+    )
+    jira_pat: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Personal access token for Jira Server/Data Center (pat auth "
+            "method). Empty means pat auth cannot be used."
+        ),
+    )
+    jira_project_key: str | None = Field(
+        default=None,
+        description=(
+            "Jira project new bug reports go to, and the scope of duplicate "
+            "search (e.g. OCPBUGS). Empty disables Jira."
+        ),
+    )
+    jira_max_results: int = Field(
+        default=5,
+        gt=0,
+        description=(
+            "How many candidate issues are fetched per search before relevance "
+            "is judged."
+        ),
+    )
     # basic method (Jira Cloud email + API token)
     jira_cloud_url: str = Field(
         default="",
@@ -407,11 +481,32 @@ class Settings(BaseSettings):
     # PAT. The stored value is the credential's permanent CLIENT SECRET
     # (ATOA-prefixed); short-lived access tokens are minted from it via
     # client_credentials at auth.atlassian.com (see rootcoz.jira).
-    jira_oauth_client_secret: SecretStr | None = None
-    atlassian_oauth_cloud_id: str | None = None
+    jira_oauth_client_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Permanent client secret (ATOA) of the Atlassian OAuth 2.0 "
+            "credential; access tokens are minted from it. Empty means oauth "
+            "auth cannot be used."
+        ),
+    )
+    atlassian_oauth_cloud_id: str | None = Field(
+        default=None,
+        description=(
+            "Atlassian cloud ID of the site — the sole API locator for the "
+            "oauth and atst methods, whose gateway URLs carry no site name. "
+            "Empty leaves both methods without an API endpoint."
+        ),
+    )
     # Client ID of the OAuth 2.0 credential — required together with the
     # client secret to mint access tokens for the oauth auth method.
-    atlassian_oauth_client_id: str | None = None
+    atlassian_oauth_client_id: str | None = Field(
+        default=None,
+        description=(
+            "Client ID of the same OAuth 2.0 credential, required with its "
+            "secret to mint access tokens. Empty means oauth auth cannot be "
+            "used."
+        ),
+    )
     # atst method (Atlassian service-account scoped token, ATST-prefixed):
     # an already-minted access token sent as Bearer directly against the
     # scoped api.atlassian.com gateway — no token minting, unlike the
@@ -427,7 +522,14 @@ class Settings(BaseSettings):
     )
     # Site URL for browse links (shared across methods; the scoped
     # api.atlassian.com gateway URL of the oauth method cannot yield one).
-    jira_site_url: str | None = None
+    jira_site_url: str | None = Field(
+        default=None,
+        description=(
+            "Jira site URL used for browse links in comments and issue bodies "
+            "— the oauth and atst gateway URLs cannot yield one. Empty leaves "
+            "links out."
+        ),
+    )
     # DB-only Jira auth method selection (Server Settings UI) — REQUIRED
     # for the Jira integration. When set, ONLY that method's fields are
     # used. Unset disables Jira entirely: no credentials are read, no
@@ -443,7 +545,13 @@ class Settings(BaseSettings):
     )
 
     # Explicit Jira toggle (optional)
-    enable_jira: bool | None = None
+    enable_jira: bool | None = Field(
+        default=None,
+        description=(
+            "Turn Jira on or off. Off disables every Jira read and write, "
+            "whatever the credentials."
+        ),
+    )
 
     # Explicit GitHub issue creation toggle (optional)
     enable_github_issues: bool | None = Field(
@@ -461,15 +569,41 @@ class Settings(BaseSettings):
     )
 
     # AI timeout in minutes
-    ai_call_timeout: int = Field(default=10, gt=0)
+    ai_call_timeout: int = Field(
+        default=10,
+        gt=0,
+        description=(
+            "Per-call limit in seconds. A slow call fails that one failure, "
+            "not the job."
+        ),
+    )
 
     # Max concurrent AI calls
-    max_concurrent_ai_calls: int = Field(default=3, gt=0)
+    max_concurrent_ai_calls: int = Field(
+        default=3,
+        gt=0,
+        description=(
+            "How many failures are analysed in parallel. Higher is faster and "
+            "reaches provider rate limits sooner."
+        ),
+    )
 
     # Default AI provider (server-level default, can be overridden per-request)
-    ai_provider: str = ""
+    ai_provider: str = Field(
+        default="",
+        description=(
+            "Default AI provider for analyses. Empty means every request must "
+            "name its own provider."
+        ),
+    )
     # Default AI model (server-level default, can be overridden per-request)
-    ai_model: str = ""
+    ai_model: str = Field(
+        default="",
+        description=(
+            "Default AI model for analyses. Empty means every request must "
+            "name its own model."
+        ),
+    )
 
     # pi-sidecar session transcript recording (sidecar >= 4.12.0).
     # Runtime-toggleable through the sidecar's /transcripts/recording
@@ -487,11 +621,32 @@ class Settings(BaseSettings):
     )
 
     # Peer analysis configuration
-    peer_ai_configs: str = ""  # "provider:model,provider:model" format
-    peer_analysis_max_rounds: int = Field(default=3, ge=1, le=10)
+    peer_ai_configs: str = Field(
+        default="",
+        description=(
+            "Second-opinion models as provider:model, comma-separated. Each "
+            "peer reviews the failure and its verdict is shown beside the "
+            "primary analysis."
+        ),
+    )
+    peer_analysis_max_rounds: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description=(
+            "Maximum debate rounds between the primary analysis and the peer models."
+        ),
+    )
 
     # Additional repositories for AI analysis context
-    additional_repos: str = ""  # "name:url,name:url" format
+    additional_repos: str = Field(
+        default="",
+        description=(
+            "Extra repositories cloned beside the test repository so the AI "
+            "can read the code under test, as name:URL entries — "
+            "comma-separated, with optional :ref and @token suffixes."
+        ),
+    )
     max_workspace_graph_mb: int = Field(
         default=1024,
         ge=16,
@@ -505,7 +660,9 @@ class Settings(BaseSettings):
     max_concurrent_repo_clones: int = Field(
         default=10,
         gt=0,
-        description="Maximum simultaneous additional-repository clones",
+        description=(
+            "How many additional repositories are cloned at the same time per job."
+        ),
     )
     max_concurrent_analyses: int = Field(
         default=10,
@@ -519,10 +676,8 @@ class Settings(BaseSettings):
         default=1,
         ge=1,
         description=(
-            "Commits cloned per repository for a chat workspace. The chat AI"
-            " reads the working tree, never git history, so a deeper clone is"
-            " transferred and stored per repository, paid again on every"
-            " re-clone, and buys history nothing reads."
+            "Commits cloned per repository for a chat workspace. Smaller is "
+            "faster; the chat AI sees only this history."
         ),
     )
     repo_clone_timeout_seconds: int = Field(
@@ -539,10 +694,25 @@ class Settings(BaseSettings):
     )
 
     # Jenkins artifacts configuration
-    jenkins_artifacts_max_size_mb: int = Field(default=500, gt=0)
+    jenkins_artifacts_max_size_mb: int = Field(
+        default=500,
+        gt=0,
+        description=(
+            "Total artifact download budget per Jenkins build. A larger set is "
+            "skipped, not truncated."
+        ),
+    )
 
     # Artifact download toggle
-    get_job_artifacts: bool = True
+    get_job_artifacts: bool = Field(
+        default=True,
+        description=(
+            "Download the build's artifacts (screenshots, logs, reports) into "
+            "the job workspace so the AI can read them. It applies to Jenkins "
+            "and Prow alike, which is why it lives with the analysis rather "
+            "than under one source."
+        ),
+    )
 
     # Prow configuration (optional; can be provided per-request via API body)
     prow_url: str = Field(
@@ -572,9 +742,30 @@ class Settings(BaseSettings):
     )
 
     # Jenkins job monitoring (wait for completion before analysis)
-    wait_for_completion: bool = True
-    poll_interval_minutes: int = Field(default=2, gt=0)
-    max_wait_minutes: int = Field(default=0, ge=0)
+    wait_for_completion: bool = Field(
+        default=True,
+        description=(
+            "Poll the Jenkins build until it finishes before analysing it. "
+            "Off analyses the build in whatever state it is when the job is "
+            "submitted. Jenkins only."
+        ),
+    )
+    poll_interval_minutes: int = Field(
+        default=2,
+        gt=0,
+        description=(
+            "Minutes between build-status checks while waiting for a Jenkins "
+            "build. Jenkins only."
+        ),
+    )
+    max_wait_minutes: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Stop waiting after this many minutes and analyse what exists. "
+            "0 waits indefinitely. Jenkins only."
+        ),
+    )
 
     # Write allow-list — a layer ON TOP of roles, not a replacement for them:
     # with a non-empty value every authenticated non-admin who is not listed
@@ -721,29 +912,77 @@ class Settings(BaseSettings):
 
     # Admin authentication
     admin_key: str = Field(
-        default="", repr=False
+        default="",
+        repr=False,
+        description=(
+            "Bootstrap admin API key: signs in and authenticates as the admin "
+            "superuser. Comes from the ADMIN_KEY deployment env and cannot be "
+            "set here; empty means there is no bootstrap admin."
+        ),
     )  # ROOTCOZ_ADMIN_KEY — bootstraps admin superuser
-    secure_cookies: bool = True  # Set to False for local HTTP dev
+    secure_cookies: bool = Field(
+        default=True,
+        description=(
+            "Mark session cookies Secure and HttpOnly. Turn off only for "
+            "plain-HTTP local access."
+        ),
+    )  # Set to False for local HTTP dev
 
     # Trust reverse-proxy headers (e.g., X-Forwarded-User from OAuth proxy).
     # When enabled, auto-identifies users from the X-Forwarded-User header.
     # Only enable behind a trusted reverse proxy (e.g., OpenShift oauth-proxy).
-    trust_proxy_headers: bool = False
+    trust_proxy_headers: bool = Field(
+        default=False,
+        description=(
+            "Accept X-Forwarded-User as the authenticated identity. Enable "
+            "only behind a proxy that sets it, otherwise any caller can "
+            "claim any username."
+        ),
+    )
 
     # Trusted public base URL — used for result_url and tracker links.
     # When set, _extract_base_url() returns this value verbatim.
     # When unset, _extract_base_url() returns an empty string (relative
     # URLs only) — request Host / X-Forwarded-* headers are never trusted.
-    public_base_url: str | None = None
+    public_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Origin used in links rootcoz posts (comments, issues, "
+            "pull-request notes). Must be reachable by whoever reads them."
+        ),
+    )
 
     # GitHub (optional) -- for comment enrichment (PR status)
-    github_token: SecretStr | None = None
+    github_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Server GitHub token for PR-status enrichment and issue creation. "
+            "Empty disables both."
+        ),
+    )
 
     # Report Portal integration (optional)
     # Flat fields for env var + settings UI compatibility; use `rp` property for typed access.
-    reportportal_url: str | None = None
-    reportportal_api_token: SecretStr | None = None
-    reportportal_project: str | None = None
+    reportportal_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL of the ReportPortal instance. Empty disables ReportPortal."
+        ),
+    )
+    reportportal_api_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "ReportPortal API token that authenticates the push. Empty "
+            "disables ReportPortal."
+        ),
+    )
+    reportportal_project: str | None = Field(
+        default=None,
+        description=(
+            "ReportPortal project that receives the pushes. Empty disables "
+            "ReportPortal."
+        ),
+    )
     reportportal_verify_ssl: bool = Field(
         default=True,
         description="Verify SSL certificates for Report Portal connections. Set to False for self-signed certs.",
@@ -781,8 +1020,20 @@ class Settings(BaseSettings):
 
     # Datadog Events integration (optional). Emits one event per failed
     # test when results are pushed to the 'datadog' exporter plugin.
-    datadog_api_key: SecretStr | None = None
-    datadog_app_key: SecretStr | None = None
+    datadog_api_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Datadog API key that authenticates event submission. Empty "
+            "disables the Datadog exporter."
+        ),
+    )
+    datadog_app_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Datadog application key read by the events API. Empty disables "
+            "the Datadog exporter."
+        ),
+    )
     datadog_site: str | None = Field(
         default=None,
         description=(
@@ -834,9 +1085,28 @@ class Settings(BaseSettings):
     )
 
     # Web Push (VAPID) configuration (optional, server-only)
-    vapid_public_key: str = ""
-    vapid_private_key: str = Field(default="", repr=False)
-    vapid_claim_email: str = ""
+    vapid_public_key: str = Field(
+        default="",
+        description=(
+            "Web-push signing key (VAPID, public half) handed to the browser "
+            "subscription."
+        ),
+    )
+    vapid_private_key: str = Field(
+        default="",
+        repr=False,
+        description=(
+            "Web-push signing key (VAPID, private half); generated with the "
+            "public key when left empty."
+        ),
+    )
+    vapid_claim_email: str = Field(
+        default="",
+        description=(
+            "Web-push contact claim (VAPID). Leave the three VAPID settings "
+            "empty to disable browser push."
+        ),
+    )
 
     # Free AI models: when enabled, every user may run admin-declared free
     # provider+model pairs on server credentials (the free-pair list lives in
@@ -928,8 +1198,8 @@ class Settings(BaseSettings):
         default=0,
         ge=0,
         description=(
-            "Rotated application log files kept. 0 derives it (4-20), from the "
-            "filesystem holding the data directory."
+            "Rotated log files kept on disk. 0 derives a count (4-20) from the "
+            "data filesystem's size."
         ),
     )
     log_min_free_bytes: int = Field(
@@ -1058,11 +1328,26 @@ class Settings(BaseSettings):
         return number
 
     # --- Notifications (#347) ---
-    smtp_host: str = Field(default="", description="SMTP server host for email alerts.")
-    smtp_port: int = Field(default=587, gt=0, description="SMTP server port.")
-    smtp_user: str = Field(default="", description="SMTP username.")
+    smtp_host: str = Field(
+        default="", description="Hostname of the SMTP server that delivers alert email."
+    )
+    smtp_port: int = Field(
+        default=587,
+        gt=0,
+        description=(
+            "SMTP port. 587 also negotiates STARTTLS; every other port gets plain SMTP."
+        ),
+    )
+    smtp_user: str = Field(
+        default="", description="SMTP account username, usually the full email address."
+    )
     smtp_password: SecretStr | None = Field(
-        default=None, description="SMTP password.", repr=False
+        default=None,
+        description=(
+            "Password or app-specific token for the SMTP account above. "
+            "Stored encrypted."
+        ),
+        repr=False,
     )
     smtp_from: str = Field(
         default="", description="From address for email alerts. Defaults to smtp_user."
@@ -1094,10 +1379,14 @@ class Settings(BaseSettings):
         return port
 
     slack_webhook_url: SecretStr | None = Field(
-        default=None, description="Slack webhook URL for alerts.", repr=False
+        default=None,
+        description=(
+            "Incoming-webhook URL alerts are posted to. Empty disables Slack alerts."
+        ),
+        repr=False,
     )
     alert_email_to: str = Field(
-        default="", description="Recipient address for email alerts."
+        default="", description="Recipient of alert email. Empty disables email alerts."
     )
 
     # --- Built-in health monitor (#464) ---
@@ -1130,8 +1419,8 @@ class Settings(BaseSettings):
         ge=1,
         le=100,
         description=(
-            "5xx share of the rolling window, in percent, that the Error rate "
-            "condition watches."
+            "Share of 5xx responses in the rolling window that raises the "
+            "error-rate alert."
         ),
     )
     health_alert_error_rate_seconds: int = Field(

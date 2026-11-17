@@ -1339,7 +1339,7 @@ class TestLogFileReconfigure:
         }
         for key in sorted(rootcoz.main._LOG_FILE_SETTINGS):
             entry = metadata[key]
-            assert entry["category"] == "Server", key
+            assert entry["category"] == "Logging", key
             assert entry["type"] == "integer", key
             assert entry["restart_required"] is False, key
             assert entry["default"] == "0", key

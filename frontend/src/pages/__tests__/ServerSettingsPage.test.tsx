@@ -66,6 +66,7 @@ interface TestSetting {
   jira_verified_method?: string
   persistable?: boolean
   derived?: boolean
+  visible_when?: { key: string; in: string[] }
 }
 
 function mk(key: string, category: string, value = '', extra: Partial<TestSetting> = {}): TestSetting {
@@ -85,6 +86,24 @@ function mk(key: string, category: string, value = '', extra: Partial<TestSettin
     updated_at: '',
     ...extra,
   }
+}
+
+// Which jira_auth_mode values show each conditional Jira field — the API
+// ships this per setting as `visible_when`, so the test fixture mirrors it
+// instead of the page keeping a mode→field map of its own (#585).
+const JIRA_MODES: Record<string, string[]> = {
+  jira_oauth_client_secret: ['oauth'],
+  atlassian_oauth_client_id: ['oauth'],
+  atlassian_oauth_cloud_id: ['oauth', 'atst'],
+  jira_oauth_ssl_verify: ['oauth', 'atst'],
+  jira_email: ['basic'],
+  jira_api_token: ['basic'],
+  jira_cloud_url: ['basic'],
+  jira_cloud_ssl_verify: ['basic'],
+  jira_pat: ['pat'],
+  jira_server_url: ['pat'],
+  jira_server_ssl_verify: ['pat'],
+  jira_atst_token: ['atst'],
 }
 
 const baseSettings = (): TestSetting[] => [
@@ -123,7 +142,9 @@ const baseSettings = (): TestSetting[] => [
   mk('prow_url', 'Prow', 'https://prow.example.com'),
   mk('admin_key', 'Auth & Security', 'key', { sensitive: true }),
   mk('vapid_public_key', 'Web Push', 'vk'),
-]
+].map(s => JIRA_MODES[s.key]
+  ? { ...s, visible_when: { key: 'jira_auth_mode', in: JIRA_MODES[s.key] } }
+  : s)
 
 const get = vi.mocked(api.get)
 const put = vi.mocked(api.put)
@@ -1150,10 +1171,14 @@ describe('ServerSettingsPage active server providers', () => {
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
   })
 
-  it('renders the description served by the settings API with the picker', async () => {
+  it('renders the description served by the settings API in the label tooltip', async () => {
     await openAiTab()
-    // No hardcoded copy in the page: the backend description is the single source.
-    expect(screen.getByText('Description for active_server_providers')).toBeInTheDocument()
+    // No hardcoded copy in the page: the backend description is the single
+    // source, and since #585 it lives in the label tooltip, not on the row.
+    const tooltip = await labelTooltip('active server providers')
+    expect(tooltip.querySelector('[data-setting-description]')?.textContent).toBe(
+      'Description for active_server_providers',
+    )
   })
 
   it('keeps the stored value read-only with a reset when discovery is unavailable', async () => {
@@ -2486,10 +2511,18 @@ describe('ServerSettingsPage enumerated setting pickers', () => {
 // E2E-F27 — rows are named for humans; E2E-F28..F30 — inline editors
 // ---------------------------------------------------------------------------
 
+/**
+ * The label tooltip of a row (hover): the one affordance carrying both the
+ * description and the env var (#585).
+ */
+async function labelTooltip(label: string): Promise<HTMLElement> {
+  await userEvent.setup().hover(screen.getByText(label))
+  return screen.findByRole('tooltip')
+}
+
 /** The env var of a row, revealed by hovering its label (the only affordance). */
 async function envVarTooltip(label: string): Promise<string> {
-  await userEvent.setup().hover(screen.getByText(label))
-  return (await screen.findByRole('tooltip')).textContent ?? ''
+  return (await labelTooltip(label)).querySelector('[data-setting-env-var]')?.textContent ?? ''
 }
 
 /** No row prints its env var: the line slot and its reserved height are gone. */
@@ -2557,8 +2590,9 @@ describe('ServerSettingsPage human labels (E2E-F27)', () => {
     expect(without.textContent).not.toContain('SESSION_TTL_HOURS')
   })
 
-  it('gives an env-var-less row no tooltip at all', async () => {
-    // jira_auth_mode ships without an env var: nothing to reveal, no dead hover.
+  it('gives an env-var-less row a description tooltip and nothing else', async () => {
+    // jira_auth_mode ships without an env var: the tooltip carries only the
+    // description — no empty env-var slot (#585).
     get.mockResolvedValue([
       mk('jira_auth_mode', 'Jira', 'pat', { env_var: '', label: 'Jira auth method' }),
       mk('jira_project_key', 'Jira', 'RC', { env_var: '', label: 'Jira project key' }),
@@ -2566,9 +2600,11 @@ describe('ServerSettingsPage human labels (E2E-F27)', () => {
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
 
-    await userEvent.setup().hover(await screen.findByText('Jira project key'))
-    await new Promise((resolve) => setTimeout(resolve, 300))
-    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+    const tooltip = await labelTooltip('Jira project key')
+    expect(tooltip.querySelector('[data-setting-description]')?.textContent).toBe(
+      'Description for jira_project_key',
+    )
+    expect(tooltip.querySelector('[data-setting-env-var]')).toBeNull()
   })
 
   it('gives jira_auth_mode no row of its own: label and env var live in the Jira card', async () => {
@@ -2814,21 +2850,24 @@ async function openSidecarTab() {
 }
 
 describe('ServerSettingsPage transcript retention (#570)', () => {
-  it('renders both budgets as restart rows with the 0-disables copy and no env var in row text', async () => {
+  it('renders both budgets as restart rows with the 0-disables description in the tooltip', async () => {
     get.mockResolvedValue(retentionSettings() as never)
     await openSidecarTab()
 
-    for (const [key, envVar] of [[AGE_KEY, AGE_ENV], [SIZE_KEY, SIZE_ENV]] as const) {
+    for (const [key, envVar, label] of [
+      [AGE_KEY, AGE_ENV, AGE_LABEL],
+      [SIZE_KEY, SIZE_ENV, SIZE_LABEL],
+    ] as const) {
       const settingRow = row(key)!
       expect(within(settingRow).getByLabelText('Restart required')).toBeInTheDocument()
-      expect(settingRow.textContent).toContain('0 disables')
+      // The description is a tooltip now, not a permanent line on the row.
+      expect(settingRow.textContent).not.toContain('0 disables')
       // The env var lives in the label tooltip, never in permanent row text.
       expect(settingRow.textContent).not.toContain(envVar)
+      const tooltip = await labelTooltip(label)
+      expect(tooltip.querySelector('[data-setting-description]')?.textContent).toContain('0 disables')
+      expect(tooltip.querySelector('[data-setting-env-var]')?.textContent).toBe(envVar)
     }
-
-    // The label tooltip carries the identifier (the operator's link to .env).
-    expect(await envVarTooltip(AGE_LABEL)).toBe(AGE_ENV)
-    expect(await envVarTooltip(SIZE_LABEL)).toBe(SIZE_ENV)
   })
 
   it('saves a budget, and resets the DB override it became', async () => {
@@ -2964,5 +3003,181 @@ describe('ServerSettingsPage transcript retention (#570)', () => {
     mockWithDisk('fail')
     await openSidecarTab()
     expect(await screen.findByText('not visible in this container')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #585 — descriptions as tooltips, visible traps, Jira fields by auth mode
+// ---------------------------------------------------------------------------
+
+describe('ServerSettingsPage descriptions as tooltips (#585)', () => {
+  const DESCRIPTION = 'Timeout for a single Jenkins API request, in seconds. Default 30. Jenkins only.'
+
+  function jenkinsTimeout(): TestSetting[] {
+    return [
+      mk('jenkins_timeout', 'Jenkins', '30', {
+        type: 'integer',
+        label: 'Jenkins timeout',
+        description: DESCRIPTION,
+      }),
+    ]
+  }
+
+  it('keeps the description off the row and puts it in the label tooltip', async () => {
+    get.mockResolvedValue(jenkinsTimeout() as never)
+    renderPage()
+
+    const settingRow = await waitFor(() => {
+      const found = row('jenkins_timeout')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+    // The row collapses to title + control: no inline description paragraph.
+    expect(settingRow.textContent).not.toContain(DESCRIPTION)
+    expect(settingRow.querySelector('[data-setting-description]')).toBeNull()
+    // The label still paints as text, so the tooltip trigger is the label itself.
+    expect(settingRow.textContent).toContain('Jenkins timeout')
+
+    const tooltip = await labelTooltip('Jenkins timeout')
+    expect(tooltip.querySelector('[data-setting-description]')?.textContent).toBe(DESCRIPTION)
+    expect(tooltip.querySelector('[data-setting-env-var]')?.textContent).toBe('JENKINS_TIMEOUT')
+  })
+
+  it('opens the description tooltip on focus, so it is reachable without a pointer', async () => {
+    get.mockResolvedValue(jenkinsTimeout() as never)
+    renderPage()
+    await waitForRow('jenkins_timeout')
+
+    const trigger = row('jenkins_timeout')!.querySelector('[data-setting-title]') as HTMLElement
+    expect(trigger).toHaveAttribute('tabindex', '0')
+
+    // Keyboard entry — no hover anywhere in this test.
+    act(() => trigger.focus())
+    expect(trigger).toHaveFocus()
+    const tooltip = await screen.findByRole('tooltip')
+    expect(tooltip.querySelector('[data-setting-description]')?.textContent).toBe(DESCRIPTION)
+  })
+})
+
+describe('ServerSettingsPage visible value traps (#585)', () => {
+  const TRAP = '0 means wait forever'
+  const DESCRIPTION = 'Stop waiting after this many minutes and analyse what exists. 0 waits indefinitely. Jenkins only.'
+
+  function waitSettings(value: string): TestSetting[] {
+    return [
+      mk('max_wait_minutes', 'Jenkins', value, {
+        type: 'integer',
+        label: 'Max wait (minutes)',
+        description: DESCRIPTION,
+      }),
+    ]
+  }
+
+  async function openJenkinsTab() {
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jenkins' }))
+    await waitForRow('max_wait_minutes')
+  }
+
+  it('renders the "0 waits forever" trap beside the control, not only in the tooltip', async () => {
+    get.mockResolvedValue(waitSettings('0') as never)
+    await openJenkinsTab()
+
+    // Visible without hovering anything.
+    expect(row('max_wait_minutes')!.querySelector('[data-setting-trap]')?.textContent).toContain(TRAP)
+    // ... and the description (which also warns) is available on the label.
+    expect(
+      (await labelTooltip('Max wait (minutes)')).querySelector('[data-setting-description]')?.textContent,
+    ).toBe(DESCRIPTION)
+  })
+
+  it('shows no trap for a real limit, and follows the value while editing', async () => {
+    get.mockResolvedValue(waitSettings('30') as never)
+    await openJenkinsTab()
+    expect(row('max_wait_minutes')!.querySelector('[data-setting-trap]')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit MAX_WAIT_MINUTES' }))
+    const input = screen.getByLabelText('Edit MAX_WAIT_MINUTES')
+    fireEvent.change(input, { target: { value: '0' } })
+    expect(row('max_wait_minutes')!.querySelector('[data-setting-trap]')?.textContent).toContain(TRAP)
+
+    fireEvent.change(input, { target: { value: '5' } })
+    expect(row('max_wait_minutes')!.querySelector('[data-setting-trap]')).toBeNull()
+    // Nothing was written: the trap follows the draft, it does not save it.
+    expect(put).not.toHaveBeenCalled()
+  })
+})
+
+describe('ServerSettingsPage Jira fields by auth mode (#585)', () => {
+  // The six settings every mode shows; jira_auth_mode itself is the card's
+  // selector, so it has no row of its own (E2E-F33).
+  const ALWAYS_VISIBLE = ['enable_jira', 'enable_jira_issues', 'jira_project_key', 'jira_site_url', 'jira_max_results']
+  const CONDITIONAL = Object.keys(JIRA_MODES)
+
+  async function openJiraTab() {
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
+    await waitForRow('jira_project_key')
+  }
+
+  // The table from the issue, per mode — the page derives it from `visible_when`.
+  const MODE_FIELDS: Record<string, string[]> = {
+    basic: ['jira_email', 'jira_api_token', 'jira_cloud_url', 'jira_cloud_ssl_verify'],
+    pat: ['jira_pat', 'jira_server_url', 'jira_server_ssl_verify'],
+    oauth: ['jira_oauth_client_secret', 'atlassian_oauth_client_id', 'atlassian_oauth_cloud_id', 'jira_oauth_ssl_verify'],
+    atst: ['jira_atst_token', 'atlassian_oauth_cloud_id', 'jira_oauth_ssl_verify'],
+  }
+
+  for (const [mode, fields] of Object.entries(MODE_FIELDS)) {
+    it(`shows only the ${mode} fields plus the always-visible ones`, async () => {
+      mockJiraModeSettings(mode)
+      await openJiraTab()
+
+      // The mode's own fields, driven by the `visible_when` the API ships.
+      for (const key of fields) expect(shown(key)).toBe(true)
+      // Every other conditional field is hidden in this mode.
+      for (const key of CONDITIONAL.filter((k) => !fields.includes(k))) {
+        expect(shown(key)).toBe(false)
+      }
+      // The six always-visible settings, one of them as the mode selector.
+      for (const key of ALWAYS_VISIBLE) expect(shown(key)).toBe(true)
+      expect(row('jira_auth_mode')).toBeNull()
+      expect(jiraAuthSelect()).toBeInTheDocument()
+    })
+  }
+
+  it('shows no conditional field while no mode is selected', async () => {
+    mockJiraModeSettings('')
+    await openJiraTab()
+
+    for (const key of CONDITIONAL) expect(shown(key)).toBe(false)
+    for (const key of ALWAYS_VISIBLE) expect(shown(key)).toBe(true)
+  })
+
+  it('re-renders the new mode\'s fields without writing a value it hides', async () => {
+    mockJiraModeSettings('basic')
+    await openJiraTab()
+    expect(shown('jira_email')).toBe(true)
+    expect(shown('jira_pat')).toBe(false)
+
+    chooseJiraMethod('PAT (Bearer)')
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
+    await waitFor(() => expect(shown('jira_pat')).toBe(true))
+    expect(shown('jira_email')).toBe(false)
+
+    // Hiding is rendering only: the sole write is the mode itself, and no
+    // hidden credential was cleared or deleted (#585 decision 6).
+    const writes = put.mock.calls.map(
+      ([, body]) => (body as { settings: Record<string, string> }).settings,
+    )
+    expect(writes).toEqual([{ jira_auth_mode: 'pat' }])
+    expect(vi.mocked(api.delete)).not.toHaveBeenCalled()
+
+    // Switching back proves the hidden value survived untouched (pat is not the
+    // verified method here, so the switch applies without a confirmation).
+    chooseJiraMethod('Email + API token')
+    await waitFor(() => expect(shown('jira_email')).toBe(true))
+    expect(screen.getByRole('button', { name: 'Edit JIRA_EMAIL' })).toHaveTextContent('admin@example.com')
+    expect(put).toHaveBeenCalledTimes(2)
   })
 })

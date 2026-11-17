@@ -435,7 +435,7 @@ class TestTranscriptEndpoints:
         # Since the pi-sidecar >= 4.14.0 runtime toggle, flipping the setting
         # applies to the running sidecar — no restart.
         assert "record_transcripts" not in _RESTART_REQUIRED_SETTINGS
-        assert "record_transcripts" in _SETTINGS_CATEGORIES["AI"]
+        assert "record_transcripts" in _SETTINGS_CATEGORIES["Analysis"]
 
     def test_setting_defaults_off(self, mock_env_vars):
         from rootcoz.config import Settings
