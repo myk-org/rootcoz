@@ -1018,6 +1018,11 @@ async def bounded_model_catalog() -> list[dict[str, Any]] | None:
     global _cold_catalog_attempt
     if _model_catalog_cache is not None:
         # Kept as a call, not the cache read: an overridden catalog still wins.
+        # Warm, this returns the cache without awaiting anything, so the bound
+        # only ever applies to a cold cache. A future writer that invalidates
+        # the cache between that check and this call re-enters the client's
+        # unbounded lookup — structural only if the bound moved into the
+        # client, which is why it is not attempted here (#586 r7).
         return await _get_model_catalog()
     running_loop = asyncio.get_running_loop()
     if _cold_catalog_attempt is not None and (

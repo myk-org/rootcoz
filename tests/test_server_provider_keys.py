@@ -519,6 +519,118 @@ async def test_add_key_to_unmanaged_provider_seeds_full_selection(client, monkey
     assert [m["id"] for m in scoped["openai"]] == ["gpt-5.6-luna"]
 
 
+async def test_add_key_refuses_before_storing_when_the_catalog_is_absent(
+    client, monkeypatch
+):
+    """No catalog answer: refuse while nothing is stored (#586 r7).
+
+    The seed needs the catalog only when the key-scoped capture yields no rows,
+    and it runs after the credential write — so its refusal used to land on an
+    already-managed provider: every model of it withdrawn, no
+    ``provider.key.store`` row, and the retrying admin answered ``409 use
+    rotate-key``. Resolving the seed's catalog answer first moves the refusal
+    to where it changes nothing.
+    """
+    monkeypatch.setattr(
+        rootcoz_main, "bounded_model_catalog", AsyncMock(return_value=None)
+    )
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, RuntimeError("sidecar down"))
+
+    added = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+
+    assert added.status_code == 503
+    # No credential and no selection: the provider is exactly as exposed as it
+    # was before the attempt, so nothing has to be repaired by hand.
+    assert await storage.list_server_ai_providers() == []
+    assert await storage.list_server_provider_models() == []
+    events = (await storage.list_audit_events(action="provider.key.store"))["events"]
+    assert len(events) == 1
+    assert events[0]["target_id"] == "google"
+    assert events[0]["outcome"] == "failure"
+    assert events[0]["details"] == {"reason": "http_503", "provider": "google"}
+    assert SECRET not in json.dumps(events[0])
+
+
+async def test_add_key_with_a_catalog_stores_seeds_and_audits_success(
+    client, monkeypatch
+):
+    """The same add with the catalog available: stored, seeded, one success row."""
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, RuntimeError("sidecar down"))
+
+    added = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+
+    assert added.status_code == 200
+    assert await storage.get_server_ai_credential("google") == SECRET
+    assert {
+        (row["provider"], row["model"])
+        for row in await storage.list_server_provider_models()
+    } == {("google", "gemini-2.5-pro"), ("google", "gemini-2.5-flash")}
+    events = (await storage.list_audit_events(action="provider.key.store"))["events"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "success"
+    assert events[0]["details"] == {"provider": "google", "outcome": "accepted"}
+
+
+async def test_rotate_key_never_needs_a_catalog(client, monkeypatch):
+    """A rotate reseeds nothing by design, so an absent catalog changes nothing.
+
+    The stored selection is authoritative on rotate (#347 r4), so the key is
+    replaced and the rows are untouched — the cold-catalog refusal is an add
+    concern only (#586 r7).
+    """
+    monkeypatch.setattr(
+        rootcoz_main, "bounded_model_catalog", AsyncMock(return_value=None)
+    )
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, RuntimeError("sidecar down"))
+    await storage.set_server_ai_credential("google", "old-key-value-2", "admin")
+    await storage.set_server_provider_models(
+        "google", [{"id": "gemini-2.5-pro"}], "admin"
+    )
+
+    rotated = client.post(
+        "/api/admin/server-providers/google/rotate-key",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+
+    assert rotated.status_code == 200
+    assert await storage.get_server_ai_credential("google") == SECRET
+    assert [
+        (row["provider"], row["model"])
+        for row in await storage.list_server_provider_models()
+    ] == [("google", "gemini-2.5-pro")]
+    events = (await storage.list_audit_events(action="provider.key.rotate"))["events"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "success"
+
+
 async def test_existing_selection_survives_key_add_and_rotate(client, monkeypatch):
     """An admin selection is authoritative — neither add nor rotate reseeds it."""
     _fake_catalog(monkeypatch, CATALOG)

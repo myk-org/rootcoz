@@ -20629,7 +20629,11 @@ async def set_free_ai_models_endpoint(
 
 
 async def _seed_server_provider_selection(
-    provider: str, updated_by: str, request: Request | None = None
+    provider: str,
+    updated_by: str,
+    request: Request | None = None,
+    *,
+    catalog_models: list[str] | None,
 ) -> None:
     """Seed a selection for a newly-keyed provider (#347 r4, #350).
 
@@ -20640,9 +20644,15 @@ async def _seed_server_provider_selection(
     would silently withdraw every model from discovery and
     ``require_selected_server_pair``. Seeding one row per model keeps the
     exposure exactly as it was: the key-scoped listing when the last
-    add/rotate captured one (#350), the full catalog otherwise. An existing
+    add/rotate captured one (#350), ``catalog_models`` otherwise. An existing
     admin selection stays authoritative — a restriction must survive a key
     add — and the rotate path never reseeds for the same reason.
+
+    ``catalog_models`` is resolved by the caller *before* it stores the
+    credential (``_selection_seed_catalog_models``): the add path seeds after
+    the write, so this function must never need to ask for the catalog — a
+    refusal raised here would land on a provider that is already managed
+    (#586 r7). ``None`` means the caller did not resolve one.
     """
     if any(
         row["provider"].lower() == provider.lower()
@@ -20666,21 +20676,7 @@ async def _seed_server_provider_selection(
         # nothing: the key can access no models at all.
         base_models = [row["model"] for row in key_scoped_rows if row["model"]]
     else:
-        catalog = await bounded_model_catalog()
-        if catalog is None:
-            # Seeding nothing would withdraw every model of a now-managed
-            # provider; refuse instead of guessing.
-            raise HTTPException(
-                status_code=503, detail="AI model catalog is temporarily unavailable"
-            )
-        base_models = [
-            entry["id"]
-            for entry in catalog
-            if isinstance(entry.get("provider"), str)
-            and entry["provider"].lower() == provider.lower()
-            and isinstance(entry.get("id"), str)
-            and entry["id"]
-        ]
+        base_models = list(catalog_models or [])
     entries = [{"id": model, "free": model in free_models} for model in base_models]
     # Free pairs whose model left the catalog survive the seeding (stale
     # pairs are ignored at runtime) so a key add never rewrites unrelated
@@ -21273,6 +21269,38 @@ async def _resolve_verification_model(
     return models, None
 
 
+async def _selection_seed_catalog_models(provider: str) -> list[str] | None:
+    """The catalog ids a fresh key add would seed, resolved before the write.
+
+    ``None`` when the provider already has a selection: the seed is a no-op
+    and needs no catalog. Otherwise this answers what
+    :func:`_seed_server_provider_selection` falls back to when the key-scoped
+    capture yields no rows, and it answers it *before* the credential is
+    stored — the seed runs after that write, so a refusal there would leave a
+    managed provider with no selection (every model withdrawn), no audit row,
+    and a ``409 use rotate-key`` on the retry (#586 r7).
+    """
+    if any(
+        row["provider"].lower() == provider.lower()
+        for row in await storage.list_server_provider_models()
+    ):
+        return None
+    catalog = await bounded_model_catalog()
+    if catalog is None:
+        # Unknowable where the seed would land: refuse while nothing is stored.
+        raise HTTPException(
+            status_code=503, detail="AI model catalog is temporarily unavailable"
+        )
+    return [
+        entry["id"]
+        for entry in catalog
+        if isinstance(entry.get("provider"), str)
+        and entry["provider"].lower() == provider.lower()
+        and isinstance(entry.get("id"), str)
+        and entry["id"]
+    ]
+
+
 async def _verify_and_store_server_provider_key(
     provider: str,
     body: ServerProviderKeyInput,
@@ -21369,31 +21397,8 @@ async def _verify_and_store_server_provider_key(
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider}' has no stored key"
         )
-    # The generation this write assigned, returned from inside the upsert's
-    # transaction — never re-read: an overlapping rotation (even to the same
-    # key) landing before a separate read would hand this capture the newer
-    # credential's generation and let its stale snapshot through (#350 r3).
-    generation = await storage.set_server_ai_credential(
-        provider, key, request.state.username or "admin"
-    )
-    # Key-scoped capture (#350): after a successful verification, record the
-    # models this key can actually access. A listing-unsupported provider or
-    # a transient discovery failure never blocks the add — a failed
-    # discovery clears any previous key's rows (this key's listing is
-    # unknown, never the old key's), and the server pool falls back to the
-    # static catalog for this provider. The capture is bound to the
-    # credential generation just written (#350 r2): a concurrent rotate
-    # bumps it and this capture's writes are skipped.
-    key_models, capture_status = await _capture_key_scoped_models(
-        provider,
-        key,
-        keep_on_failure=False,
-        generation=generation,
-    )
-    if not replacing:
-        await _seed_server_provider_selection(
-            provider, request.state.username or "admin", request=request
-        )
+    # One action per attempt, named before the first mutation so a failure
+    # after it still lands on the right action (#586 r7).
     action = (
         "provider.key.rotate"
         if replacing
@@ -21401,29 +21406,105 @@ async def _verify_and_store_server_provider_key(
         if promoted
         else "provider.key.store"
     )
-    await record_audit(
-        action=action,
-        actor=request.state.username,
-        message=(
-            f"Admin '{request.state.username}' "
-            + (
-                "promoted the deployment credential"
-                if promoted
-                else "stored server provider key"
+    try:
+        # The seed below runs after the credential write, so everything it
+        # needs is resolved here, while a refusal still changes nothing: a
+        # refusal after the write would leave the provider managed with no
+        # selection rows (every model withdrawn), no audit row, and a 409
+        # "use rotate-key" on the retry (#586 r7). Resolved for a fresh add
+        # only — a rotate never reseeds, by design, so it needs no catalog.
+        seed_catalog_models = (
+            None if replacing else await _selection_seed_catalog_models(provider)
+        )
+        # The generation this write assigned, returned from inside the upsert's
+        # transaction — never re-read: an overlapping rotation (even to the same
+        # key) landing before a separate read would hand this capture the newer
+        # credential's generation and let its stale snapshot through (#350 r3).
+        generation = await storage.set_server_ai_credential(
+            provider, key, request.state.username or "admin"
+        )
+        # Key-scoped capture (#350): after a successful verification, record the
+        # models this key can actually access. A listing-unsupported provider or
+        # a transient discovery failure never blocks the add — a failed
+        # discovery clears any previous key's rows (this key's listing is
+        # unknown, never the old key's), and the server pool falls back to the
+        # static catalog for this provider. The capture is bound to the
+        # credential generation just written (#350 r2): a concurrent rotate
+        # bumps it and this capture's writes are skipped.
+        key_models, capture_status = await _capture_key_scoped_models(
+            provider,
+            key,
+            keep_on_failure=False,
+            generation=generation,
+        )
+        if not replacing:
+            # Last write of the add: the credential is durable by now, so this
+            # seed cannot refuse — its catalog answer was resolved above.
+            await _seed_server_provider_selection(
+                provider,
+                request.state.username or "admin",
+                request=request,
+                catalog_models=seed_catalog_models,
             )
-            + f" for '{provider}' (verified"
-            + (
-                f", {len(key_models)} key-scoped models"
-                if capture_status == "supported"
-                else ""
+        await record_audit(
+            action=action,
+            actor=request.state.username,
+            message=(
+                f"Admin '{request.state.username}' "
+                + (
+                    "promoted the deployment credential"
+                    if promoted
+                    else "stored server provider key"
+                )
+                + f" for '{provider}' (verified"
+                + (
+                    f", {len(key_models)} key-scoped models"
+                    if capture_status == "supported"
+                    else ""
+                )
+                + ")"
+            ),
+            target_type="provider",
+            target_id=provider,
+            details={"provider": provider, "outcome": "accepted"},
+            request=request,
+        )
+    except HTTPException as exc:
+        # A promotion's own route writes its refusal rows (exactly one per
+        # attempt); add/rotate answer their refusals here.
+        if not promoted:
+            await _record_refused_attempt(
+                action=action,
+                request=request,
+                message=(
+                    f"Admin '{request.state.username}' stored server provider"
+                    f" key for '{provider}'"
+                ),
+                target_type="provider",
+                target_id=provider,
+                exc=exc,
+                details={"provider": provider},
             )
-            + ")"
-        ),
-        target_type="provider",
-        target_id=provider,
-        details={"provider": provider, "outcome": "accepted"},
-        request=request,
-    )
+        raise
+    except Exception:
+        # A mutating attempt is never invisible because a later step broke.
+        # shortcut: a storage failure between the credential write and the seed
+        # leaves the provider keyed with no selection (a 500, not a rollback —
+        # undoing needs a generation-bound credential delete); upgrade if a real
+        # database failure is ever seen here (#586 r7).
+        await _record_failed_attempt(
+            action=action,
+            request=request,
+            message=(
+                f"Admin '{request.state.username}' stored server provider key"
+                f" for '{provider}'"
+            ),
+            target_type="provider",
+            target_id=provider,
+            reason="store_interrupted",
+            details={"provider": provider},
+        )
+        raise
     return JSONResponse(
         content=strip_sensitive_from_response(
             {
