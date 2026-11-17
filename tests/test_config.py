@@ -5,7 +5,7 @@ import os
 from unittest.mock import patch
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from rootcoz.config import (
     Settings,
@@ -1289,3 +1289,74 @@ class TestDefaultUserRole:
             pytest.raises(Exception, match="DEFAULT_USER_ROLE"),
         ):
             Settings(_env_file=None)
+
+
+class TestSSOIssuerPaths:
+    """Only the settings an origin is appended to refuse a path."""
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("sso_openshift_issuer", "https://oauth-openshift.example.com/some/path"),
+            ("sso_openshift_api_url", "https://api.cluster:6443/extra"),
+        ],
+    )
+    def test_a_path_on_an_openshift_origin_is_refused(
+        self, field: str, value: str
+    ) -> None:
+        """The provider appends /oauth/... and /api/... to these origins."""
+        with (
+            patch.dict(os.environ, _build_env(), clear=True),
+            pytest.raises(ValidationError, match="bare origin"),
+        ):
+            Settings(_env_file=None, **{field: value})
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("sso_openshift_issuer", "https://oauth-openshift.example.com"),
+            ("sso_openshift_api_url", "https://api.cluster:6443"),
+            # A Keycloak realm issuer is a path by design, so it still passes.
+            ("sso_redhat_issuer", "https://sso.example.com/auth/realms/myrealm"),
+        ],
+    )
+    def test_a_bare_origin_or_realm_path_is_accepted(
+        self, field: str, value: str
+    ) -> None:
+        """A bare origin, and the Red Hat realm path, are the valid shapes."""
+        with patch.dict(os.environ, _build_env(), clear=True):
+            assert getattr(Settings(_env_file=None, **{field: value}), field) == value
+
+
+class TestDeviceCodePollInterval:
+    """The poll interval must leave the CLI time to poll a live code."""
+
+    @pytest.mark.parametrize("interval", [600, 601])
+    def test_interval_at_or_above_the_ttl_is_refused(self, interval: int) -> None:
+        """An interval that long means no poll happens before the code expires."""
+        with (
+            patch.dict(os.environ, _build_env(), clear=True),
+            pytest.raises(ValidationError, match="must be shorter than"),
+        ):
+            Settings(
+                _env_file=None,
+                sso_device_code_ttl_seconds=600,
+                sso_device_poll_interval_seconds=interval,
+            )
+
+    def test_interval_below_the_ttl_is_accepted(self) -> None:
+        """A shorter interval leaves room for at least one poll."""
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings(
+                _env_file=None,
+                sso_device_code_ttl_seconds=600,
+                sso_device_poll_interval_seconds=599,
+            )
+            assert settings.sso_device_poll_interval_seconds == 599
+
+    def test_defaults_are_accepted(self) -> None:
+        """The shipped defaults (600s TTL, 5s interval) stay valid."""
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings(_env_file=None)
+            assert settings.sso_device_code_ttl_seconds == 600
+            assert settings.sso_device_poll_interval_seconds == 5

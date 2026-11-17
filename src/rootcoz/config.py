@@ -869,6 +869,12 @@ class Settings(BaseSettings):
         URL is not an issuer, so telling an admin "the issuer must be https" about
         it would name the wrong field back to them.
 
+        A path is refused for the two OpenShift settings but allowed for the Red Hat
+        issuer: OpenShift's provider appends ``/oauth/authorize``, ``/oauth/token``
+        and ``/api/...`` to these origins, so a path left on them misroutes sign-in,
+        whereas the Red Hat issuer is a Keycloak realm whose path
+        (``/auth/realms/<realm>``) is part of the value in ``iss``.
+
         Args:
             value: The raw setting.
             info: Which field is being validated, for the refusal's wording.
@@ -885,9 +891,12 @@ class Settings(BaseSettings):
         if not issuer.startswith(("https://", "http://")):
             msg = f"{issuer!r} is not an http(s) URL"
             raise ValueError(msg)
+        # The Red Hat issuer is a Keycloak realm and carries ``/auth/realms/<realm>``;
+        # the two OpenShift settings are origins the provider appends paths to.
+        is_redhat_realm = info.field_name == "sso_redhat_issuer"
         is_api_url = info.field_name == "sso_openshift_api_url"
         noun = "cluster API URL" if is_api_url else "issuer"
-        problem = issuer_problem(issuer, noun=noun)
+        problem = issuer_problem(issuer, noun=noun, allow_path=is_redhat_realm)
         if problem is not None:
             raise ValueError(f"{issuer!r}: {problem}")
         return issuer.rstrip("/")
@@ -1575,6 +1584,28 @@ class Settings(BaseSettings):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _validate_device_poll_interval(self) -> Settings:
+        """Refuse a poll interval that outlives the code it polls for.
+
+        The two settings are meaningful only against each other: a CLI that waits
+        the configured interval between polls would never poll a device code
+        before it expires, so the login could not complete.
+
+        Raises:
+            ValueError: When the interval is not strictly shorter than the TTL.
+        """
+        if self.sso_device_poll_interval_seconds >= self.sso_device_code_ttl_seconds:
+            msg = (
+                "sso_device_poll_interval_seconds"
+                f" ({self.sso_device_poll_interval_seconds}s) must be shorter than"
+                " sso_device_code_ttl_seconds"
+                f" ({self.sso_device_code_ttl_seconds}s): the CLI could never poll"
+                " the device code before it expires"
+            )
+            raise ValueError(msg)
+        return self
+
     @property
     def sso_allowed_domains_set(self) -> frozenset[str]:
         """The SSO domain allow-list, normalised; empty means "no restriction"."""
@@ -1791,7 +1822,9 @@ def jira_site_url_error(value: str | None) -> str | None:
     return None
 
 
-def issuer_problem(url: str, *, noun: str = "issuer") -> str | None:
+def issuer_problem(
+    url: str, *, noun: str = "issuer", allow_path: bool = True
+) -> str | None:
     """Why a configured OIDC issuer or cluster API URL is unusable.
 
     Discovery is built by appending ``/.well-known/openid-configuration`` to an
@@ -1806,6 +1839,9 @@ def issuer_problem(url: str, *, noun: str = "issuer") -> str | None:
         url: The value as configured.
         noun: What the setting is called, so a refusal names the field the admin
             actually typed into.
+        allow_path: Whether the value may carry a path. A Keycloak realm issuer
+            needs one (``/auth/realms/<realm>``); an origin the provider appends
+            its own paths to must not have one.
 
     Returns:
         A human-readable reason to refuse it, or ``None``.
@@ -1837,6 +1873,14 @@ def issuer_problem(url: str, *, noun: str = "issuer") -> str | None:
         )
     if parsed.path.rstrip("/").endswith("/.well-known"):
         return f"the {noun} must not be the well-known discovery prefix"
+    if not allow_path and parsed.path not in ("", "/"):
+        # The OpenShift provider builds ``<origin>/oauth/authorize``, ``/oauth/token``
+        # and ``<api url>/apis/...`` itself, so a path here is concatenated in front
+        # of them and the sign-in silently targets a URL that does not exist.
+        return (
+            f"the {noun} must be a bare origin without a path, because the"
+            " provider appends its own /oauth/... and /api/... paths to it"
+        )
     return None
 
 

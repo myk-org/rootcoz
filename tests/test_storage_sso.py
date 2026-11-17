@@ -184,6 +184,39 @@ async def test_identity_links_lookup_list_and_unlink(setup_test_db: Path) -> Non
         assert await storage.unlink_user_identity("alice", "google") == "not_found"
 
 
+async def test_a_link_reads_its_row_inside_the_link_transaction(
+    setup_test_db: Path,
+) -> None:
+    """A concurrent unlink must not turn the return into an IndexError.
+
+    Reading the row again on a second connection after the commit could see the
+    identity already gone and index an empty list. The patched helper stands in
+    for that vanishing row: it reports nothing outside a write transaction, so
+    the return has to come from the transaction that made the row.
+    """
+    real_select = storage._select_identities
+
+    async def _vanishes_outside_a_transaction(db, where, params, *, order=""):
+        if not db.in_transaction:
+            return []
+        return await real_select(db, where, params, order=order)
+
+    with (
+        patch.object(storage, "DB_PATH", setup_test_db),
+        patch.object(storage, "_select_identities", _vanishes_outside_a_transaction),
+    ):
+        await storage.create_user("alice")
+        created = await storage.add_user_identity(
+            "alice", "google", "sub-1", email="alice@example.com"
+        )
+        # A repeat link returns the row it already holds, the same way.
+        again = await storage.add_user_identity("alice", "google", "sub-1")
+
+    assert created["subject"] == "sub-1"
+    assert created["email"] == "alice@example.com"
+    assert again == created
+
+
 async def test_create_with_identity_returns_the_api_key(setup_test_db: Path) -> None:
     """The key is part of creating the account: nothing else is ever shown."""
     raw_key = await storage.create_user_with_identity(
@@ -496,6 +529,7 @@ async def test_a_first_login_ticket_is_single_use(setup_test_db: Path) -> None:
             subject="sub-1",
             email="alice@example.com",
             suggested_username="alice",
+            binding="browser-1",
         )
 
         peeked = await storage.peek_sso_ticket(ticket)
@@ -523,7 +557,11 @@ async def test_concurrent_ticket_consumption_has_exactly_one_winner(
 
     with patch.object(storage, "DB_PATH", setup_test_db):
         ticket = await storage.create_sso_ticket(
-            provider="google", subject="s", email=None, suggested_username="alice"
+            provider="google",
+            subject="s",
+            email=None,
+            suggested_username="alice",
+            binding="browser-1",
         )
 
         results = await asyncio.gather(
@@ -538,7 +576,11 @@ async def test_only_the_hashed_ticket_is_stored(setup_test_db: Path) -> None:
     """The URL value is a credential; the table must not hold it."""
     with patch.object(storage, "DB_PATH", setup_test_db):
         ticket = await storage.create_sso_ticket(
-            provider="google", subject="s", email=None, suggested_username="alice"
+            provider="google",
+            subject="s",
+            email=None,
+            suggested_username="alice",
+            binding="browser-1",
         )
         async with storage._connect_db() as db:
             cursor = await db.execute("SELECT * FROM sso_link_tickets")
@@ -552,7 +594,11 @@ async def test_an_expired_ticket_cannot_be_used(setup_test_db: Path) -> None:
     """Both reads check the clock; the purge is housekeeping, not the gate."""
     with patch.object(storage, "DB_PATH", setup_test_db):
         ticket = await storage.create_sso_ticket(
-            provider="google", subject="s", email=None, suggested_username="alice"
+            provider="google",
+            subject="s",
+            email=None,
+            suggested_username="alice",
+            binding="browser-1",
         )
         past = (datetime.now(UTC) - timedelta(minutes=1)).strftime(
             storage.SQL_TIMESTAMP_FORMAT
@@ -564,6 +610,71 @@ async def test_an_expired_ticket_cannot_be_used(setup_test_db: Path) -> None:
         assert await storage.peek_sso_ticket(ticket) is None
         assert await storage.consume_sso_ticket(ticket) is None
         assert await storage.purge_expired_sso_tickets() == 1
+
+
+async def test_the_ticket_binding_is_stored_and_is_not_derivable(
+    setup_test_db: Path,
+) -> None:
+    """The ticket travels in a URL fragment, so it cannot be the credential.
+
+    The binding is minted separately by the browser that started the login, and
+    the row keeps only its digest — a digest nobody can compute from the ticket.
+    """
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        ticket = await storage.create_sso_ticket(
+            provider="google",
+            subject="s",
+            email=None,
+            suggested_username="alice",
+            binding="browser-secret",
+        )
+        stored = await storage.sso_ticket_binding_hash(ticket)
+        unknown = await storage.sso_ticket_binding_hash("not-a-ticket")
+
+    assert stored == storage._hash_token("browser-secret")
+    # Anyone holding the ticket can hash it; that must not be what the row holds.
+    assert stored != storage._hash_token(ticket)
+    assert stored != storage._hash_token("another-browser")
+    assert unknown is None
+
+
+async def test_an_expired_ticket_yields_no_binding(setup_test_db: Path) -> None:
+    """The binding is checked against a live row only, like every other read."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        ticket = await storage.create_sso_ticket(
+            provider="google",
+            subject="s",
+            email=None,
+            suggested_username="alice",
+            binding="browser-secret",
+        )
+        past = (datetime.now(UTC) - timedelta(minutes=1)).strftime(
+            storage.SQL_TIMESTAMP_FORMAT
+        )
+        async with storage._connect_db() as db:
+            await db.execute("UPDATE sso_link_tickets SET expires_at = ?", (past,))
+            await db.commit()
+
+        assert await storage.sso_ticket_binding_hash(ticket) is None
+
+
+async def test_a_ticket_without_a_binding_yields_none(setup_test_db: Path) -> None:
+    """A row minted before the column existed cannot be trusted, so it is refused."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        ticket = await storage.create_sso_ticket(
+            provider="google",
+            subject="s",
+            email=None,
+            suggested_username="alice",
+            binding="browser-secret",
+        )
+        async with storage._connect_db() as db:
+            await db.execute("UPDATE sso_link_tickets SET binding_hash = NULL")
+            await db.commit()
+
+        # The ticket itself is still live; only the binding is missing.
+        assert await storage.peek_sso_ticket(ticket) is not None
+        assert await storage.sso_ticket_binding_hash(ticket) is None
 
 
 async def test_a_device_code_is_approved_then_redeemed_exactly_once(

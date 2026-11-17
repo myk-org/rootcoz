@@ -58,17 +58,24 @@ Enterprise Server installation serves its own endpoints and is not supported yet
 
 ### OpenShift
 
-Create an OAuth client on the cluster (`oauthclients.oauth.openshift.io`), set
-`SSO_OPENSHIFT_ISSUER` to the cluster's OAuth server origin
-(`https://oauth-openshift.apps.<cluster>`), and set `SSO_OPENSHIFT_API_URL` to the
-cluster API server (`https://api.<cluster>:6443`). Both are required, and they are
-not the same origin: the OAuth server serves only `/oauth/*` (authorize and
-token), while the account, its identities and the email are read from the API
-server — with only the OAuth origin set, every login fails at the account lookup.
-The API URL follows the same rule as the issuer: `https`, no path, and `http` only
-for a loopback development server. An OpenShift OAuth server publishes no
-`email_verified` claim, so if you use the domain allow-list the address itself
-decides: an identity object is written by the cluster admin (or by the IdP
+Create an OAuth client on the cluster (`oauthclients.oauth.openshift.io`) and set
+two origins. `SSO_OPENSHIFT_ISSUER` is the cluster's **OAuth server**
+(`https://oauth-openshift.apps.<cluster>`): it is asked for exactly two things,
+`/oauth/authorize` and `/oauth/token`, so it is the code exchange and nothing
+else. It must be `https` with no path, no query and no `/.well-known/…`; `http` is
+accepted only for a loopback development server.
+
+`SSO_OPENSHIFT_API_URL` is the cluster **API server** (`https://api.<cluster>:6443`),
+and it is where the account, its identities and its email are read — with the
+opaque access token the OAuth server just issued. That is why both settings are
+required: with only the OAuth origin set, nothing can name the account, and every
+login fails at the account lookup. The API URL is held to the same shape as the
+origin — `https`, no path, `http` only for a loopback server.
+
+Neither value is an OIDC issuer, so there is no `iss` claim to match: a cluster's
+OAuth server issues opaque access tokens and never mints an ID token. It publishes
+no `email_verified` claim either, so if you use the domain allow-list the address
+itself decides: an identity object is written by the cluster admin (or by the IdP
 mapping the admin configured), never by the end user, so the address it carries
 is authoritative and admitted on its domain alone.
 
@@ -78,18 +85,21 @@ Create a client in the realm, set `SSO_REDHAT_ISSUER` to the realm's issuer URL,
 and add `{PUBLIC_BASE_URL}/login` to the client's *Valid post logout redirect
 URIs* if you want signing out to end the Keycloak session too.
 
-**The issuer must be exactly the value the provider puts in its ID token's `iss`
-claim** — no `/.well-known/…` suffix and no extra path — and it must be `https`.
-Plaintext is accepted only for a loopback development server. A malformed issuer
-is rejected when the setting is saved, rather than silently removing the button.
+`SSO_REDHAT_ISSUER` is a real OIDC issuer — a Keycloak realm — so it must be
+**exactly the value the realm puts in its ID token's `iss` claim**. The realm path
+(`/realms/<realm>`) belongs to that value; a `/.well-known/…` suffix never does.
+It must be `https`, and plaintext is accepted only for a loopback development
+server. A malformed issuer is rejected when the setting is saved, rather than
+silently removing the button.
 
 
 ### What verifies the tokens
 
-The providers talk to their IdP directly (`httpx`) and verify ID tokens with
-`joserfc`: the signing algorithm is pinned to RS256, the key comes from the
-issuer's JWKS, and `iss`, `aud`, `azp`, `exp`, `iat` and `nonce` are each checked
-explicitly — a token that omits `exp` or `iat` is refused, not waved through. This is deliberately not built on Authlib — the checks that matter
+The OIDC providers talk to their IdP directly (`httpx`), and ID tokens are
+verified with `joserfc`: the signing algorithm is pinned to RS256, the key comes
+from the issuer's JWKS, and `iss`, `aud`, `azp`, `exp`, `iat` and `nonce` are each
+checked explicitly — a token that omits `exp` or `iat` is refused, not waved
+through. This is deliberately not built on Authlib — the checks that matter
 here are the claim-level ones this repository needs to state in one place (a
 stolen token from a sibling client, an unverified address, a nonce from another
 attempt), and the discovery document is pinned to the configured issuer with every
@@ -109,7 +119,8 @@ OpenShift is), never by a weaker path through the OIDC one.
 1. The person picks a provider on the login page and is sent to it with a sealed
    state cookie (CSRF nonce, PKCE verifier, nonce and destination).
 2. The provider redirects back. RootCoz verifies the state, exchanges the code and
-   verifies the ID token — signature, issuer, audience, expiry and nonce.
+   — for the two OIDC providers — verifies the ID token: signature, issuer,
+   audience, expiry and nonce.
 3. The identity is looked up **by `(provider, subject)` only**. The username and
    the email are never used to find an account: a local `ruth` and an IdP `ruth`
    can be different people, and one person can be `ruth` in one place and
@@ -216,10 +227,11 @@ rootcoz auth sso-approve ABCD-EFGH   # approve from a terminal you are signed in
 Signing out deletes the local session and, where the provider supports it, sends
 the browser on to end the provider's session too. Google and GitHub have no
 end-session endpoint, so there the provider's own session survives — use a private
-window or sign out at the provider if that matters.
+window or sign out at the provider if that matters. OpenShift has none either, so
+there signing out is local only.
 
-No `id_token_hint` is sent: the flow never stores the ID token. Keycloak and OpenShift
-accept the call without it, which is why the client id is included in the URL.
+No `id_token_hint` is sent: the flow never stores the ID token. Keycloak accepts
+the call without it, which is why the client id is included in the URL.
 
 ## Trusted proxy instead of SSO
 

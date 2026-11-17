@@ -19413,11 +19413,16 @@ async def sso_callback(provider: str, request: Request) -> RedirectResponse:
         # No account is linked. A name is never used to find one, so the person
         # decides: claim an existing account with its own credential, or create
         # one. The ticket carries the verified identity for that decision.
+        # Random, not a digest of the ticket: the ticket travels in the fragment
+        # and is readable by anyone who sees the link, so the second half has to
+        # be something only this browser was ever handed.
+        binding = auth_sso_state.new_ticket_binding()
         ticket = await storage.create_sso_ticket(
             provider=outcome.provider,
             subject=outcome.subject,
             email=outcome.email,
             suggested_username=outcome.suggested_username,
+            binding=binding,
             next_path=auth_sso_state.safe_next(attempt.next_path),
         )
         await record_audit(
@@ -19443,9 +19448,11 @@ async def sso_callback(provider: str, request: Request) -> RedirectResponse:
         )
         # The URL alone is not enough: this cookie ties the ticket to the browser
         # that ran the IdP flow, so a leaked link cannot be redeemed elsewhere.
+        # It carries the binding itself (its digest is what storage keeps), never
+        # the ticket or a digest of it.
         response.set_cookie(
             auth_sso_state.TICKET_COOKIE,
-            auth_sso_state.ticket_binding(ticket),
+            binding,
             httponly=True,
             samesite="lax",
             secure=settings.secure_cookies,
@@ -19574,20 +19581,33 @@ async def _sso_issue_session(
     return response
 
 
-def _require_ticket_binding(request: Request, ticket: str) -> None:
+async def _require_ticket_binding(request: Request, ticket: str) -> None:
     """Refuse a ticket presented without the cookie it was issued with.
+
+    The digest to compare against is read from the ticket's row, because the
+    binding is random and cannot be recomputed from the ticket. A row minted
+    before bindings were independent stores no digest at all, and such a ticket
+    is refused rather than trusted.
 
     Args:
         request: The request carrying the binding cookie.
         ticket: The raw ticket from the body.
 
     Raises:
-        HTTPException: 404 when the binding is absent or does not match — the
-            same answer an expired ticket gets, so a stolen link learns nothing.
+        HTTPException: 404 when the stored binding is absent, the cookie is
+            absent, or the two do not match — the same answer an expired ticket
+            gets, so a stolen link learns nothing about which it hit, and nothing
+            is logged here for the same reason.
     """
-    expected = auth_sso_state.ticket_binding(ticket)
+    stored = await storage.sso_ticket_binding_hash(ticket)
     presented = read_cookie(request, auth_sso_state.TICKET_COOKIE)
-    if not presented or not hmac.compare_digest(presented.encode(), expected.encode()):
+    if (
+        not stored
+        or not presented
+        or not hmac.compare_digest(
+            auth_sso_state.ticket_binding_hash(presented), stored
+        )
+    ):
         raise HTTPException(status_code=404, detail="This sign-in link has expired")
 
 
@@ -19654,7 +19674,7 @@ async def sso_ticket(request: Request) -> JSONResponse:
     """
     body = await _read_json_object(request)
     ticket = str(body.get("ticket", ""))
-    _require_ticket_binding(request, ticket)
+    await _require_ticket_binding(request, ticket)
     record = await _ticket_or_404(ticket)
     return JSONResponse(
         content={
@@ -19687,7 +19707,7 @@ async def sso_create_account(request: Request) -> Response:
     body = await _read_json_object(request)
     ticket = str(body.get("ticket", ""))
     username = str(body.get("username", ""))
-    _require_ticket_binding(request, ticket)
+    await _require_ticket_binding(request, ticket)
     record = await _ticket_or_404(ticket)
     settings = get_settings()
     # Validate before spending the ticket: a rejected name must not cost the
@@ -19760,8 +19780,8 @@ async def sso_link_account(request: Request) -> Response:
 
     Raises:
         HTTPException: 404 for a dead ticket, 401 for bad credentials, 403 when
-            the account may not act (including a viewer, who may not add a
-            sign-in method), 409 when the link conflicts.
+            the account may not act (pending, rejected, disabled, or a viewer,
+            who may not add a sign-in method), 409 when the link conflicts.
     """
     body = await _read_json_object(request)
     ticket = str(body.get("ticket", ""))
@@ -19770,7 +19790,7 @@ async def sso_link_account(request: Request) -> Response:
     if not username or not api_key:
         raise HTTPException(status_code=400, detail="Username and api_key are required")
 
-    _require_ticket_binding(request, ticket)
+    await _require_ticket_binding(request, ticket)
     record = await _ticket_or_404(ticket)
     settings = get_settings()
     # Verify before spending the ticket: a mistyped key must not cost another
@@ -19810,10 +19830,24 @@ async def sso_link_account(request: Request) -> Response:
             request, record["provider"], f"account_{block_reason}", subject=username
         )
         raise HTTPException(status_code=403, detail="Account cannot be used to sign in")
+    # ``is_admin`` is also the role check below, so it is read once here. A
+    # pending or rejected account may hold a valid key, but claiming a provider
+    # identity is a write on that account, so it gets the same approval gate as
+    # every other path — an administrator is exempt by their role, not their
+    # status.
+    role, is_admin = role_and_admin(verified.account)
+    if auth_approval.approval_gate_applies(is_admin=is_admin, settings=settings):
+        status = await storage.get_user_status(username) or ""
+        if auth_approval.is_approval_blocked(status):
+            await _audit_sso_refusal(
+                request, record["provider"], f"account_{status}", subject=username
+            )
+            raise HTTPException(
+                status_code=403, detail="Account cannot be used to sign in"
+            )
     # Linking is the mirror of unlinking, which needs a reviewer: a viewer who may
     # not remove a method must not be able to add one. Same rule as the link-start
     # route and the callback, applied to the account this credential proves.
-    role, _is_admin = role_and_admin(verified.account)
     if role not in _REVIEWER_ROLES:
         await _audit_sso_refusal(
             request, record["provider"], "link_forbidden_role", subject=username

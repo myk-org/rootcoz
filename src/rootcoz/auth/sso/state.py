@@ -76,17 +76,30 @@ class LoginAttempt:
     link_to: str = ""
 
 
-def ticket_binding(ticket: str) -> str:
-    """The value the browser must present alongside a ticket.
+def new_ticket_binding() -> str:
+    """Mint the value the browser must present alongside a ticket.
 
-    Args:
-        ticket: The raw ticket from the URL fragment.
+    Deliberately *not* derived from the ticket: a digest of the ticket is
+    computable by whoever saw the fragment — browser history, a shared screen, a
+    pasted link — which is exactly the leak this value exists to survive.
 
     Returns:
-        A digest of the ticket. The cookie carries this rather than the ticket
-        itself, so the two halves only work together.
+        A random URL-safe string. The cookie carries it and only its digest is
+        stored, so the two halves only work together.
     """
-    return hashlib.sha256(ticket.encode("utf-8")).hexdigest()
+    return secrets.token_urlsafe(32)
+
+
+def ticket_binding_hash(binding: str) -> str:
+    """The digest of a binding, as stored and as compared at redemption.
+
+    Args:
+        binding: The value from the :data:`TICKET_COOKIE`.
+
+    Returns:
+        The SHA-256 hex digest kept in ``sso_link_tickets.binding_hash``.
+    """
+    return hashlib.sha256(binding.encode("utf-8")).hexdigest()
 
 
 def safe_next(next_path: str) -> str:
