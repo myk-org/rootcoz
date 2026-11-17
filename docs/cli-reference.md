@@ -277,7 +277,7 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | `users pending` | — | Registrations awaiting approval. |
 | `users approve USERNAME` | `--can-use-server-providers`/`--no-can-use-server-providers` | Approve a registration. |
 | `users reject USERNAME` | — | Reject a registration. |
-| `settings list` | `--category`/`-c`, `--reveal` | Current values, sources, and categories, e.g. `rootcoz admin settings list --category Server` shows `max_concurrent_analyses`. Values are masked unless `--reveal`. |
+| `settings list` | `--category`/`-c`, `--reveal` | Current values, sources, and categories, e.g. `rootcoz admin settings list --category Analysis` shows `max_concurrent_analyses`. Values are masked unless `--reveal`. |
 | `settings set KEY VALUE` | — | Persist a server setting, e.g. `rootcoz admin settings set max_concurrent_analyses 5`. |
 | `settings history` | `--key`/`-k`, `--limit`/`-l` (50) | Change log. |
 | `settings reset KEY` | — | Drop the DB override and fall back to env or default. |

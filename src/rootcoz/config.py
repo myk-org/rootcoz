@@ -573,8 +573,8 @@ class Settings(BaseSettings):
         default=10,
         gt=0,
         description=(
-            "Per-call limit in seconds. A slow call fails that one failure, "
-            "not the job."
+            "Per-call limit in minutes (default 10). A slow call fails that "
+            "one failure, not the job."
         ),
     )
 
@@ -661,7 +661,9 @@ class Settings(BaseSettings):
         default=10,
         gt=0,
         description=(
-            "How many additional repositories are cloned at the same time per job."
+            "How many repository clones run at once across the whole server, "
+            "tests repository included: every analysis and chat shares this "
+            "one ceiling rather than each getting it."
         ),
     )
     max_concurrent_analyses: int = Field(
@@ -677,7 +679,8 @@ class Settings(BaseSettings):
         ge=1,
         description=(
             "Commits cloned per repository for a chat workspace. Smaller is "
-            "faster; the chat AI sees only this history."
+            "faster: the chat AI reads the working tree, not git history, so "
+            "extra commits only serve a session that runs git log or git show."
         ),
     )
     repo_clone_timeout_seconds: int = Field(
@@ -698,8 +701,9 @@ class Settings(BaseSettings):
         default=500,
         gt=0,
         description=(
-            "Total artifact download budget per Jenkins build. A larger set is "
-            "skipped, not truncated."
+            "Size cap, in MB, for one Jenkins artifact. A larger artifact is "
+            "skipped, not truncated; every artifact is capped on its own, so "
+            "one build can download more than this in total."
         ),
     )
 
