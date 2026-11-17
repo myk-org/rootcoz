@@ -119,15 +119,15 @@ That creates an active operator who can submit analyses, and one server setting 
 
    | Tab | Settings it holds |
    | --- | --- |
+   | `Server` | `public_base_url`, `auto_push_exporters` — exactly these two |
    | `Jenkins` | `jenkins_url`, `jenkins_user`, `jenkins_password`, `jenkins_ssl_verify`, `jenkins_timeout`, `jenkins_artifacts_max_size_mb`, `wait_for_completion`, `poll_interval_minutes`, `max_wait_minutes` |
+   | `Prow` | `prow_url`, `gcs_bucket`, `prow_artifacts_max_size_mb`, `prow_artifact_max_file_size_mb`, `prow_artifacts_max_objects` |
    | `Analysis` | `ai_provider`, `ai_model`, `ai_call_timeout`, `max_concurrent_ai_calls`, `peer_ai_configs`, `peer_analysis_max_rounds`, `enable_free_models`, `ambient_auth_providers`, `active_server_providers`, `record_transcripts`, `enable_auto_review`, `max_concurrent_analyses`, `metadata_rules_file`, `get_job_artifacts` |
    | `Jira` | `jira_auth_mode`, `enable_jira`, `enable_jira_issues`, `jira_project_key`, `jira_site_url`, `jira_max_results`, plus the credential rows of the selected auth method (see Jira auth modes below) |
    | `GitHub issues` | `github_token`, `feedback_repo_url`, `enable_github_issues` |
    | `Report Portal` | `reportportal_url`, `reportportal_api_token`, `reportportal_project`, `reportportal_verify_ssl`, `enable_reportportal`, `rp_push_classifications`, `rp_push_rootcoz_url`, `rp_push_tracker_links`, `rp_allow_unreviewed_push` |
    | `Datadog` | `datadog_api_key`, `datadog_app_key`, `datadog_site`, `datadog_service`, `datadog_env`, `enable_datadog`, `dd_push_classifications`, `dd_push_rootcoz_url`, `dd_push_tracker_links`, `dd_allow_unreviewed_push` |
    | `Auth & Security` | `admin_key` (displayed masked, read-only), `secure_cookies`, `trust_proxy_headers`, `require_approval`, `admin_wait_approve_msg`, `allowed_users`, `default_user_role`, `session_ttl_hours`, `login_lockout_enabled`, `login_lockout_threshold` |
-   | `Prow` | `prow_url`, `gcs_bucket`, `prow_artifacts_max_size_mb`, `prow_artifact_max_file_size_mb`, `prow_artifacts_max_objects` |
-   | `Server` | `public_base_url`, `auto_push_exporters` — exactly these two |
    | `Notifications` | `smtp_host`, `smtp_port`, `smtp_user`, `smtp_password`, `smtp_from`, `alert_email_to`, `slack_webhook_url`, `enable_health_monitor`, `health_monitor_interval_seconds`, `health_alert_unhealthy_seconds`, `health_alert_error_rate_percent`, `health_alert_error_rate_seconds`, `health_alert_stuck_analysis_seconds`, `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
    | `Data & retention` | `audit_retention_days`, `audit_max_rows`, `audit_auth_failure_max_per_minute`, `results_retention_days`, `results_max_rows`, `pi_sidecar_transcripts_max_age_days`, `pi_sidecar_transcripts_max_size_mb` |
    | `Repos & workspace` | `tests_repo_url`, `tests_repo_token`, `additional_repos`, `max_concurrent_repo_clones`, `chat_clone_depth`, `repo_clone_timeout_seconds`, `max_workspace_graph_mb` |

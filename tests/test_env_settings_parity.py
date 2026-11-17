@@ -1384,6 +1384,7 @@ def test_retention_budget_env_values_the_sidecar_accepted_do_not_block_boot(
 # the Jenkins tab, Prow-only on Prow — no "Sources" and no "General" tab, and
 # Server keeps exactly two settings.
 _EXPECTED_CATEGORIES: dict[str, set[str]] = {
+    "Server": {"public_base_url", "auto_push_exporters"},
     "Jenkins": {
         "jenkins_url",
         "jenkins_user",
@@ -1394,6 +1395,13 @@ _EXPECTED_CATEGORIES: dict[str, set[str]] = {
         "wait_for_completion",
         "poll_interval_minutes",
         "max_wait_minutes",
+    },
+    "Prow": {
+        "prow_url",
+        "gcs_bucket",
+        "prow_artifacts_max_size_mb",
+        "prow_artifact_max_file_size_mb",
+        "prow_artifacts_max_objects",
     },
     "Analysis": {
         "ai_provider",
@@ -1472,14 +1480,6 @@ _EXPECTED_CATEGORIES: dict[str, set[str]] = {
         "login_lockout_enabled",
         "login_lockout_threshold",
     },
-    "Prow": {
-        "prow_url",
-        "gcs_bucket",
-        "prow_artifacts_max_size_mb",
-        "prow_artifact_max_file_size_mb",
-        "prow_artifacts_max_objects",
-    },
-    "Server": {"public_base_url", "auto_push_exporters"},
     "Notifications": {
         "smtp_host",
         "smtp_port",
