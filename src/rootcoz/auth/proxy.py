@@ -255,6 +255,11 @@ async def _login_destination(username: str, ctx: AuthContext) -> str | None:
     sent to ``/`` the middleware refuses it and sends the HTML request back, one
     redirect per hop, forever.
 
+    The provisioning rule is asked only for a name with no users row, in the
+    order :meth:`ProxyStrategy.authenticate` asks it: an existing account is let
+    in on every other page whatever its name, so judging it here would leave
+    that person stuck on the login page (and write a refusal row per visit).
+
     Args:
         username: The normalised name from the trusted header.
         ctx: The request being authenticated, and the settings it runs under.
@@ -265,11 +270,12 @@ async def _login_destination(username: str, ctx: AuthContext) -> str | None:
         cannot be provisioned (recorded on the request for the trail), or its
         account is blocked.
     """
-    refusal = _proxy_provision_refusal(username, ctx.settings)
-    if refusal:
-        _record_refusal(ctx.request, username, refusal)
-        return None
     user = await storage.get_user_by_username(username)
+    if user is None:
+        refusal = _proxy_provision_refusal(username, ctx.settings)
+        if refusal:
+            _record_refusal(ctx.request, username, refusal)
+            return None
     if account_block_reason(user):
         return None
     status = await storage.get_user_status(username)

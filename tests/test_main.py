@@ -35,7 +35,13 @@ from rootcoz.models import (
     FailureAnalysis,
 )
 from rootcoz.sources.jenkins_source import JenkinsError
-from tests.conftest import capture_main_logs, make_test_client
+from tests.conftest import (
+    build_test_env,
+    capture_main_logs,
+    make_app_client,
+    make_test_client,
+)
+from tests.test_auth import _assert_spa_page
 
 # Fake credentials for tests — annotated once to suppress Ruff S105/S106 globally.
 FAKE_JENKINS_PASSWORD = "not-a-real-password"  # pragma: allowlist secret
@@ -3440,6 +3446,62 @@ class TestSpaRoutes:
     ) -> None:
         response = test_client.get(path, follow_redirects=False)
         assert response.status_code in (200, 404)
+
+
+class TestProxyLoginRedirectScope:
+    """The proxy login redirect covers the login page, not every /login path.
+
+    ``/login/device`` is the CLI's device-approval screen. A visitor whose only
+    credential is ``X-Forwarded-User`` has no session a redirect to ``/`` could
+    satisfy, so the middleware must let the SPA serve that page.
+    """
+
+    @pytest.fixture
+    def proxy_client(self, temp_db_path: Path):
+        """A proxy deployment: trusted headers, readable cookies, no session."""
+        env = build_test_env(
+            DB_PATH=str(temp_db_path),
+            TRUST_PROXY_HEADERS="true",
+            SECURE_COOKIES="false",
+        )
+        yield from make_app_client(temp_db_path, env)
+
+    @pytest.mark.parametrize("path", ["/login", "/login/"])
+    def test_the_login_page_still_redirects_a_proxy_visitor(
+        self, proxy_client, path: str
+    ) -> None:
+        """Unchanged: the login page answers a proxy identity with a 303 to /."""
+        response = proxy_client.get(
+            path,
+            headers={"accept": "text/html", "X-Forwarded-User": "sso-user"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/"
+        assert response.cookies.get("rootcoz_username") == "sso-user"
+
+    @pytest.mark.parametrize("path", ["/login/device", "/login/device/"])
+    def test_the_device_approval_page_is_served_to_a_proxy_visitor(
+        self, proxy_client, path: str
+    ) -> None:
+        """The CLI must reach its approval page on a proxy-only credential."""
+        response = proxy_client.get(
+            path,
+            headers={"accept": "text/html", "X-Forwarded-User": "sso-device"},
+            follow_redirects=False,
+        )
+        assert response.status_code != 303, response.headers.get("location")
+        _assert_spa_page(response)
+
+    def test_the_login_page_is_unchanged_without_a_proxy_identity(
+        self, proxy_client
+    ) -> None:
+        """No header, no redirect: the page is served as before."""
+        response = proxy_client.get(
+            "/login", headers={"accept": "text/html"}, follow_redirects=False
+        )
+        assert response.status_code != 303
+        _assert_spa_page(response)
 
 
 class TestApiDashboardEndpoint:
@@ -23405,3 +23467,113 @@ class TestUserLifecycleAndAdminSseRevocation:
             assert cleared == "event: pending-count\ndata: 0\n\n"
         finally:
             await body_nav.aclose()
+#: An HTTPS deployment at a known public origin — what the same-origin proof on
+#: the SSO write routes is measured against, and a configured IdP so the routes
+#: get past "unknown provider" and reach that proof.
+_SSO_HTTPS_ENV = {
+    "SSO_GOOGLE_CLIENT_ID": "test-client-id",
+    "SSO_GOOGLE_CLIENT_SECRET": "test-client-secret",  # pragma: allowlist secret
+    "PUBLIC_BASE_URL": "https://rootcoz.example.com",
+}
+
+#: The refusal the check already produces for a request that proves no origin.
+_APPROVE_CROSS_ORIGIN_DETAIL = "Approval must come from this server's own approval page"
+
+
+def _start_device_code(client: Any) -> dict[str, str]:
+    """Start a device flow and return the server's answer."""
+    response = client.post("/api/auth/sso/device/start", json={})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def _sign_in_a_reviewer(client: Any) -> None:
+    """Create a reviewer account and put its session cookie on *client*."""
+    await storage.create_user("ruthn")
+    session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+    client.cookies.set("rootcoz_session", session)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        # Plaintext page on the deployment's own host: scheme is part of the
+        # origin, and a proxy that authenticates the request cannot see it.
+        {"origin": "http://rootcoz.example.com"},
+        {"referer": "http://rootcoz.example.com/settings"},
+        # Same scheme and host, different port: an origin of its own.
+        {"origin": "https://rootcoz.example.com:8443"},
+        # Values that name no origin at all prove nothing.
+        {"origin": "null"},
+        {"origin": "/settings"},
+        {"origin": "//rootcoz.example.com"},
+        {"origin": "https://rootcoz.example.com:not-a-port"},
+    ],
+)
+async def test_device_approval_refuses_an_http_page_on_the_same_host(
+    temp_db_path: Path, headers: dict[str, str]
+) -> None:
+    """Only the deployment's own scheme/host/port may approve a code.
+
+    A trusted proxy authenticates the request itself, so nothing but the origin
+    distinguishes the plaintext page on that host from the HTTPS one — the
+    authority alone used to be enough, and it is not.
+    """
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        started = _start_device_code(client)
+        await _sign_in_a_reviewer(client)
+
+        response = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=headers,
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == _APPROVE_CROSS_ORIGIN_DETAIL
+        # Refused before the code was read: it is still there to approve.
+        assert await storage.get_device_code(started["device_code"]) is not None
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"origin": "https://rootcoz.example.com"},
+        # The default port for the scheme is the same origin.
+        {"origin": "https://rootcoz.example.com:443"},
+        {"referer": "https://rootcoz.example.com/settings"},
+    ],
+)
+async def test_device_approval_accepts_the_deployments_own_origin(
+    temp_db_path: Path, headers: dict[str, str]
+) -> None:
+    """An HTTPS origin naming this host (and port) still approves."""
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        started = _start_device_code(client)
+        await _sign_in_a_reviewer(client)
+
+        response = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=headers,
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["ok"] is True
+
+
+async def test_link_start_refuses_an_http_page_on_the_same_host(
+    temp_db_path: Path,
+) -> None:
+    """The link start is a write too, so the scheme counts there as well."""
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        await _sign_in_a_reviewer(client)
+
+        response = client.post(
+            "/api/auth/sso/google/login?mode=link&next=/settings",
+            headers={"origin": "http://rootcoz.example.com"},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 303
+        assert response.headers["location"] == "/settings?sso_error=link_cross_site"

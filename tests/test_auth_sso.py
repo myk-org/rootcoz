@@ -47,6 +47,10 @@ _GITHUB_ENV = {
 #: What the settings page's own POST carries — the proof a link start needs.
 _SAME_ORIGIN = {"sec-fetch-site": "same-origin"}
 
+#: A trusted-proxy deployment whose write allow-list names somebody else, so a
+#: name under test is provably outside it.
+_PROXY_ALLOW_LIST_ENV = {"TRUST_PROXY_HEADERS": "true", "ALLOWED_USERS": "someone-else"}
+
 
 def _claims(
     subject: str = "sub-1",
@@ -5077,3 +5081,84 @@ async def test_a_block_committed_inside_the_exchange_is_denied_with_its_reason(
         # The trail names the block instead of reporting the code as expired.
         refusal = await _last_sso_refusal(temp_db_path)
         assert refusal["details"]["reason"] == "account_disabled"
+
+
+async def test_an_existing_account_outside_the_allow_list_leaves_the_login_page(
+    temp_db_path: Path,
+) -> None:
+    """The login page asks about the row before it judges the name.
+
+    ``ALLOWED_USERS`` bounds *creation*, and a read-only account is outside it
+    by design. The proxy strategy lets that account in on every other page, so
+    holding it on ``/login`` was the login page refusing a person the rest of
+    the app admits.
+    """
+    for client in make_app_client(temp_db_path, _PROXY_ALLOW_LIST_ENV):
+        await storage.create_user("reader", status="active")
+        headers = {"X-Forwarded-User": "reader"}
+
+        login = client.get("/login", headers=headers, follow_redirects=False)
+
+        assert login.status_code == 303
+        assert login.headers["location"] == "/"
+        assert client.get("/api/auth/me", headers=headers).status_code == 200
+
+    actions = [row["action"] for row in await _audit_actions(temp_db_path)]
+    assert "auth.proxy_provision_refused" not in actions
+
+
+async def test_a_name_with_no_account_outside_the_allow_list_stays_refused(
+    temp_db_path: Path,
+) -> None:
+    """The control: with no row there is nothing to create, so the rule applies."""
+    for client in make_app_client(temp_db_path, _PROXY_ALLOW_LIST_ENV):
+        response = client.get(
+            "/login",
+            headers={"X-Forwarded-User": "stranger"},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 200
+        assert await storage.get_user_by_username("stranger") is None
+
+    refusals = [
+        row
+        for row in await _audit_actions(temp_db_path)
+        if row["action"] == "auth.proxy_provision_refused"
+    ]
+    assert len(refusals) == 1
+    assert refusals[0]["details"]["reason"] == "not_allowed"
+
+
+async def test_an_existing_pending_account_still_lands_on_pending(
+    temp_db_path: Path,
+) -> None:
+    """Skipping the name rule must not skip the approval gate."""
+    env = dict(_PROXY_ALLOW_LIST_ENV, REQUIRE_APPROVAL="true")
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("reader", status="pending")
+
+        login = client.get(
+            "/login",
+            headers={"X-Forwarded-User": "reader"},
+            follow_redirects=False,
+        )
+
+        assert login.status_code == 303
+        assert login.headers["location"] == "/pending"
+
+
+async def test_an_existing_disabled_account_gets_no_working_sign_in(
+    temp_db_path: Path,
+) -> None:
+    """Skipping the name rule must not skip the block either."""
+    for client in make_app_client(temp_db_path, _PROXY_ALLOW_LIST_ENV):
+        await storage.create_user("reader", status="active")
+        with sqlite3.connect(storage.DB_PATH) as conn:
+            conn.execute("UPDATE users SET disabled = 1 WHERE username = 'reader'")
+        headers = {"X-Forwarded-User": "reader"}
+
+        login = client.get("/login", headers=headers, follow_redirects=False)
+
+        assert login.status_code == 200
+        assert client.get("/api/auth/me", headers=headers).status_code == 401

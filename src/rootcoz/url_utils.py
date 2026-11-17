@@ -1,8 +1,10 @@
 """Cross-cutting URL helpers.
 
-Two jobs: sanitizing HTTP(S) URLs before they are stored or shown (userinfo,
-clone URLs, hrefs), and answering whether a URL may be handed to a browser as a
-navigation target — the rule the SSO logout path and the issuer settings share.
+Three jobs: sanitizing HTTP(S) URLs before they are stored or shown (userinfo,
+clone URLs, hrefs), answering whether a URL may be handed to a browser as a
+navigation target — the rule the SSO logout path and the issuer settings share —
+and answering whether a URL names this deployment's own origin, the proof the
+SSO routes require of a write.
 """
 
 from __future__ import annotations
@@ -210,6 +212,62 @@ def is_safe_navigation_url(url: str, *, allow_loopback_http: bool = False) -> bo
     if parsed.scheme == "http":
         return allow_loopback_http and (parsed.hostname or "").lower() in LOOPBACK_HOSTS
     return False
+
+
+#: Default port per scheme, so ``https://host`` and ``https://host:443`` are one
+#: origin while ``https://host:444`` is not.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def origin_of(url: str) -> tuple[str, str, int] | None:
+    """Return the ``(scheme, hostname, port)`` origin *url* names, or ``None``.
+
+    Only an HTTP(S) URL with a real authority has an origin here: a bare path,
+    a scheme-relative ``//host``, ``null``, a control character or an
+    unparseable port names none, so a caller comparing origins fails closed
+    instead of matching a fragment of the value.
+
+    Args:
+        url: The candidate URL.
+
+    Returns:
+        The origin, with a lowercase scheme and host and the *effective* port —
+        the scheme's default when the URL omits it — or ``None``.
+    """
+    raw = (url or "").strip()
+    if not raw or has_whitespace_or_control(raw):
+        return None
+    try:
+        parsed = urlparse(raw)
+        port = parsed.port  # Rejects a malformed port (:badport) before use.
+    except ValueError:  # Malformed authority, e.g. an unmatched IPv6 bracket.
+        return None
+    scheme = parsed.scheme.lower()
+    if scheme not in _DEFAULT_PORTS or not parsed.hostname:
+        return None
+    return scheme, parsed.hostname, _DEFAULT_PORTS[scheme] if port is None else port
+
+
+def is_same_origin(source: str, base: str) -> bool:
+    """Whether *source* names the same origin as *base* — scheme, host and port.
+
+    The scheme is part of the comparison because an ``http`` page on the
+    deployment's own host is a *different* origin, and it is the case a proxy
+    deployment cannot otherwise see: when the trusted proxy authenticates the
+    request itself (``X-Forwarded-User``), nothing about the request reveals
+    which page started it, so the origin is the only proof left. The port counts
+    for the same reason: ``https://host:8443`` is not ``https://host``.
+
+    Args:
+        source: The candidate, typically an ``Origin`` or ``Referer`` header.
+        base: The deployment's own base URL.
+
+    Returns:
+        True only when both name the same origin. An unset or incomplete *base*
+        is never the same origin as anything.
+    """
+    candidate = origin_of(source)
+    return candidate is not None and candidate == origin_of(base)
 
 
 def sanitize_clone_url(url: str) -> str:
