@@ -82,6 +82,7 @@ from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
     SESSION_REFUSAL_MARKER,
+    RejectedUserKeyError,
     SessionCreationRefused,
     _cached_catalog_provider_ids,
     _get_model_catalog,
@@ -5349,8 +5350,16 @@ async def _validate_catalog_pair(provider: str, model: str) -> tuple[str, str]:
             model,
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RejectedUserKeyError as exc:
+        # The caller's stored key, not the pair: a maintainer must see this.
+        logger.warning(
+            "Rejected AI provider/model pair %s/%s: %s", provider, model, exc
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
-        logger.info("Rejected unknown AI provider/model pair: %s/%s", provider, model)
+        # The reason, never "unknown pair" — an existing pair can be refused
+        # by a grant or a model selection too.
+        logger.info("Rejected AI provider/model pair %s/%s: %s", provider, model, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         logger.warning("Unable to validate AI provider/model pair", exc_info=True)

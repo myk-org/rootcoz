@@ -71,6 +71,12 @@ chat_session_source: ContextVar[str] = ContextVar("chat_session_source", default
 model_listing_status: ContextVar[dict[str, dict[str, bool | int]] | None] = ContextVar(
     "model_listing_status", default=None
 )
+# Providers whose key-scoped discovery failed because the provider rejected the
+# stored key itself (401/403), not for an unrelated reason (#592). Kept out of
+# ``model_listing_status`` because that dict is exposed by /api/ai-models.
+_rejected_user_keys: ContextVar[frozenset[str]] = ContextVar(
+    "rejected_user_keys", default=frozenset()
+)
 _selected_key_generation: ContextVar[tuple[str, str, str, int] | None] = ContextVar(
     "selected_key_generation", default=None
 )
@@ -364,6 +370,10 @@ def _raise_inactive_server_provider(provider: str) -> None:
 
 class ExcludedServerModelError(ValueError):
     """Model deselected from server credentials (admin model selection)."""
+
+
+class RejectedUserKeyError(ValueError):
+    """The caller's own stored key for this provider was rejected (#592)."""
 
 
 # Managed providers (lowercase) and their selected (provider, model) pairs.
@@ -1437,6 +1447,8 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     catalog = await _get_model_catalog()
     status: dict[str, dict[str, bool | int]] = {}
     model_listing_status.set(status)
+    rejected_keys: set[str] = set()
+    _rejected_user_keys.set(frozenset())
     from rootcoz.storage import can_user_use_server_providers
 
     try:
@@ -1562,15 +1574,32 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                 continue
             try:
                 discovery = await models_for_api_key(provider, key)
-            except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
-                logger.warning(
-                    "Key-scoped model discovery unavailable for provider=%s", provider
-                )
+            except (
+                httpx.HTTPError,
+                ValueError,
+                KeyError,
+                TypeError,
+                RuntimeError,
+            ) as exc:
                 status[provider] = {
                     "has_api_key": True,
                     "modelListingSupported": True,
                     "unavailable": True,
                 }
+                if auth_failure_status(exc):
+                    # The user's own key is the problem; the server pool for
+                    # this provider is still usable (#592).
+                    rejected_keys.add(provider)
+                    _rejected_user_keys.set(frozenset(rejected_keys))
+                    logger.warning(
+                        "Stored API key for provider=%s was rejected by the provider",
+                        provider,
+                    )
+                else:
+                    logger.warning(
+                        "Key-scoped model discovery unavailable for provider=%s",
+                        provider,
+                    )
                 continue
             listing = discovery["modelListingSupported"]
             status[provider] = {"has_api_key": True, "modelListingSupported": listing}
@@ -1664,10 +1693,11 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
         provider = _catalog_provider_spelling(
             (*scoped.keys(), *status.keys()), provider
         )
-        if status.get(provider, {}).get("unavailable"):
-            raise ValueError(
-                "Key-scoped model discovery unavailable; retry or select server credentials"
-            )
+        # Key discovery failed for this provider: the caller's own key cannot
+        # serve the pair, but a server-pool entry still can — the grant, free
+        # and serving rules below decide, so do not fail closed here (#592).
+        unavailable = bool(status.get(provider, {}).get("unavailable"))
+        rejected_key = provider in _rejected_user_keys.get()
         for entry in scoped.get(provider, []):
             if entry["id"] == model and (
                 entry["verified"] or "server" in entry["credential_sources"]
@@ -1675,10 +1705,22 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
                 # scoped_models ranks the caller's own key ahead of the
                 # server pool, so the first source is the one to use.
                 source = entry["credential_sources"][0]
+                if unavailable and source != "server":
+                    continue
                 if source == "server":
                     await require_server_provider_grant(provider, model)
                 _selected_credential_source.set(source)
                 return provider, model
+        if rejected_key:
+            raise RejectedUserKeyError(
+                f"Your stored key for provider '{provider}' was rejected by the"
+                f" provider and the server pool does not serve {provider}/{model}:"
+                " update or remove the key, then retry"
+            )
+        if unavailable:
+            raise ValueError(
+                "Key-scoped model discovery unavailable; retry or select server credentials"
+            )
         if provider in status and status[provider]["modelListingSupported"]:
             raise ValueError(
                 f"Unknown Pi-sidecar provider/model pair: {provider}/{model}"
