@@ -107,8 +107,9 @@ interface SettingsImportResult {
 
 // Category display order for the tab layout (mirrors backend _SETTINGS_CATEGORIES).
 const CATEGORY_ORDER = [
-  'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow',
-  'Auth & Security', 'Web Push', 'Notifications', 'Sidecar', 'Storage', 'Workspace',
+  'SSO', 'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog',
+  'Prow', 'Auth & Security', 'Web Push', 'Notifications', 'Sidecar', 'Storage',
+  'Workspace',
 ]
 
 // The Sidecar rows whose live transcript directory usage the card below them

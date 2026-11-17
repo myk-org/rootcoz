@@ -2591,7 +2591,12 @@ class TestLifecycleAndResiduals:
             )
         assert ai_cred_resp.status_code == 422
         assert "Incoming PUT /api/user/ai-credentials" not in caplog.text
-        assert "body=<skipped>" not in caplog.text
+        # ``/api/user/ai-credentials`` is in the 422 reporter's skip list as well
+        # as the body logger's, so the credential body is never printed — not
+        # even masked (AGENTS.md: a credential is never logged at any level).
+        # This line doubles as the capture control: it proves the record reached
+        # caplog, so the two negatives below mean something.
+        assert "body=<skipped>" in caplog.text
         assert "sk-secret-ai-cred-value-999" not in caplog.text
 
         # 7) Post-create bookkeeping failure preserves created issue URL and warns not to refile!

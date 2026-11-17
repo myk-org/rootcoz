@@ -37,11 +37,44 @@ ALLOW_LIST_EXEMPT_ROUTES = {
     ("POST", "/api/auth/login"),
     ("POST", "/api/auth/logout"),
     ("POST", "/api/auth/register"),
+    # First-login choice screen (SSO): both are the tail of a login, before a
+    # session exists, and both enforce the list themselves on the name they are
+    # about to write (`create` on the chosen name, `link` on the proven username),
+    # so they self-gate exactly like `register` does for its own name.
+    ("POST", "/api/auth/sso/create"),
+    ("POST", "/api/auth/sso/link"),
+    # A POST for the same reason: the ticket is the credential, and the route
+    # only reads what it stands for (no write, so no allow-list question).
+    ("POST", "/api/auth/sso/ticket"),
+    # CLI device flow (issue #197): both are authentication, and neither can
+    # widen what the caller may do. `start` runs before any account is known and
+    # writes only a device-code row that expires on its own; `approve` records
+    # the *calling* account, so an off-list user can only approve their own —
+    # already restricted — access, exactly like `login`.
+    ("POST", "/api/auth/sso/device/start"),
+    ("POST", "/api/auth/sso/device/approve"),
+    # Poll is a POST so the live device code never lands in an access log; it
+    # writes only a throttle timestamp and belongs to no account yet.
+    ("POST", "/api/auth/sso/device/poll"),
+    # POST for the same transport reason, and it only reads: the code lookup
+    # that the approval page runs before it writes anything.
+    ("POST", "/api/auth/sso/device/approve/lookup"),
     ("POST", "/api/jira-projects"),
     ("POST", "/api/jira-security-levels"),
     ("POST", "/api/validate-token"),
     ("POST", "/api/jobs/metadata/rules/preview"),
     ("DELETE", "/api/user/ai-credentials/{provider:path}"),
+    # Removing one of your own sign-in methods, for the same reason as removing
+    # your own AI key: a user dropped from the list must still be able to
+    # control how they sign in. The last one is refused by the handler anyway.
+    ("DELETE", "/api/user/identities/{provider}"),
+    # Connecting another provider to your own account is the same class of
+    # self-service account-security write as unlinking above — the handler
+    # already refuses it to anyone below reviewer — and it can never widen what
+    # the account may do, because a linked provider resolves to that same
+    # account. Gating it would let a list change strand a signed-in person who
+    # may still remove a method but not add one.
+    ("POST", "/api/auth/sso/{provider}/login"),
 }
 
 MUTATING_METHODS = {"post", "put", "delete", "patch"}
