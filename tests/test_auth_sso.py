@@ -13,6 +13,7 @@ a login automatically.
 
 import base64
 import contextlib
+import hashlib
 import inspect
 import json
 import sqlite3
@@ -126,16 +127,20 @@ async def _ticket(
     """Mint a first-login ticket as the callback would.
 
     When ``client`` is given, the browser-binding cookie the callback sets is
-    attached too — the ticket alone is deliberately not enough.
+    attached too — the ticket alone is deliberately not enough. The binding is
+    random and independent of the ticket, so it is kept on the client's cookie
+    jar rather than recomputed from the ticket.
     """
+    binding = sso_state.new_ticket_binding()
     ticket = await storage.create_sso_ticket(
         provider=provider,
         subject=subject,
         email=email,
         suggested_username=suggested,
+        binding=binding,
     )
     if client is not None:
-        client.cookies.set(sso_state.TICKET_COOKIE, sso_state.ticket_binding(ticket))
+        client.cookies.set(sso_state.TICKET_COOKIE, binding)
     return ticket
 
 
@@ -1560,6 +1565,9 @@ async def test_a_stolen_ticket_cannot_be_redeemed_in_another_browser(
     """
     for client in make_app_client(temp_db_path, _SSO_ENV):
         ticket = await _ticket(client)
+        # What this browser was handed; the thief never sees it.
+        binding = client.cookies.get(sso_state.TICKET_COOKIE)
+        assert binding
         # The thief's browser: same ticket, no binding cookie.
         client.cookies.clear()
 
@@ -1578,12 +1586,82 @@ async def test_a_stolen_ticket_cannot_be_redeemed_in_another_browser(
         assert await storage.get_user_identity("google", "sub-1") is None
 
         # The browser that started the flow still holds the binding and can use it.
-        client.cookies.set(sso_state.TICKET_COOKIE, sso_state.ticket_binding(ticket))
+        client.cookies.set(sso_state.TICKET_COOKIE, binding)
         assert (
             client.post(
                 "/api/auth/sso/create", json={"ticket": ticket, "username": "alice"}
             ).status_code
             == 200
+        )
+
+
+async def test_a_cookie_derived_from_the_ticket_does_not_redeem_it(
+    temp_db_path: Path,
+) -> None:
+    """The exact attack: the fragment alone must not yield the second half.
+
+    Anyone who saw the link can compute ``sha256(ticket)``. If that were the
+    binding, a leaked link would be redeemable anywhere.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        ticket = await _ticket(client)
+        client.cookies.clear()
+        client.cookies.set(
+            sso_state.TICKET_COOKIE,
+            hashlib.sha256(ticket.encode("utf-8")).hexdigest(),
+        )
+
+        assert (
+            client.post("/api/auth/sso/ticket", json={"ticket": ticket}).status_code
+            == 404
+        )
+        assert (
+            client.post(
+                "/api/auth/sso/create", json={"ticket": ticket, "username": "alice"}
+            ).status_code
+            == 404
+        )
+
+
+async def test_a_ticket_without_any_binding_cookie_is_refused(
+    temp_db_path: Path,
+) -> None:
+    """No cookie is the same 404 as a wrong one: the answer names neither."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        ticket = await _ticket(client)
+        client.cookies.clear()
+
+        response = client.post("/api/auth/sso/ticket", json={"ticket": ticket})
+        assert response.status_code == 404
+        assert response.json()["detail"] == "This sign-in link has expired"
+
+
+async def test_the_binding_cookie_is_not_derivable_from_the_ticket(
+    temp_db_path: Path,
+) -> None:
+    """The cookie the callback sets is a fresh random value, not a ticket digest."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        sealed, state = _sealed()
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        ticket = response.headers["location"].partition("#sso_ticket=")[2]
+        assert ticket
+        binding = response.cookies.get(sso_state.TICKET_COOKIE)
+        assert binding
+        assert binding != ticket
+        assert binding != hashlib.sha256(ticket.encode("utf-8")).hexdigest()
+        # And it is the value the mint actually stored, so the pair works.
+        assert await storage.sso_ticket_binding_hash(ticket) == (
+            sso_state.ticket_binding_hash(binding)
         )
 
 
@@ -4834,6 +4912,36 @@ async def test_an_admin_is_not_held_by_its_own_approval_status(
         assert "auth.sso_login_blocked" not in [
             row["action"] for row in await _audit_actions(temp_db_path)
         ]
+
+
+async def test_a_pending_account_cannot_link_a_provider_through_a_ticket(
+    temp_db_path: Path,
+) -> None:
+    """A valid key proves ownership; approval still decides whether it may act.
+
+    The browser link path and the login route both hold a pending account back,
+    and this route writes the same link, so it has to ask the same question —
+    otherwise a pending or rejected account could attach a provider identity and
+    keep it after an admin acts.
+    """
+    env = {**_SSO_ENV, "REQUIRE_APPROVAL": "true"}
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("ruthn", status="pending")
+        raw_key = await storage.rotate_own_key("ruthn")
+        ticket = await _ticket(client)
+
+        response = client.post(
+            "/api/auth/sso/link",
+            json={"ticket": ticket, "username": "ruthn", "api_key": raw_key},
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Account cannot be used to sign in"
+        # The link the whole flow exists to write did not happen.
+        assert await storage.get_user_identity("google", "sub-1") is None
+        refusal = await _last_sso_refusal(temp_db_path)
+        assert refusal["details"]["reason"] == "account_pending"
+        assert refusal["actor"] == "ruthn"
 
 
 async def test_above_require_approval_a_pending_account_is_held_with_its_reason(

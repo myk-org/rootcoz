@@ -4181,8 +4181,14 @@ def auth_sso(
     deadline = time.monotonic() + int(start.get("expires_in") or 600)
     token = ""
     username = ""
-    while time.monotonic() < deadline:
-        time.sleep(interval)
+    while True:
+        # Reserve a second of the remaining lifetime for the poll itself: a wait
+        # allowed to reach the deadline would doze through the whole budget and
+        # then find the code already gone, so an approved code looked expired.
+        wait = min(interval, deadline - time.monotonic() - 1)
+        if wait <= 0:
+            break
+        time.sleep(wait)
         try:
             polled = client.sso_device_poll(device_code)
         except RootCozError as err:

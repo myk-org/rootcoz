@@ -2558,13 +2558,19 @@ async def init_db() -> None:
                 suggested_username TEXT NOT NULL,
                 next_path TEXT NOT NULL DEFAULT '/',
                 expires_at TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                binding_hash TEXT
             )
         """)
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_sso_link_tickets_expires_at"
             " ON sso_link_tickets (expires_at)"
         )
+        # A ticket alone must not be redeemable: whoever sees the fragment would
+        # be the person it was minted for. The binding is minted separately in
+        # the browser that started the login, so the two halves only work
+        # together. Rows from before this column keep NULL and are refused.
+        await _migrate_add_column(db, "sso_link_tickets", "binding_hash", "TEXT")
 
         # Job metadata table for filtering and organization
         await db.execute("""
@@ -10463,7 +10469,7 @@ async def add_user_identity(
                     # to another account after an unlink.
                     await _consume_ticket_in_tx(db, ticket)
                     await db.commit()
-                    return {"user_id": user["id"]}
+                    return linked[0]
                 if linked:
                     # The owner stays out of the message: this text can reach the
                     # caller, and naming the other account would disclose it.
@@ -10504,6 +10510,14 @@ async def add_user_identity(
                         _now_str(),
                     ),
                 )
+                # Read the row back inside this transaction: a second connection
+                # after the commit could see the identity already unlinked again,
+                # and an empty read must not surface as an IndexError. The INSERT
+                # above just landed in this write transaction, so there is exactly
+                # one row here.
+                stored = await _select_identities(
+                    db, "i.user_id = ? AND i.provider = ?", (user["id"], provider)
+                )
                 await db.commit()
             except sqlite3.IntegrityError as exc:
                 # A concurrent link won the race between the pre-check and the
@@ -10515,14 +10529,9 @@ async def add_user_identity(
             except Exception:
                 await db.rollback()
                 raise
-            return {"user_id": user["id"]}
+            return stored[0]
 
-    stored = await _retry_contended(_attempt)
-    async with _connect_db() as db:
-        rows = await _select_identities(
-            db, "i.user_id = ? AND i.provider = ?", (stored["user_id"], provider)
-        )
-    return rows[0]
+    return await _retry_contended(_attempt)
 
 
 async def _consume_ticket_in_tx(db: Any, ticket: str | None) -> None:
@@ -11364,6 +11373,7 @@ async def create_sso_ticket(
     subject: str,
     email: str | None,
     suggested_username: str,
+    binding: str,
     next_path: str = "/",
     ttl_seconds: int = SSO_TICKET_TTL_SECONDS,
 ) -> str:
@@ -11374,12 +11384,16 @@ async def create_sso_ticket(
         subject: The provider's stable subject identifier.
         email: Email the provider reported, if any.
         suggested_username: Name proposed for a new account; editable by the user.
+        binding: A random value the browser that started the login holds. Its
+            digest is stored next to the ticket, so redeeming needs both: the
+            ticket travels in the URL fragment and is therefore readable by
+            anyone who sees it, while the binding is not derivable from it.
         next_path: Destination the login started from (the deep link survives the
             choice screen). Validated by the caller before it is passed here.
         ttl_seconds: Lifetime of the ticket.
 
     Returns:
-        The raw ticket. Only its hash is stored.
+        The raw ticket. Only its hash — and the binding's hash — is stored.
     """
     _validate_sso_provider(provider)
     _validate_identity_subject(subject)
@@ -11393,7 +11407,8 @@ async def create_sso_ticket(
             await db.execute(
                 "INSERT INTO sso_link_tickets"
                 " (ticket_hash, provider, subject, email, suggested_username,"
-                " next_path, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " next_path, expires_at, created_at, binding_hash)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     _hash_token(ticket),
                     provider,
@@ -11403,6 +11418,7 @@ async def create_sso_ticket(
                     next_path,
                     expires_str,
                     created_at,
+                    _hash_token(binding),
                 ),
             )
             await db.commit()
@@ -11410,6 +11426,31 @@ async def create_sso_ticket(
     # Minted on the callback path, under exactly the load this retry exists for.
     await _retry_contended(_insert)
     return ticket
+
+
+async def sso_ticket_binding_hash(ticket: str) -> str | None:
+    """The digest of the browser binding a live ticket was minted with.
+
+    The ticket is not a credential on its own: it is handed out in a URL
+    fragment, and the binding it is checked against is minted independently, so
+    seeing the ticket does not let another client redeem it.
+
+    Args:
+        ticket: The raw ticket from the URL.
+
+    Returns:
+        The stored ``binding_hash``, or ``None`` when the ticket is unknown,
+        expired, or carries no binding at all — a row minted before the column
+        existed cannot be trusted, so the caller refuses it.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT binding_hash FROM sso_link_tickets"
+            f" WHERE ticket_hash = ? AND {_LIVE_ROW}",
+            (_hash_token(ticket),),
+        )
+        row = await cursor.fetchone()
+    return row["binding_hash"] if row else None
 
 
 def _ticket_view(row: Any) -> dict[str, Any]:

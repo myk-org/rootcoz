@@ -5447,6 +5447,79 @@ class TestAuthLoginCommand:
         # 5, then +5 after slow_down, then 10: it widened rather than hammered.
         assert slept == [5, 10, 10]
 
+    def test_auth_sso_polls_even_when_the_interval_outlasts_the_code(
+        self, mock_client, monkeypatch
+    ):
+        slept: list[float] = []
+        monkeypatch.setattr("rootcoz.cli.main.time.sleep", slept.append)
+        mock_client.sso_providers.return_value = {"providers": []}
+        mock_client.sso_device_start.return_value = {
+            "device_code": "dc",
+            "user_code": "CODE",
+            "verification_uri": "/login/device",
+            "expires_in": 10,
+            "interval": 30,
+        }
+        mock_client.sso_device_poll.return_value = {
+            "status": "approved",
+            "token": "session-token",  # pragma: allowlist secret
+            "username": "alice",
+        }
+        result = runner.invoke(app, ["auth", "sso"])
+        assert result.exit_code == 0
+        assert "Signed in as alice" in result.output
+        assert "session-token" in result.output
+        # The first wait was clamped to the code's lifetime instead of outlasting
+        # it, so the code was still live when the poll went out.
+        assert len(slept) == 1
+        assert slept[0] < 10
+
+    def test_auth_sso_never_sleeps_the_whole_remaining_lifetime(
+        self, mock_client, monkeypatch
+    ):
+        slept: list[float] = []
+        monkeypatch.setattr("rootcoz.cli.main.time.sleep", slept.append)
+        mock_client.sso_providers.return_value = {"providers": []}
+        mock_client.sso_device_start.return_value = {
+            "device_code": "dc",
+            "user_code": "CODE",
+            "verification_uri": "/login/device",
+            "expires_in": 600,
+            "interval": 600,
+        }
+        mock_client.sso_device_poll.return_value = {
+            "status": "approved",
+            "token": "t",
+            "username": "alice",
+        }
+        result = runner.invoke(app, ["auth", "sso"])
+        assert result.exit_code == 0
+        assert slept and sum(slept) < 600
+
+    def test_auth_sso_times_out_when_never_approved(self, mock_client, monkeypatch):
+        now = [1000.0]
+
+        def _fake_sleep(seconds: float) -> None:
+            now[0] += seconds
+
+        monkeypatch.setattr("rootcoz.cli.main.time.sleep", _fake_sleep)
+        monkeypatch.setattr("rootcoz.cli.main.time.monotonic", lambda: now[0])
+        mock_client.sso_providers.return_value = {"providers": []}
+        mock_client.sso_device_start.return_value = {
+            "device_code": "dc",
+            "user_code": "CODE",
+            "verification_uri": "/login/device",
+            "expires_in": 20,
+            "interval": 5,
+        }
+        mock_client.sso_device_poll.return_value = {"status": "pending"}
+        result = runner.invoke(app, ["auth", "sso"])
+        assert result.exit_code == 1
+        assert "Timed out waiting for approval." in result.output
+        # 5, 5, 5 then the remaining 4: every poll landed while the code lived.
+        assert mock_client.sso_device_poll.call_count == 4
+        assert now[0] < 1020
+
     def test_auth_sso_joins_a_relative_approval_path_to_the_server(
         self, mock_client, monkeypatch
     ):

@@ -765,6 +765,74 @@ class TestCaseInsensitiveUsernames:
         with patch.object(storage, "DB_PATH", temp_db_path):
             asyncio.run(run())
 
+    def test_upgrade_from_a_pre_sso_database_merges_case_variants(self, temp_db_path):
+        """A database that predates SSO upgrades without tripping over SSO tables.
+
+        ``_migrate_lowercase_usernames`` deletes a merged duplicate's dependants
+        through ``_delete_user_dependants``, which deletes from
+        ``user_identities`` and ``sso_device_codes`` unconditionally. ``init_db``
+        must therefore create those tables *before* it runs the merge: on a
+        database that predates them the merge would otherwise fail with
+        ``no such table: user_identities`` and the server would not start at all
+        on upgrade. This test pins that ordering, not just the merge result.
+        """
+
+        async def table_names() -> set[str]:
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+                return {dict(row)["name"] for row in await cursor.fetchall()}
+
+        async def run():
+            # A pre-SSO schema: only ``users``, and two names that differ by case.
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "CREATE TABLE IF NOT EXISTS users ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "username TEXT UNIQUE NOT NULL, "
+                    "api_key_hash TEXT UNIQUE, "
+                    "role TEXT NOT NULL DEFAULT 'reviewer', "
+                    "status TEXT NOT NULL DEFAULT 'active', "
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+                    "last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+                )
+                await db.execute(
+                    "INSERT INTO users (username, role, created_at) "
+                    "VALUES ('Heidi', 'operator', '2024-01-01 00:00:00')"
+                )
+                await db.execute(
+                    "INSERT INTO users (username, role, created_at) "
+                    "VALUES ('HEIDI', 'reviewer', '2024-06-01 00:00:00')"
+                )
+                await db.commit()
+
+            # The starting point is what makes the test meaningful: no SSO table
+            # exists when init_db begins, so the merge below can only succeed if
+            # init_db created them first.
+            assert not {"user_identities", "sso_device_codes", "sso_link_tickets"} & (
+                await table_names()
+            )
+
+            await storage.init_db()
+
+            assert {
+                "user_identities",
+                "sso_device_codes",
+                "sso_link_tickets",
+            } <= await table_names()
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT username, role FROM users WHERE lower(username) = 'heidi'"
+                )
+                rows = [dict(r) for r in await cursor.fetchall()]
+            assert len(rows) == 1
+            assert rows[0]["username"] == "heidi"
+            assert rows[0]["role"] == "operator"
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(run())
+
     def test_migration_preserves_api_key_from_duplicate(self, temp_db_path):
         """Migration preserves API key when survivor has none but duplicate does."""
 
