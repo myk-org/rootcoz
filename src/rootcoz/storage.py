@@ -11014,12 +11014,17 @@ async def record_device_code_poll(device_code: str) -> bool:
         is unknown/expired.
     """
     device_hash = _hash_token(device_code)
-    now = datetime.now(UTC)
-    now_str = now.strftime(SQL_TIMESTAMP_FORMAT)
 
     async def _attempt() -> bool:
         async with _connect_db() as db:
             await db.execute("BEGIN IMMEDIATE")
+            # Stamped here, with the write lock already held — not before the
+            # attempt. A contended poll can wait for the lock for longer than
+            # the interval, and a timestamp taken before that wait would be
+            # handed to the next poll as though it had arrived an interval ago,
+            # letting a flood through. The decision and the stored value are
+            # this one instant.
+            now_str = datetime.now(UTC).strftime(SQL_TIMESTAMP_FORMAT)
             try:
                 cursor = await db.execute(
                     "SELECT interval_seconds, last_polled_at FROM sso_device_codes"
@@ -11542,6 +11547,87 @@ def _validate_sso_provider(provider: str) -> None:
         raise ValueError(msg)
 
 
+def _role_for_new_user(role: str) -> str:
+    """The role a new row gets: the caller's, or the deployment default.
+
+    One reader for the empty-means-default rule, so every creation path records
+    a role decided the same way instead of each restating the fallback.
+
+    Args:
+        role: The role the caller asked for, or ``""`` for the default.
+
+    Returns:
+        The role to store.
+    """
+    if role:
+        return role
+    from rootcoz.config import get_settings
+
+    return get_settings().default_user_role
+
+
+async def create_keyless_user(
+    username: str,
+    *,
+    status: str = "active",
+    role: str = "",
+    created_via: str = DEFAULT_CREATED_VIA,
+) -> None:
+    """Create a user row that holds no API key, and never will unless rotated.
+
+    For a path where something other than a key is the credential (the trusted
+    reverse proxy's header). ``create_user`` mints a key and returns it, so a
+    caller with nobody to show it to would leave a phantom hash behind: the row
+    would look key-bearing while its owner never held the secret. Here the
+    column stays NULL, which is the truth.
+
+    Args:
+        username: The username to create.
+        status: Initial user status ('active', 'pending', 'rejected').
+        role: Role to assign. Empty string uses DEFAULT_USER_ROLE from settings.
+        created_via: How the account came to exist (a provider name). Recorded
+            once at creation, never updated, and never read by an
+            authentication decision.
+
+    Raises:
+        ValueError: When the name is malformed or reserved, when ``status`` or
+            ``created_via`` is not a known value, or when the name already has
+            a row.
+    """
+    username = _normalize_username(username)
+    _validate_username(username)
+    _validate_user_status(status)
+    _validate_created_via(created_via)
+    new_role = _role_for_new_user(role)
+
+    # Insert-only, so the unique index is the whole concurrency guard and no
+    # read-then-write transaction is needed: the loser of a race sees its
+    # ValueError and re-reads the row the winner just wrote.
+    #
+    # Keyless on purpose — the header is this account's credential, so there is
+    # no secret to show and none to leak. That is not the same as "nobody has
+    # claimed this name": ``create_user`` refuses to hand a first key to a
+    # row provisioned this way, because a name-based claim would let anyone who
+    # knows a provisioned username take the account over, and this project
+    # never finds or claims an account by name or email. The recovery path for
+    # a person whose proxy went away is an administrator rotating their key
+    # (``admin users rotate-key``), which is audited.
+    async with _connect_db() as db:
+        try:
+            await db.execute(
+                "INSERT INTO users"
+                " (username, api_key_hash, role, status, created_via)"
+                " VALUES (?, NULL, ?, ?, ?)",
+                (username, new_role, status, created_via),
+            )
+            await db.commit()
+        except Exception as exc:
+            if "UNIQUE constraint" in str(exc):
+                msg = f"User '{username}' already exists"
+                raise ValueError(msg) from exc
+            raise
+
+
 async def create_user(
     username: str,
     *,
@@ -11573,11 +11659,7 @@ async def create_user(
     _validate_username(username)
     _validate_user_status(status)
     _validate_created_via(created_via)
-
-    if not role:
-        from rootcoz.config import get_settings
-
-        role = get_settings().default_user_role
+    role = _role_for_new_user(role)
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
     reports_flag = 1 if can_view_reports else 0
@@ -11586,7 +11668,8 @@ async def create_user(
         await db.execute("BEGIN IMMEDIATE")
         try:
             cursor = await db.execute(
-                "SELECT id, role, api_key_hash FROM users WHERE username = ?",
+                "SELECT id, role, api_key_hash, created_via FROM users"
+                " WHERE username = ?",
                 (username,),
             )
             existing = await cursor.fetchone()
@@ -11595,7 +11678,14 @@ async def create_user(
                 if existing["role"] == "admin":
                     msg = f"User '{username}' is not eligible for self-registration"
                     raise ValueError(msg)
-                if existing["api_key_hash"]:
+                # A keyless row is only up for grabs when no provider vouched for
+                # it. ``create_keyless_user`` leaves the proxy's accounts without
+                # a key, so "no key" there means "the header is the credential",
+                # not "nobody claimed this name" — handing out a key on a name
+                # claim would be the takeover this project refuses everywhere
+                # else. Refused with the same message a key-bearing row sends, so
+                # a stranger learns nothing about which shape the row has.
+                if existing["api_key_hash"] or existing["created_via"] == "proxy":
                     msg = f"User '{username}' already has an API key. Please log in."
                     raise ValueError(msg)
                 # Existing user without key — generate one.

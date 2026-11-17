@@ -18863,13 +18863,16 @@ def _sso_error_redirect(reason: str) -> RedirectResponse:
 
 
 async def _audit_sso_refusal(
-    request: Request, provider: str, reason: str, *, subject: str = ""
+    request: Request, provider: str | None, reason: str, *, subject: str = ""
 ) -> None:
     """Record one refused SSO attempt.
 
     Args:
         request: The request that carried it.
-        provider: Provider name (or the unknown name that was asked for).
+        provider: Provider name (or the unknown name that was asked for), or
+            ``None`` when the credential that approved a device code named no
+            provider — a username and key, the bootstrap admin, or a proxy
+            identity. The row records the absence rather than inventing a name.
         reason: Internal reason code; the browser only ever sees a coarse one.
         subject: Local account the refusal was about, when one was resolved.
     """
@@ -20237,7 +20240,8 @@ async def sso_device_poll(request: Request) -> JSONResponse:
         ``{"status": "expired"}``, ``{"status": "denied"}``, or
         ``{"status": "approved", "token", "username", "provider"}``. The token
         is a session token — a bounded, individually revocable credential — and
-        it is handed out exactly once, because redemption consumes the code.
+        it is handed out exactly once, because redemption consumes the code. A
+        fault after the claim releases it, so the terminal can retry.
 
     A code approved for an account that has since become unusable is denied
     here rather than handed a session: approval is minutes older than this call,
@@ -20266,8 +20270,53 @@ async def sso_device_poll(request: Request) -> JSONResponse:
         # Approved between the two reads and claimed by a concurrent poll, or
         # expired in the same window: either way this caller gets nothing.
         return JSONResponse(content={"status": "expired"})
-    username = redeemed["username"]
-    provider = redeemed["approved_provider"]
+    try:
+        return await _redeem_claimed_device_code(
+            request,
+            device_code,
+            username=redeemed["username"],
+            provider=redeemed["approved_provider"],
+            settings=settings,
+        )
+    except Exception:
+        # Everything this poll does after the claim runs inside this one handler:
+        # a fault in the account lookup or an eligibility read would otherwise
+        # leave the code spent with no session ever minted, and no later poll
+        # could recover it. A deliberate refusal *returns* a "denied" response
+        # instead of raising, so a blocked account's code stays spent — it must
+        # not be re-polled into a session.
+        await storage.release_device_code(device_code)
+        raise
+
+
+async def _redeem_claimed_device_code(
+    request: Request,
+    device_code: str,
+    *,
+    username: str,
+    provider: str | None,
+    settings: Settings,
+) -> JSONResponse:
+    """Decide whether a claimed device code may sign its account in, then mint it.
+
+    Split out of :func:`sso_device_poll` so every step that runs *after* the claim
+    — the account lookup, the state gates, their audit rows and the exchange — is
+    inside that route's single claim-release handler. The refusals here are
+    returns, not exceptions, which is what keeps a deliberate denial spent.
+
+    Args:
+        request: The poll request; the audit rows are written against it.
+        device_code: The claimed code, spent by the exchange on success.
+        username: The account the approval named.
+        provider: The provider that approved the code — the session's issuer;
+            ``None`` for a username-and-key approval.
+        settings: Effective settings, read for the approval gate.
+
+    Returns:
+        ``{"status": "denied"}``, ``{"status": "expired"}`` when there is
+        nothing left to hand over, or ``{"status": "approved", "token",
+        "username", "provider"}``.
+    """
     user = await storage.get_user_by_username(username)
     # The bootstrap admin is reserved (``auth.base``) and has no row; anybody else
     # without one lost their account between approval and redemption.
@@ -20303,24 +20352,17 @@ async def sso_device_poll(request: Request) -> JSONResponse:
             )
             return JSONResponse(content={"status": "denied"})
 
-    try:
-        # One transaction: the session is written and the code spent together, so
-        # a failure cannot leave a token the terminal never saw behind a code no
-        # later poll can redeem. The eligibility and the rights are re-read from
-        # the account inside that transaction, so a block or a downgrade that
-        # committed while the code was pending wins over what this poll read
-        # above — the block has already dropped the account's sessions, and a
-        # token minted now would outlive that.
-        minted = await storage.exchange_device_code_for_session(
-            device_code,
-            username=username,
-            approved_provider=provider,
-        )
-    except Exception:
-        # The claim is released so the terminal can retry: a code that was never
-        # exchanged for a credential must not read as spent.
-        await storage.release_device_code(device_code)
-        raise
+    # One transaction: the session is written and the code spent together, so a
+    # failure cannot leave a token the terminal never saw behind a code no later
+    # poll can redeem. The eligibility and the rights are re-read from the account
+    # inside that transaction, so a block or a downgrade that committed while the
+    # code was pending wins over what this poll read above — the block has already
+    # dropped the account's sessions, and a token minted now would outlive that.
+    minted = await storage.exchange_device_code_for_session(
+        device_code,
+        username=username,
+        approved_provider=provider,
+    )
     if minted is not None and "refused" in minted:
         # The account was blocked inside the exchange transaction. The refusal
         # names the block, so the trail says why instead of reading as expiry.

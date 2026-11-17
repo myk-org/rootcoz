@@ -28,6 +28,8 @@ from rootcoz.auth import identity as auth_identity
 from rootcoz.auth.sso import AuthError, ClaimSet, configured_providers, get_provider
 from rootcoz.auth.sso import state as sso_state
 from rootcoz.auth.sso.google import GoogleProvider
+from rootcoz.auth.sso.oidc import OIDCProvider
+from rootcoz.auth.sso.redhat import RedHatSSOProvider
 from rootcoz.config import clear_settings_cache, get_settings, normalize_domain_list
 from rootcoz.encryption import encrypt_value
 from tests.conftest import admin_login, build_test_env, make_app_client
@@ -2609,17 +2611,63 @@ def _signed_id_token(
     return token, KeySet.import_key_set({"keys": [key.as_dict(private=False)]})
 
 
-async def _verify(token: str, key_set: object, nonce: str = "attempt-nonce") -> dict:
-    """Run ``_verify_id_token`` with the JWKS fetch stubbed out."""
-    provider = GoogleProvider(
+async def _verify(
+    token: str,
+    key_set: object,
+    nonce: str = "attempt-nonce",
+    provider: OIDCProvider | None = None,
+) -> dict:
+    """Run ``_verify_id_token`` with the JWKS fetch stubbed out.
+
+    Args:
+        token: The compact JWS to verify.
+        key_set: The key set the token was signed with.
+        nonce: The nonce the attempt sent.
+        provider: The provider to verify with; Google when omitted.
+
+    Returns:
+        The verified claims.
+    """
+    provider = provider or GoogleProvider(
         client_id="test-client-id",
         client_secret="s",
         issuer=GoogleProvider.issuer,
     )
-    with patch.object(GoogleProvider, "_jwks_for", return_value=key_set, autospec=True):
+    with patch.object(type(provider), "_jwks_for", return_value=key_set, autospec=True):
         return await provider._verify_id_token(
-            {"jwks_uri": "https://accounts.google.com/jwks"}, token, nonce
+            {"jwks_uri": f"{provider.issuer}/jwks"}, token, nonce
         )
+
+
+@pytest.mark.parametrize(
+    "issuer",
+    [
+        "https://accounts.google.com",
+        "https://accounts.google.com/",
+        # Google documents the bare host as an equally valid `iss` for its ID
+        # tokens, so a correctly signed token carrying it must sign the person in.
+        "accounts.google.com",
+    ],
+)
+async def test_every_issuer_form_google_documents_is_accepted(issuer: str) -> None:
+    """A valid Google login must not be refused over the spelling of ``iss``."""
+    token, key_set = _signed_id_token(issuer=issuer)
+    claims = await _verify(token, key_set)
+    assert claims["sub"] == "sub-1"
+
+
+async def test_another_provider_refuses_the_bare_form_of_its_issuer() -> None:
+    """Keycloak documents no second form, so its issuer must match exactly."""
+    provider = RedHatSSOProvider(
+        client_id="test-client-id",
+        client_secret="s",
+        issuer="https://sso.example.com/auth/realms/x",
+    )
+    token, key_set = _signed_id_token(issuer="sso.example.com/auth/realms/x")
+    with pytest.raises(AuthError) as excinfo:
+        await _verify(token, key_set, provider=provider)
+    assert excinfo.value.reason == "id_token_invalid"
+    assert "issuer" in str(excinfo.value)
 
 
 async def test_a_signed_id_token_from_the_issuer_is_accepted() -> None:
@@ -2633,6 +2681,18 @@ async def test_a_signed_id_token_from_the_issuer_is_accepted() -> None:
 async def test_a_token_from_another_issuer_is_refused() -> None:
     """A well-signed token from a different issuer must not be trusted."""
     token, key_set = _signed_id_token(issuer="https://evil.example")
+    with pytest.raises(AuthError) as excinfo:
+        await _verify(token, key_set)
+    assert excinfo.value.reason == "id_token_invalid"
+    assert "issuer" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("issuer", ["https://evil.example/", "accounts.evil.example"])
+async def test_no_prefix_or_trailing_slash_lets_a_foreign_issuer_in(
+    issuer: str,
+) -> None:
+    """Only a trailing slash is normalised: a near-miss issuer is still refused."""
+    token, key_set = _signed_id_token(issuer=issuer)
     with pytest.raises(AuthError) as excinfo:
         await _verify(token, key_set)
     assert excinfo.value.reason == "id_token_invalid"
@@ -5162,3 +5222,141 @@ async def test_an_existing_disabled_account_gets_no_working_sign_in(
 
         assert login.status_code == 200
         assert client.get("/api/auth/me", headers=headers).status_code == 401
+
+
+#: A trusted-proxy deployment: the header is the only credential in play.
+_PROXY_ENV = {"TRUST_PROXY_HEADERS": "true"}
+
+
+async def test_a_provisioned_proxy_row_carries_no_api_key(temp_db_path: Path) -> None:
+    """Provisioning records the person, not a secret nobody was ever shown.
+
+    A key minted here would be stored and never displayed, so the row would look
+    key-bearing while its owner held nothing — and self-service key login would
+    be impossible without an administrator.
+    """
+    for client in make_app_client(temp_db_path, _PROXY_ENV):
+        headers = {"X-Forwarded-User": "sso-provisioned"}
+        assert client.get("/api/auth/me", headers=headers).status_code == 200
+        # Not one page: the header authenticates every other request too.
+        assert client.get("/api/dashboard", headers=headers).status_code == 200
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT api_key_hash, role, status, created_via FROM users"
+                " WHERE username = 'sso-provisioned'"
+            )
+            row = dict(await cursor.fetchone())
+
+        assert row == {
+            "api_key_hash": None,
+            "role": "reviewer",
+            "status": "active",
+            "created_via": "proxy",
+        }
+
+
+async def test_registering_a_provisioned_name_is_refused(temp_db_path: Path) -> None:
+    """A name is not a credential: registration must not claim the account.
+
+    The row is keyless because the header is its credential, not because it is
+    unclaimed. Answering registration with a first key would let anyone who
+    knows a provisioned username take that person's account over.
+    """
+    for client in make_app_client(temp_db_path, _PROXY_ENV):
+        assert (
+            client.get(
+                "/api/auth/me", headers={"X-Forwarded-User": "sso-provisioned"}
+            ).status_code
+            == 200
+        )
+
+        response = client.post(
+            "/api/auth/register", json={"username": "sso-provisioned"}
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "User 'sso-provisioned' already has an API key. Please log in."
+        )
+        assert "api_key" not in response.json()
+
+        # Still keyless and still the proxy's account: the refused claim wrote
+        # nothing.
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT api_key_hash, created_via FROM users"
+                " WHERE username = 'sso-provisioned'"
+            )
+            assert dict(await cursor.fetchone()) == {
+                "api_key_hash": None,
+                "created_via": "proxy",
+            }
+
+
+async def test_an_administrator_rotation_restores_key_login(
+    temp_db_path: Path,
+) -> None:
+    """The documented recovery for a person whose proxy went away.
+
+    An administrator rotates the key — an audited act — and the new key logs the
+    account in. Self-service by name is never the way back in.
+    """
+    for client in make_app_client(temp_db_path, _PROXY_ENV):
+        assert (
+            client.get(
+                "/api/auth/me", headers={"X-Forwarded-User": "sso-provisioned"}
+            ).status_code
+            == 200
+        )
+
+        rotated = client.post(
+            "/api/admin/users/sso-provisioned/rotate-key", cookies=admin_login(client)
+        )
+        assert rotated.status_code == 200
+        new_key = rotated.json()["new_api_key"]
+
+        client.cookies.clear()
+        login = client.post(
+            "/api/auth/login",
+            json={"username": "sso-provisioned", "api_key": new_key},
+        )
+
+        assert login.status_code == 200
+        assert login.json()["username"] == "sso-provisioned"
+
+
+async def test_provisioning_still_audits_and_still_waits_for_approval(
+    temp_db_path: Path,
+) -> None:
+    """Keyless changes nothing about the row's meaning: same status, same trail."""
+    env = dict(_PROXY_ENV, REQUIRE_APPROVAL="true")
+    for client in make_app_client(temp_db_path, env):
+        held = client.get(
+            "/api/auth/me", headers={"X-Forwarded-User": "sso-provisioned"}
+        )
+        assert held.status_code == 403
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT api_key_hash, role, status, created_via FROM users"
+                " WHERE username = 'sso-provisioned'"
+            )
+            assert dict(await cursor.fetchone()) == {
+                "api_key_hash": None,
+                "role": "reviewer",
+                "status": "pending",
+                "created_via": "proxy",
+            }
+
+        provisioned = [
+            row
+            for row in await _audit_actions(temp_db_path)
+            if row["action"] == "auth.proxy_provisioned"
+        ]
+        assert len(provisioned) == 1
+        assert provisioned[0]["details"] == {
+            "status": "pending",
+            "created_via": "proxy",
+            "role": "reviewer",
+        }
