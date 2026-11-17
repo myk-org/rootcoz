@@ -61,6 +61,10 @@ _GENERATION_UNREAD: Any = object()
 # keepalives reset httpx's per-read timeout, so without this bound a lost
 # `turn_end` frame would park the turn — and the per-user chat lock — forever.
 _STREAM_TERMINAL_GRACE_SECONDS = 5.0
+# Bound on the cold-cache catalog discovery a settings load awaits. The sidecar
+# client's own timeout is minutes, so an unresponsive sidecar would hold every
+# admin settings page; a healthy one lists in well under this.
+_COLD_CATALOG_TIMEOUT_SECONDS = 2.0
 
 # Only explicitly initiated AI tasks set this; unrelated request tasks never inherit credentials.
 ai_username: ContextVar[str] = ContextVar("ai_username", default="")
@@ -500,9 +504,17 @@ async def server_provider_options() -> list[str]:
     if _model_catalog_cache is None:
         # The ambient half of the resolve reads the catalog snapshot, so a cold
         # cache would silently drop ambient providers from the picker (#586):
-        # one discovery here, no caching of its own.
+        # one bounded discovery here, no caching of its own — the cache stays
+        # cold on a timeout, so the next load retries instead of baking in an
+        # outage, and everything resolvable without the catalog still answers.
         try:
-            await _get_model_catalog()
+            await asyncio.wait_for(_get_model_catalog(), _COLD_CATALOG_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning(
+                "Sidecar model catalog did not answer within %.1fs for server"
+                " provider options; listing what resolves without it",
+                _COLD_CATALOG_TIMEOUT_SECONDS,
+            )
         except httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError:
             logger.warning(
                 "Unable to load the sidecar model catalog for server provider options"

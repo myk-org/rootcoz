@@ -3071,6 +3071,34 @@ async def test_card_lists_a_declared_provider_outside_catalog_and_registry(
     )
 
 
+async def test_card_folds_a_declared_mixed_case_provider_once(
+    client, monkeypatch, tmp_path
+):
+    """#586 r4: a declared ``EnMaaS`` beside a catalog ``enmaas`` is one row.
+
+    The declared ID is what the runtime resolves, so it is the row's spelling —
+    but the card folds providers case-insensitively, or the same provider got a
+    second lowercased row and its models were listed twice.
+    """
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {"EnMaaS": {"apiKey": "enmaas-literal-key"}},  # pragma: allowlist secret
+    )
+    _register_providers(monkeypatch)
+    _fake_catalog(monkeypatch, [{"provider": "enmaas", "id": "enmaas/glm-5-3"}])
+    _mock_supported(monkeypatch, [])
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+
+    listed = _providers(client)
+
+    assert list(listed) == ["EnMaaS"]
+    assert listed["EnMaaS"]["holds_credential"] is True
+    # The catalog's models follow the row, not the catalog's own spelling.
+    assert [m["id"] for m in listed["EnMaaS"]["models"]] == ["enmaas/glm-5-3"]
+    assert await ai_client.server_provider_options() == ["EnMaaS"]
+
+
 def test_page_load_reads_and_reports_the_manifest_once(
     client, monkeypatch, tmp_path, caplog
 ):

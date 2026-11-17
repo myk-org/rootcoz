@@ -21588,9 +21588,15 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
         listed_ids.setdefault(key_provider.lower(), key_provider)
     # A provider the sidecar's own manifest authenticates gets a row even with
     # no catalog model and no key-capability entry: the picker offers it
-    # (``holds_credential``), so the card must show it too (#586).
+    # (``holds_credential``), so the card must show it too (#586). The declared
+    # ID is what the runtime resolves, so it is the row's spelling — but it is
+    # folded on the lowercase key, or a mixed-case ``EnMaaS`` would get a
+    # second row beside the catalog's ``enmaas``.
     for declared_id in sidecar_declared:
-        listed_ids.setdefault(declared_id, declared_id)
+        listed_ids[declared_id.lower()] = declared_id
+    # Catalog rows by the same folded key: the row's spelling may now come from
+    # the manifest while the catalog bucket keeps its own casing.
+    catalog_models = {p.lower(): rows for p, rows in models_by_provider.items()}
     for provider in sorted(listed_ids.values()):
         provider_lower = provider.lower()
         # Managed = stored selection rows or a stored key — the same rule
@@ -21608,7 +21614,7 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
                 "included": (m["id"] in selected) if managed else True,
                 "free": m["id"] in free_by_provider.get(provider_lower, set()),
             }
-            for m in models_by_provider.get(provider, [])
+            for m in catalog_models.get(provider_lower, [])
         ]
         record = stored.get(normalize_provider(provider))
         # Which credential captured the key-scoped listing above (#372): a

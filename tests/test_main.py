@@ -7,6 +7,7 @@ import logging
 import os
 import socket
 import threading
+import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -15778,6 +15779,40 @@ class TestAdminSettingsEndpoints:
         item = next(s for s in response.json() if s["key"] == "active_server_providers")
         assert item["options"] == ["EnMaaS"]
         assert discover.await_count == 1
+
+    def test_settings_provider_options_bound_a_hanging_sidecar(
+        self, test_client, monkeypatch
+    ) -> None:
+        """#586 r4: an unresponsive sidecar must not hold the settings page.
+
+        The cold-cache discovery is bounded, so a sidecar that accepts the
+        connection and never answers costs one short wait rather than the
+        sidecar client's minutes-long timeout — and the stored keys are still
+        offered.
+        """
+        from rootcoz import ai_client
+
+        monkeypatch.setattr(ai_client, "_COLD_CATALOG_TIMEOUT_SECONDS", 0.1)
+
+        async def _hang(*_: object) -> list[dict]:
+            await asyncio.sleep(1)
+            return []
+
+        monkeypatch.setattr(ai_client, "_list_models_raw", _hang)
+        monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+        monkeypatch.setattr(ai_client, "_agent_manifest", dict)
+        monkeypatch.setattr(
+            storage,
+            "list_server_ai_providers",
+            AsyncMock(return_value=[{"provider": "EnMaaS"}]),
+        )
+        started = time.monotonic()
+        response = test_client.get("/api/admin/settings")
+        elapsed = time.monotonic() - started
+        assert response.status_code == 200
+        item = next(s for s in response.json() if s["key"] == "active_server_providers")
+        assert item["options"] == ["EnMaaS"]
+        assert elapsed < 0.5
 
     def test_settings_provider_options_exclude_catalog_only_providers(
         self, test_client, monkeypatch
