@@ -11,6 +11,7 @@ import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared
 import { isAnalysisFormAiUnavailable } from '@/lib/analysisAi'
 import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
+import { useAiSelection } from '@/lib/useAiSelection'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
@@ -69,9 +70,9 @@ export function NewAnalysisPage() {
   const [pollInterval, setPollInterval] = useState(2)
   const [maxWait, setMaxWait] = useState(0)
 
-  // AI configuration
-  const [aiProvider, setAiProvider] = useState('')
-  const [aiModel, setAiModel] = useState('')
+  // AI configuration — the pair itself comes from the one selection hook below, so an
+  // unserved stored default is no selection here exactly as on the other surfaces (#591).
+  const [storedAi, setStoredAi] = useState({ provider: '', model: '' })
   const [aiCallTimeout, setAiCallTimeout] = useState<number | undefined>(undefined)
   const [rawPrompt, setRawPrompt] = useState('')
 
@@ -115,8 +116,8 @@ export function NewAnalysisPage() {
     }, 5000)
     api.get<DefaultServerSettings>('/api/default-server-settings').then((defaults) => {
       if (cancelled || resolved) return
-      if (defaults.ai_provider) setAiProvider(normalizeProvider(defaults.ai_provider))
-      if (defaults.ai_model) setAiModel(defaults.ai_model)
+      // Read only: the hook judges it against the catalog and never writes it back.
+      setStoredAi({ provider: normalizeProvider(defaults.ai_provider ?? ''), model: defaults.ai_model ?? '' })
       setAiCallTimeout(defaults.ai_call_timeout)
       setTestsRepoUrl(defaults.tests_repo_url)
       if (defaults.tests_repo_ref) setTestsRepoRef(defaults.tests_repo_ref)
@@ -167,6 +168,7 @@ export function NewAnalysisPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const { providers, providerStatus } = useProviderCatalog()
+  const { aiProvider, aiModel, setAiPair } = useAiSelection(storedAi.provider, storedAi.model)
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -213,7 +215,8 @@ export function NewAnalysisPage() {
     setError('')
     try {
       const commonFields: Record<string, unknown> = {
-        // Always include user-entered fields
+        // Always include user-entered fields. With no selection both keys are omitted on
+        // purpose: the server then resolves its own stored default (`_resolve_ai_config_allow_defer`).
         ...(aiProvider && { ai_provider: aiProvider }),
         ...(aiModel && { ai_model: aiModel }),
         ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
@@ -575,7 +578,7 @@ export function NewAnalysisPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={false} />
+                <AnalysisProviderSelect value={aiProvider} onChange={(v) => setAiPair(v, '')} forceServer={false} />
               </div>
               <div className="space-y-1.5">
                 <FieldLabel>AI Call Timeout</FieldLabel>
@@ -590,7 +593,13 @@ export function NewAnalysisPage() {
             </div>
             <div className="space-y-1.5">
               <FieldLabel>AI Model</FieldLabel>
-              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={false} />
+              <AnalysisModelSelect
+                provider={aiProvider}
+                value={aiModel}
+                onChange={(model) => setAiPair(aiProvider, model, { commit: false })}
+                onCommit={(model) => setAiPair(aiProvider, model)}
+                forceServer={false}
+              />
             </div>
             {!canUseServerProviders && !canUseFreeProviders && <CredentialAccessNotice className="mt-2" />}
             <div className="space-y-1.5">
