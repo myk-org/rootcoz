@@ -561,6 +561,45 @@ async def test_add_key_refuses_before_storing_when_the_catalog_is_absent(
     assert SECRET not in json.dumps(events[0])
 
 
+async def test_add_key_with_a_working_capture_never_needs_the_catalog(
+    client, monkeypatch
+):
+    """A cold catalog never blocks an add whose key-scoped capture has rows.
+
+    The seed reads the captured listing, so the catalog is only consulted when
+    that listing came back empty. Resolving it unconditionally refused a
+    perfectly good key while the catalog was cold, even though discovery had
+    just answered (#586 r8, a regression of the conditional #586 r6 had).
+    """
+    catalog = AsyncMock(return_value=None)
+    monkeypatch.setattr(rootcoz_main, "bounded_model_catalog", catalog)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gemini-3-pro"}])
+
+    added = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+
+    assert added.status_code == 200
+    # Not even asked: the capture's listing is what the seed used.
+    catalog.assert_not_awaited()
+    assert await storage.get_server_ai_credential("google") == SECRET
+    assert [
+        (row["provider"], row["model"])
+        for row in await storage.list_server_provider_models()
+    ] == [("google", "gemini-3-pro")]
+    events = (await storage.list_audit_events(action="provider.key.store"))["events"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "success"
+
+
 async def test_add_key_with_a_catalog_stores_seeds_and_audits_success(
     client, monkeypatch
 ):
@@ -955,20 +994,28 @@ async def test_non_catalog_provider_with_listing_appears_in_scoped_models(
 
 
 async def test_concurrent_rotation_supersedes_stale_capture(client, monkeypatch):
-    """A capture whose key was rotated mid-discovery is discarded (#350 r1)."""
+    """A capture whose key was rotated after the add's write is discarded (#350 r2).
+
+    The discovery runs before that write — the add must know whether its seed
+    needs the catalog before anything is stored (#586 r8) — so the race this
+    guards is a rotation landing between the write and the capture's
+    post-discovery check: the older capture must store nothing rather than
+    wear the newer credential's generation.
+    """
     _fake_catalog(monkeypatch, CATALOG)
     _mock_supported(monkeypatch, ["google"])
     _mock_verify(monkeypatch, "accepted")
     discovery_calls = _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}])
-    # Rotate the credential while discovery is in flight — between the
-    # capture's start and its post-discovery key check.
-    inner_discovery = ai_client.models_for_api_key
+    # Rotate the credential right after this add's write — before the capture's
+    # post-discovery key check.
+    real_set = storage.set_server_ai_credential
 
-    async def rotating_discovery(provider, key):
-        await storage.set_server_ai_credential(provider, "newer-key-value-9", "admin")
-        return await inner_discovery(provider, key)
+    async def set_then_rotate(provider, key, updated_by):
+        generation = await real_set(provider, key, updated_by)
+        await real_set(provider, "newer-key-value-9", "admin")
+        return generation
 
-    monkeypatch.setattr(ai_client, "models_for_api_key", rotating_discovery)
+    monkeypatch.setattr(storage, "set_server_ai_credential", set_then_rotate)
     added = client.post(
         "/api/admin/server-providers",
         headers=_admin_headers(),
@@ -2043,24 +2090,26 @@ async def test_stale_capture_write_is_generation_gated(tmp_path, monkeypatch):
 async def test_concurrent_same_key_rotation_supersedes_stale_capture(
     client, monkeypatch
 ):
-    """A same-value re-store mid-discovery still discards the stale capture.
+    """A same-value re-store after the add's write still discards the capture.
 
-    The old key-equality check let this capture through (same key value);
-    only the generation binding — every credential write bumps it — makes
-    the overlapping write lose (#350 r2).
+    The key-equality check lets this capture through (the value never
+    changed); only the generation binding — every credential write bumps it —
+    makes the overlapping write lose (#350 r2). The discovery runs before the
+    add's write (#586 r8), so the rotation is rigged to land right after it.
     """
     _fake_catalog(monkeypatch, CATALOG)
     _mock_supported(monkeypatch, ["google"])
     _mock_verify(monkeypatch, "accepted")
     _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}])
-    inner_discovery = ai_client.models_for_api_key
+    real_set = storage.set_server_ai_credential
 
-    async def rotating_discovery(provider, key):
-        # Re-store the SAME key value while discovery is in flight.
-        await storage.set_server_ai_credential(provider, key, "admin")
-        return await inner_discovery(provider, key)
+    async def set_then_restore(provider, key, updated_by):
+        generation = await real_set(provider, key, updated_by)
+        # Re-store the SAME key value right after this add's write.
+        await real_set(provider, key, "admin")
+        return generation
 
-    monkeypatch.setattr(ai_client, "models_for_api_key", rotating_discovery)
+    monkeypatch.setattr(storage, "set_server_ai_credential", set_then_restore)
     added = client.post(
         "/api/admin/server-providers",
         headers=_admin_headers(),
@@ -2072,6 +2121,9 @@ async def test_concurrent_same_key_rotation_supersedes_stale_capture(
     )
     assert added.status_code == 200
     assert added.json()["ok"] is True
+    # The stored key value never changed, so the key-equality check alone would
+    # have let this capture through.
+    assert await storage.get_server_ai_credential("google") == SECRET
     # The stale capture was discarded: no rows were written.
     assert await storage.list_server_provider_key_models() == []
 

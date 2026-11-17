@@ -20753,14 +20753,38 @@ async def _store_supported_key_listing(
     return listing_models, stored
 
 
+async def _discover_key_scoped_models(provider: str, key: str) -> dict[str, Any] | None:
+    """The key's own model listing, or ``None`` when discovery is unavailable.
+
+    Run by the caller of :func:`_capture_key_scoped_models` instead of by it:
+    a fresh key add must know *before* it stores the credential whether the
+    capture will yield rows, because only an empty one makes the selection
+    seed fall back to the catalog (#586 r8).
+    """
+    try:
+        from rootcoz.ai_client import models_for_api_key
+
+        return await models_for_api_key(provider, key)
+    except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
+        logger.warning(
+            "Key-scoped model discovery unavailable for provider=%s", provider
+        )
+        return None
+
+
 async def _capture_key_scoped_models(
     provider: str,
     key: str,
     *,
+    discovery: dict[str, Any] | None,
     keep_on_failure: bool,
     generation: int | None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Run key-scoped discovery and persist its result (#350).
+
+    ``discovery`` is what :func:`_discover_key_scoped_models` fetched (``None``
+    for an unavailable one); it is handed in, not fetched here, so the add path
+    can decide about the catalog before it stores the credential.
 
     Returns ``(models, status)`` where status is ``"supported"`` (rows
     stored), ``"unsupported"`` (no listing endpoint — rows cleared),
@@ -20782,14 +20806,7 @@ async def _capture_key_scoped_models(
     zero accessible models is stored as a sentinel row — "verified empty"
     — so the pool exposes nothing instead of falling back to the catalog.
     """
-    try:
-        from rootcoz.ai_client import models_for_api_key
-
-        discovery = await models_for_api_key(provider, key)
-    except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
-        logger.warning(
-            "Key-scoped model discovery unavailable for provider=%s", provider
-        )
+    if discovery is None:
         # A failed capture after add/rotate must not leave the previous
         # key's rows exposed as the new key's verified listing; a failed
         # refresh (same key) keeps the last captured listing instead.
@@ -21269,13 +21286,17 @@ async def _resolve_verification_model(
     return models, None
 
 
-async def _selection_seed_catalog_models(provider: str) -> list[str] | None:
+async def _selection_seed_catalog_models(
+    provider: str, *, discovery: dict[str, Any] | None
+) -> list[str] | None:
     """The catalog ids a fresh key add would seed, resolved before the write.
 
-    ``None`` when the provider already has a selection: the seed is a no-op
-    and needs no catalog. Otherwise this answers what
-    :func:`_seed_server_provider_selection` falls back to when the key-scoped
-    capture yields no rows, and it answers it *before* the credential is
+    ``None`` when the seed needs no catalog: the provider already has a
+    selection (the seed is a no-op), or the key-scoped capture stores a
+    listing of its own — including the empty-id sentinel of a verified-empty
+    one — which the seed always prefers. Only an empty capture (discovery
+    unavailable, or no listing endpoint) makes the seed fall back to the
+    catalog, and this answers that fallback *before* the credential is
     stored — the seed runs after that write, so a refusal there would leave a
     managed provider with no selection (every model withdrawn), no audit row,
     and a ``409 use rotate-key`` on the retry (#586 r7).
@@ -21284,6 +21305,10 @@ async def _selection_seed_catalog_models(provider: str) -> list[str] | None:
         row["provider"].lower() == provider.lower()
         for row in await storage.list_server_provider_models()
     ):
+        return None
+    if discovery is not None and discovery["modelListingSupported"]:
+        # The capture stores this listing, sentinel included, so the seed reads
+        # the key-scoped rows and never asks for the catalog.
         return None
     catalog = await bounded_model_catalog()
     if catalog is None:
@@ -21411,10 +21436,16 @@ async def _verify_and_store_server_provider_key(
         # needs is resolved here, while a refusal still changes nothing: a
         # refusal after the write would leave the provider managed with no
         # selection rows (every model withdrawn), no audit row, and a 409
-        # "use rotate-key" on the retry (#586 r7). Resolved for a fresh add
-        # only — a rotate never reseeds, by design, so it needs no catalog.
+        # "use rotate-key" on the retry (#586 r7). The capture's own discovery
+        # is what decides whether a catalog is needed at all — an empty one is
+        # the only case that falls back to it — so it runs first and the
+        # capture reuses its answer (#586 r8). A rotate reseeds nothing, by
+        # design, so it needs no catalog.
+        discovery = await _discover_key_scoped_models(provider, key)
         seed_catalog_models = (
-            None if replacing else await _selection_seed_catalog_models(provider)
+            None
+            if replacing
+            else await _selection_seed_catalog_models(provider, discovery=discovery)
         )
         # The generation this write assigned, returned from inside the upsert's
         # transaction — never re-read: an overlapping rotation (even to the same
@@ -21434,6 +21465,7 @@ async def _verify_and_store_server_provider_key(
         key_models, capture_status = await _capture_key_scoped_models(
             provider,
             key,
+            discovery=discovery,
             keep_on_failure=False,
             generation=generation,
         )
@@ -22025,9 +22057,11 @@ async def refresh_server_provider_models(
     # Same key, so a failed discovery keeps the last captured listing
     # (#350 r2); the generation binding still discards the refresh when a
     # concurrent rotation moves the credential on.
+    discovery = await _discover_key_scoped_models(provider, key)
     models, status = await _capture_key_scoped_models(
         provider,
         key,
+        discovery=discovery,
         keep_on_failure=True,
         generation=generation,
     )
