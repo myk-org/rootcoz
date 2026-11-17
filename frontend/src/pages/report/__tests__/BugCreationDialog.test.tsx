@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { useEffect, type ReactNode } from 'react'
@@ -136,21 +136,46 @@ describe('BugCreationDialog AI picker', () => {
   it('gates a server-backed pair when the user has no server grant', async () => {
     grant = false
     const user = userEvent.setup()
+    // The analysis ran with a server-credentialed pair this user cannot use, so the
+    // dialog does not adopt it as a selection (#591) — the user picks a pair they can.
     await openPicker('claude', 'sonnet')
 
     expect(screen.getAllByText(SERVER_ACCESS_HELP).length).toBeGreaterThan(0)
-    await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
-    const serverModel = await screen.findByRole('option', { name: /sonnet/ })
-    expect(serverModel).toHaveAttribute('aria-disabled', 'true')
-    expect(screen.getByRole('button', { name: /continue/i })).toBeDisabled()
-    expect(screen.getByRole('alert')).toHaveTextContent(/not available with your credentials/i)
+    expect(screen.getByRole('combobox', { name: 'AI Provider' })).toHaveTextContent('Server default')
+    await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
+    const serverProvider = await screen.findByRole('option', { name: /claude.*Server/i })
+    expect(serverProvider).toHaveAttribute('aria-disabled', 'true')
 
     // A personal-key pair is usable, so the gate clears.
-    await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
     await user.click(await screen.findByRole('option', { name: /openai.*User/i }))
     await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
     await user.click(await screen.findByRole('option', { name: /gpt-4o/ }))
     expect(screen.getByRole('button', { name: /continue/i })).toBeEnabled()
+  })
+
+  it('refuses to send a pair the catalog cannot serve, instead of letting the server 400', async () => {
+    const user = userEvent.setup()
+    await openPicker('openai', 'gpt-4o')
+
+    await user.type(screen.getByRole('combobox', { name: 'AI Model' }), '-nope')
+    expect(screen.getByRole('alert')).toHaveTextContent(/not available/i)
+    expect(screen.getByRole('button', { name: /continue/i })).toBeDisabled()
+  })
+
+  it('waits for the catalog before previewing the supplied pair', async () => {
+    // The issue prompt can land before /api/ai-models. Posting then sends an empty pair,
+    // and the server resolves the preview against its stored default instead (#591).
+    let releaseCatalog: (value: unknown) => void = () => {}
+    get.mockImplementation(withAccountRow((path) => {
+      if (path.startsWith('/api/ai-models')) return new Promise((resolve) => { releaseCatalog = resolve })
+      if (path.endsWith('/issue-prompt')) return { issue_prompt: 'Describe the bug' }
+      return {}
+    }))
+    await openPicker('openai', 'gpt-4o')
+
+    expect(screen.getByRole('button', { name: /continue/i })).toBeDisabled()
+    await act(async () => releaseCatalog(catalog))
+    await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).toBeEnabled())
   })
 
   it('sends the analysis pair with the preview request', async () => {

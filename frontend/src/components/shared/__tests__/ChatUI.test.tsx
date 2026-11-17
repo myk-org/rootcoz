@@ -88,8 +88,13 @@ it('loads history without POST init and starts only with a valid catalog pair', 
   expect(await screen.findByRole('button', { name: 'Start Chat' })).toBeDisabled()
   expect(get).toHaveBeenCalledWith('/api/chat/job')
   expect(post).not.toHaveBeenCalledWith('/api/chat/job/init', expect.anything())
+  // The seeded pair names a model the catalog does not serve, so it never became a
+  // selection (#591): the pair is picked from the catalog instead.
+  expect(screen.getByRole('combobox', { name: 'AI Provider' })).toHaveTextContent('Select provider...')
+  await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
+  await user.click(await screen.findByRole('option', { name: /openai.*User/i }))
   await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
-  await user.click(screen.getByRole('option', { name: /gpt.*User/i }))
+  await user.click(await screen.findByRole('option', { name: /gpt.*User/i }))
   await user.click(screen.getByRole('button', { name: 'Start Chat' }))
   await waitFor(() => expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'openai', ai_model: 'gpt' }))
   expect(screen.queryByRole('combobox', { name: 'AI Provider' })).not.toBeInTheDocument()
@@ -537,7 +542,10 @@ it('accepts manual model IDs only when a user key cannot list models', async () 
   setup()
   const user = userEvent.setup()
   render(page('openrouter', ''))
-  await screen.findByRole('button', { name: 'Start Chat' })
+  // A seeded pair with no model is not a selection (#591), so the provider comes from
+  // the catalog first — then the model is typed, because this key cannot list them.
+  await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
+  await user.click(await screen.findByRole('option', { name: /openrouter/i }))
   await user.type(screen.getByRole('combobox', { name: 'AI Model' }), 'manual-id')
   expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled()
   await user.click(screen.getByRole('button', { name: 'Start Chat' }))

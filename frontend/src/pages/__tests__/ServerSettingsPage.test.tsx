@@ -28,12 +28,26 @@ vi.mock('@/lib/auth', () => ({
   }),
 }))
 vi.mock('@/hooks/useProviderModels', () => ({
-  useProviderModels: () => ({ models: [], refresh: vi.fn(), refreshing: false }),
+  useProviderModels: (provider: string) => {
+    modelListingCalls.push(provider)
+    return { models: [], refresh: vi.fn(), refreshing: false }
+  },
 }))
+/** Providers the page asked for a model listing — never one the catalog lacks (#591). */
+let modelListingCalls: string[] = []
+/** Mutable catalog, so a test can serve (or not serve) the stored default. */
+let catalog: {
+  providers: Record<string, unknown[]>
+  providerStatus: Record<string, unknown>
+  providerKeys: string[]
+  /** Succeeds with an answer — left absent for "no answer yet". */
+  loaded?: boolean
+} = {
+  providers: {}, providerStatus: {}, providerKeys: [],
+}
 vi.mock('@/lib/useProviderOptions', () => ({
   useCursorAuthStatus: () => null,
-  // No catalog: the peer editor renders its empty pickers.
-  useProviderCatalog: () => ({ providers: {}, providerStatus: {} }),
+  useProviderCatalog: () => catalog,
 }))
 vi.mock('@/components/shared/ServerProvidersCard', () => ({
   ServerProvidersCard: () => <div data-testid="server-providers-card" />,
@@ -211,6 +225,9 @@ beforeEach(() => {
   vi.clearAllMocks()
   localStorage.clear()
   scrollIntoView.mockClear()
+  modelListingCalls = []
+  // No catalog by default: the peer editor renders its empty pickers.
+  catalog = { providers: {}, providerStatus: {}, providerKeys: [] }
   get.mockResolvedValue(baseSettings() as never)
   put.mockResolvedValue({} as never)
   testIntegration.mockResolvedValue({ ok: true, message: 'ok' } as never)
@@ -1729,6 +1746,123 @@ describe('ServerSettingsPage env parity (#347)', () => {
     fireEvent.click(await screen.findByRole('tab', { name: 'Analysis' }))
     await waitForRow('active_server_providers')
     expect(screen.queryByText(/Free AI models/)).not.toBeInTheDocument()
+  })
+})
+
+// #591 — the stored AI default is judged against the catalog this server actually has.
+describe('ServerSettingsPage AI default catalog check (#591)', () => {
+  /** One catalog model entry: user-credentialed and verified unless told otherwise. */
+  const modelEntry = (provider: string, entry: Record<string, unknown> | string) => ({
+    id: typeof entry === 'string' ? entry : String(entry.id),
+    name: typeof entry === 'string' ? entry : String(entry.id),
+    provider,
+    credential_sources: ['user'],
+    verified: true,
+    ...(typeof entry === 'string' ? {} : entry),
+  })
+  /** provider → its models, so a stored pair can be served or missed exactly. */
+  const catalogServing = (models: Record<string, Array<Record<string, unknown>> | string>) => ({
+    providers: Object.fromEntries(Object.entries(models).map(([provider, entries]) => [
+      provider,
+      (typeof entries === 'string' ? [entries] : entries).map((entry) => modelEntry(provider, entry)),
+    ])),
+    providerStatus: {},
+    providerKeys: Object.keys(models),
+    loaded: true,
+  })
+
+  function storedDefault(provider: string, model: string) {
+    const settings = baseSettings()
+    Object.assign(settings.find((s) => s.key === 'ai_provider')!, { value: provider, source: 'db' })
+    Object.assign(settings.find((s) => s.key === 'ai_model')!, { value: model, source: 'db' })
+    get.mockResolvedValue(settings as never)
+  }
+
+  async function openAiRow() {
+    renderPage()
+    // #589 filed the AI settings under the Analysis tab.
+    fireEvent.click(await screen.findByRole('tab', { name: 'Analysis' }))
+    await waitForRow('ai_provider')
+    return row('ai_provider')!
+  }
+
+  it('reports a stored default the catalog does not serve, without asking for its models', async () => {
+    catalog = catalogServing({ enmaas: 'enmaas-model' })
+    storedDefault('cursor', 'cursor:cursor-grok-4.6-high')
+    const providerRow = await openAiRow()
+
+    expect(within(providerRow).getByRole('status')).toHaveTextContent(/the provider catalog does not offer cursor/)
+    expect(within(providerRow).getAllByText(/cursor/).length).toBeGreaterThan(0)
+    // No model listing for a provider the catalog does not offer — that is the 400.
+    expect(modelListingCalls).not.toContain('cursor')
+    // The stored default is displayed, never cleared or rewritten by rendering.
+    expect(put).not.toHaveBeenCalled()
+    expect(persistSetting).not.toHaveBeenCalled()
+    expect(vi.mocked(api.delete)).not.toHaveBeenCalled()
+  })
+
+  it('says the model is the part the catalog misses when the provider is there', async () => {
+    catalog = catalogServing({ gemini: 'gemini-2.5-pro' })
+    storedDefault('gemini', 'gemini-2.0-flash')
+    const providerRow = await openAiRow()
+
+    expect(within(providerRow).getByRole('status')).toHaveTextContent(
+      /gemini is listed, but the provider catalog does not offer the model gemini-2\.0-flash/,
+    )
+  })
+
+  it('does not call a listed model missing when only a session is refused', async () => {
+    // That model is in the picker right below: "the catalog does not offer it" would contradict the screen.
+    catalog = catalogServing({ gemini: [{ id: 'gemini-2.5-pro', session_supported: false }] })
+    storedDefault('gemini', 'gemini-2.5-pro')
+    const providerRow = await openAiRow()
+
+    const status = within(providerRow).getByRole('status')
+    expect(status).toHaveTextContent(/gemini \/ gemini-2\.5-pro is listed, but the sidecar cannot open a session/i)
+    expect(status).not.toHaveTextContent(/does not offer/i)
+  })
+
+  it('stays quiet for a stored default the catalog serves', async () => {
+    catalog = catalogServing({ gemini: 'gemini-2.5-pro' })
+    storedDefault('gemini', 'gemini-2.5-pro')
+    const providerRow = await openAiRow()
+
+    expect(within(providerRow).queryByRole('status')).toBeNull()
+    expect(modelListingCalls).toContain('gemini')
+  })
+
+  it('blames the provider for a status-only synthetic cursor entry', async () => {
+    // The backend adds `provider_status.cursor` whenever a Cursor-family provider is
+    // registered, while providers only carries `cli-cursor`/`acpx-cursor`: the picker
+    // never lists `cursor`, so a stale `cursor` default is a provider problem (#591).
+    catalog = {
+      ...catalogServing({ 'cli-cursor': 'cursor:cursor-grok-4.6-high' }),
+      providerStatus: { cursor: { ok: true, reason: null, hint: null, model_count: 1 } },
+    }
+    storedDefault('cursor', 'cursor:cursor-grok-4.6-high')
+    const providerRow = await openAiRow()
+
+    const status = within(providerRow).getByRole('status')
+    expect(status).toHaveTextContent(/the provider catalog does not offer cursor/)
+    expect(status).not.toHaveTextContent(/does not offer the model/)
+  })
+
+  it('reports a stored default an empty catalog cannot serve', async () => {
+    // An empty provider list is a real answer: a model request would be rejected.
+    catalog = { providers: {}, providerStatus: {}, providerKeys: [], loaded: true }
+    storedDefault('gemini', 'gemini-2.5-pro')
+    const providerRow = await openAiRow()
+
+    expect(within(providerRow).getByRole('status')).toHaveTextContent(/the provider catalog does not offer gemini/)
+  })
+
+  it('stays quiet when the catalog request failed', async () => {
+    // A failed request says nothing about the stored default.
+    catalog = { providers: {}, providerStatus: {}, providerKeys: [], loaded: false }
+    storedDefault('gemini', 'gemini-2.5-pro')
+    const providerRow = await openAiRow()
+
+    expect(within(providerRow).queryByRole('status')).toBeNull()
   })
 })
 

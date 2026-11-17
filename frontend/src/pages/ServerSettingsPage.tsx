@@ -52,7 +52,9 @@ import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import { CursorAuthBanner } from '@/components/shared/CursorAuthBanner'
 import { TestResultBanner } from '@/components/shared/TestResultBanner'
 import { useProviderModels } from '@/hooks/useProviderModels'
-import { useCursorAuthStatus } from '@/lib/useProviderOptions'
+import { useCursorAuthStatus, useProviderCatalog } from '@/lib/useProviderOptions'
+import { normalizeProvider } from '@/lib/aiProviders'
+import { isAnalysisAiAvailable, analysisAiUnavailablePart, type AnalysisAiUnavailablePart } from '@/lib/analysisAi'
 import { ServerProvidersCard } from '@/components/shared/ServerProvidersCard'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
@@ -688,8 +690,22 @@ function EnvVarWarning({ setting }: { setting: ServerSetting }) {
 // Component
 // ---------------------------------------------------------------------------
 
+/**
+ * Why the stored default cannot be served, in the catalog's own terms. Naming the model
+ * (or the session) matters: blaming the provider every time contradicted the picker,
+ * which lists a model the sidecar merely refuses to open a session for.
+ */
+function unservedDefaultReason(part: AnalysisAiUnavailablePart, provider: string, model: string): React.ReactNode {
+  const id = (value: string) => <span className="font-mono">{value}</span>
+  const pair = model ? <>{id(provider)} / {id(model)}</> : id(provider)
+  if (part === 'provider') return <>the provider catalog does not offer {pair}</>
+  if (part === 'session') return <>{pair} is listed, but the sidecar cannot open a session for that model</>
+  if (!model) return <>{id(provider)} is listed, but the stored default names no model for it</>
+  return <>{id(provider)} is listed, but the provider catalog does not offer the model {id(model)}</>
+}
+
 export function ServerSettingsPage() {
-  const { isAdmin } = useAuth()
+  const { isAdmin, canUseServerProviders, canUseFreeProviders } = useAuth()
   const [state, dispatch] = useReducer(reducer, initialState)
 
   // Peer config structured editor (always inline, E2E-F28..F30). A null draft
@@ -708,7 +724,19 @@ export function ServerSettingsPage() {
   const effectiveAiProvider = aiProviderEditing
     ? aiProviderValue
     : (savedAiProvider || aiProviderValue)
-  const { models: aiModels, refresh: refreshModels, refreshing: refreshingModels } = useProviderModels(effectiveAiProvider)
+  // The catalog decides whether the default can be served at all (#591), and names the
+  // part it cannot serve: a provider it does not have, a model it does not offer, or a
+  // listed model the sidecar opens no session for. The stored value is left as it is.
+  const {
+    providers: aiProviders, providerStatus: aiProviderStatus, providerKeys: aiProviderKeys, loaded: aiCatalogLoaded,
+  } = useProviderCatalog()
+  // A catalog that answered with no providers is still an answer; one that failed is not.
+  const aiDefaultUnserved = savedAiProvider !== '' && aiCatalogLoaded &&
+    !isAnalysisAiAvailable(aiProviders, aiProviderStatus, savedAiProvider, savedAiModel, false, canUseServerProviders, canUseFreeProviders)
+    ? analysisAiUnavailablePart(aiProviders, aiProviderStatus, savedAiProvider, savedAiModel, canUseServerProviders, canUseFreeProviders)
+    : null
+  const modelListingProvider = aiProviderKeys.includes(normalizeProvider(effectiveAiProvider)) ? effectiveAiProvider : ''
+  const { models: aiModels, refresh: refreshModels, refreshing: refreshingModels } = useProviderModels(modelListingProvider)
   const cursorAuthStatus = useCursorAuthStatus()
 
   // Additional repos structured editor — same draft contract as the peers.
@@ -1416,6 +1444,13 @@ export function ServerSettingsPage() {
             onShowHistory={() => handleShowHistory(setting.key)}
             configureLabel="Configure provider"
             notConfiguredLabel="Not configured (uses AI_PROVIDER env var)"
+            notice={aiDefaultUnserved ? (
+              <p role="status" className="flex items-center gap-1.5 text-xs text-signal-amber">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                Not available on this server: {unservedDefaultReason(aiDefaultUnserved, savedAiProvider, savedAiModel)}.
+                AI surfaces therefore show no provider selected. The default is left unchanged.
+              </p>
+            ) : undefined}
           >
             <ProviderSelect
               showCredentialSources
@@ -2105,6 +2140,8 @@ interface AiSettingRowProps {
   historyLoading: boolean
   onShowHistory: () => void
   children: React.ReactNode  // The actual editor (ProviderSelect or ModelCombobox)
+  /** Row-level warning rendered next to the stored value (never an editor state). */
+  notice?: React.ReactNode
   configureLabel: string  // e.g. "Configure provider" or "Configure model"
   notConfiguredLabel: string  // e.g. "Not configured (uses AI_PROVIDER env var)"
 }
@@ -2123,6 +2160,7 @@ function AiSettingRow({
   historyLoading,
   onShowHistory,
   children,
+  notice,
   configureLabel,
   notConfiguredLabel,
 }: AiSettingRowProps) {
@@ -2158,6 +2196,7 @@ function AiSettingRow({
           </button>
         </div>
       )}
+      {notice}
       {setting.source === 'db' && setting.updated_by && (
         <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
       )}

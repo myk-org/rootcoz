@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { completeAiPairOverride, isAnalysisAiAvailable, usableModels, visibleModels } from '../analysisAi'
+import {
+  analysisAiUnavailablePart, completeAiPairOverride, isAnalysisAiAvailable, usableModels, visibleModels,
+} from '../analysisAi'
 import type { AiModel } from '@/types'
 
 describe('completeAiPairOverride', () => {
@@ -17,6 +19,25 @@ describe('completeAiPairOverride', () => {
 
   it('returns nothing for an empty selection', () => {
     expect(completeAiPairOverride('', '')).toEqual({})
+  })
+})
+
+describe('analysisAiUnavailablePart', () => {
+  const cursorModels: Record<string, AiModel[]> = {
+    'cli-cursor': [{ id: 'cursor:cursor-grok-4.6-high', name: 'Grok', provider: 'cli-cursor', credential_sources: ['server'], verified: true }],
+  }
+
+  it('names the provider when only a synthetic status key matches', () => {
+    // The backend adds `provider_status.cursor` whenever any Cursor-family provider
+    // is registered, while `providers` only carries the real ids. The picker never
+    // lists a bare `cursor`, so the notice must not blame the model (#591).
+    const status = { cursor: { ok: true, reason: null, hint: null, model_count: 1 } }
+    expect(analysisAiUnavailablePart(cursorModels, status, 'cursor', 'cursor:cursor-grok-4.6-high')).toBe('provider')
+  })
+
+  it('still names the model when the catalog lists the provider', () => {
+    expect(analysisAiUnavailablePart(cursorModels, {}, 'cli-cursor', 'cursor:other')).toBe('model')
+    expect(analysisAiUnavailablePart(cursorModels, {}, 'cli-cursor', 'cursor:cursor-grok-4.6-high')).toBe('model')
   })
 })
 

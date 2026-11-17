@@ -1,10 +1,11 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
 import { ReAnalyzeDialog } from '@/pages/report/ReAnalyzeDialog'
 import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
+import { writeLastAiPair } from '@/lib/lastAiPair'
 import type { AnalysisResult, AiModelsResponse } from '@/types'
 
 const get = vi.fn()
@@ -47,7 +48,7 @@ function setup() {
   post.mockResolvedValue({ job_id: 'next' })
 }
 
-afterEach(() => { grant = true; act(() => resetProviderCatalogCache()); get.mockReset(); post.mockReset() })
+afterEach(() => { grant = true; act(() => resetProviderCatalogCache()); get.mockReset(); post.mockReset(); localStorage.clear() })
 
 describe('analysis credential-scoped pickers', () => {
   it('offers catalog-backed server and own-key sources, and submits the chosen pair', async () => {
@@ -328,5 +329,89 @@ describe('analysis credential-scoped pickers', () => {
     await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
     expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeDisabled()
     expect(post).not.toHaveBeenCalled()
+  })
+})
+
+describe('new analysis stored default (#591)', () => {
+  // A teardown refetch (the reset above runs before the page unmounts) leaves an
+  // in-flight catalog promise behind; clear it so this mount really asks the server.
+  beforeEach(() => act(() => resetProviderCatalogCache()))
+
+  /** The stored server default this mount reads, as the deployment had it: a provider the catalog lost. */
+  const unserved = { ai_provider: 'cursor', ai_model: 'cursor:cursor-grok-4.6-high' }
+  /** Every path the API client was asked for — a listing for an absent provider is the bug. */
+  const requestedPaths = () => get.mock.calls.map(([path]) => String(path))
+
+  it('treats an unserved stored default as no selection and requests nothing for it', async () => {
+    get.mockImplementation(async (path: string) => path.startsWith('/api/ai-models') ? catalog : { ...defaults, ...unserved })
+    post.mockResolvedValue({ job_id: 'next' })
+    const user = userEvent.setup()
+    render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
+    await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
+    const provider = screen.getByRole('combobox', { name: 'AI Provider' })
+    // No selection at all: not the unserved provider behind an "(unavailable)" trigger.
+    await waitFor(() => expect(provider).toHaveTextContent('Select provider...'))
+    expect(provider).not.toHaveTextContent(/cursor/i)
+    // The catalog that answers has no model listing to ask for: no per-provider request.
+    expect(requestedPaths().some((path) => path.includes('provider='))).toBe(false)
+    // Sending is refused client-side, with the actionable message, instead of a 400 or
+    // a silent submit of the server's own (equally unserved) default.
+    await user.click(screen.getByRole('button', { name: 'Paste XML' }))
+    await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
+    expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent(/Select an available AI provider and model/)
+    expect(post).not.toHaveBeenCalled()
+    // The picker offers the providers the catalog does have.
+    await user.click(provider)
+    expect(await screen.findByRole('option', { name: 'Claude · Server' })).toBeInTheDocument()
+  })
+
+  it('applies and submits a stored default the catalog serves, unchanged', async () => {
+    setup()
+    const user = userEvent.setup()
+    render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
+    await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
+    expect(await screen.findByRole('combobox', { name: 'AI Model' })).toHaveValue('gpt')
+    expect(screen.getByRole('combobox', { name: 'AI Provider' })).not.toHaveTextContent(/unavailable/i)
+    await user.click(screen.getByRole('button', { name: 'Paste XML' }))
+    await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
+    await user.click(screen.getByRole('button', { name: 'Submit Analysis' }))
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'openai', ai_model: 'gpt' })))
+  })
+
+  it('submits the server default when the remembered pair is the empty one', async () => {
+    setup()
+    // "Server default" picked on another surface is remembered as an empty pair: no
+    // override, not "no selection" — the form runs the server default with no tests repo.
+    writeLastAiPair('alice', { provider: '', model: '' })
+    const user = userEvent.setup()
+    render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
+    await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
+    // What will run is what the picker shows: the pair the server default resolves to.
+    expect(await screen.findByRole('combobox', { name: 'AI Model' })).toHaveValue('gpt')
+    await user.click(screen.getByRole('button', { name: 'Paste XML' }))
+    await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
+    const submit = screen.getByRole('button', { name: 'Submit Analysis' })
+    expect(submit).toBeEnabled()
+    await user.click(submit)
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'openai', ai_model: 'gpt' })))
+  })
+
+  it('lets a pick from the catalog replace an unserved stored default', async () => {
+    get.mockImplementation(async (path: string) => path.startsWith('/api/ai-models') ? catalog : { ...defaults, ...unserved })
+    post.mockResolvedValue({ job_id: 'next' })
+    const user = userEvent.setup()
+    render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
+    await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
+    await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
+    await user.click(await screen.findByRole('option', { name: 'Claude · Server' }))
+    await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
+    await user.click(await screen.findByRole('option', { name: /sonnet.*Server/i }))
+    await user.click(screen.getByRole('button', { name: 'Paste XML' }))
+    await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
+    await user.click(screen.getByRole('button', { name: 'Submit Analysis' }))
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'claude', ai_model: 'sonnet' })))
+    // Nothing is written back: the stored default stays the admin's to change.
+    expect(post.mock.calls.map(([path]) => path)).toEqual(['/analyze'])
   })
 })

@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { useAiSelection } from '@/lib/useAiSelection'
 import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
 import { readLastAiPair, writeLastAiPair } from '@/lib/lastAiPair'
+import { AnalysisProviderSelect } from '@/components/shared/AnalysisAiPicker'
+import { TooltipProvider } from '@/components/ui/tooltip'
 
 const get = vi.fn()
 
@@ -18,6 +21,12 @@ const auth = {
   canUseFreeProviders: false,
 }
 vi.mock('@/lib/auth', () => ({ useAuth: () => auth }))
+
+// jsdom lacks pointer capture; the picker's Radix Select calls it on open.
+HTMLElement.prototype.hasPointerCapture = () => false
+HTMLElement.prototype.setPointerCapture = () => {}
+HTMLElement.prototype.releasePointerCapture = () => {}
+HTMLElement.prototype.scrollIntoView = () => {}
 
 const USER_CATALOG = {
   providers: {
@@ -38,16 +47,28 @@ const NO_CLAUDE_CATALOG = {
 
 let catalog: unknown = USER_CATALOG
 
-function Harness({ provider = 'fallback', model = 'fallback-model' }: { provider?: string; model?: string }) {
-  const { aiProvider, aiModel, setAiPair } = useAiSelection(provider, model)
+/** Fallbacks default to a pair this catalog serves; a test overrides them for the rest. */
+function Harness({ provider = 'openai', model = 'gpt-4o' }: { provider?: string; model?: string }) {
+  const { aiProvider, aiModel, aiPending, setAiPair } = useAiSelection(provider, model)
   return (
     <>
       <span data-testid="pair">{`${aiProvider}/${aiModel}`}</span>
+      <span data-testid="settled">{aiPending ? 'pending' : 'settled'}</span>
       <button onClick={() => setAiPair('claude', 'sonnet')}>pick complete</button>
       <button onClick={() => setAiPair('claude', '')}>pick provider</button>
       <button onClick={() => setAiPair('', '')}>pick server default</button>
       <button onClick={() => setAiPair('claude', 'sonn', { commit: false })}>type model</button>
     </>
+  )
+}
+
+/** The picker a surface renders from the same selection, wrapped as `AnalysisProviderSelect` needs. */
+function PickerHarness({ provider = '', model = '' }: { provider?: string; model?: string }) {
+  const { aiProvider, setAiPair } = useAiSelection(provider, model)
+  return (
+    <TooltipProvider>
+      <AnalysisProviderSelect value={aiProvider} onChange={(v) => setAiPair(v, '')} forceServer={false} label="AI Provider" />
+    </TooltipProvider>
   )
 }
 
@@ -60,6 +81,8 @@ async function mount(props: { provider?: string; model?: string } = {}) {
 
 const pair = () => screen.getByTestId('pair').textContent
 const click = (name: string) => act(() => screen.getByRole('button', { name }).click())
+/** Every path the API client was asked for — a model listing for an absent provider is the bug. */
+const requestedPaths = () => get.mock.calls.map(([path]) => String(path))
 
 beforeEach(() => {
   auth.username = 'alice'
@@ -82,7 +105,95 @@ afterEach(() => {
 describe('useAiSelection', () => {
   it('falls back to the given defaults when nothing is remembered', async () => {
     await mount()
-    expect(pair()).toBe('fallback/fallback-model')
+    await waitFor(() => expect(pair()).toBe('openai/gpt-4o'))
+  })
+
+  it('treats a fallback provider the catalog does not serve as no selection', async () => {
+    // The stored server default names a provider this server no longer has (#591).
+    await mount({ provider: 'cursor', model: 'cursor:cursor-grok-4.6-high' })
+    await waitFor(() => expect(requestedPaths()).toContain('/api/ai-models'))
+    expect(pair()).toBe('/')
+    // No model listing may be requested for a provider absent from the catalog —
+    // that is the 400 that polluted every mount.
+    expect(requestedPaths().some((path) => path.includes('provider='))).toBe(false)
+    // Rendering only: the stored default is not rewritten or replaced.
+    expect(readLastAiPair('alice')).toBeNull()
+  })
+
+  it('offers the catalog providers when the fallback is unavailable, instead of a dead selection', async () => {
+    const user = userEvent.setup()
+    render(<PickerHarness provider="cursor" model="cursor:cursor-grok-4.6-high" />)
+    await waitFor(() => expect(requestedPaths()).toContain('/api/ai-models'))
+    const trigger = screen.getByRole('combobox', { name: 'AI Provider' })
+    // No provider selected: the dead provider's name never reaches the trigger.
+    await waitFor(() => expect(trigger).toHaveTextContent('Select provider...'))
+    expect(trigger).not.toHaveTextContent('cursor')
+    await user.click(trigger)
+    const options = (await screen.findAllByRole('option')).map((option) => option.textContent).join(' ')
+    expect(options).toMatch(/claude/i)
+    expect(options).toMatch(/openai/i)
+  })
+
+  it('reports the fallback as pending until the catalog judges it', async () => {
+    let releaseCatalog: (value: unknown) => void = () => {}
+    get.mockImplementation(() => new Promise((resolve) => { releaseCatalog = resolve }))
+    render(<Harness />)
+    await waitFor(() => expect(get).toHaveBeenCalled())
+    expect(screen.getByTestId('settled').textContent).toBe('pending')
+
+    await act(async () => releaseCatalog(USER_CATALOG))
+    await waitFor(() => expect(pair()).toBe('openai/gpt-4o'))
+    expect(screen.getByTestId('settled').textContent).toBe('settled')
+  })
+
+  it('stops waiting when the catalog cannot be fetched, so a surface never locks up', async () => {
+    get.mockRejectedValue(new Error('503 Service Unavailable'))
+    render(<Harness />)
+    await waitFor(() => expect(screen.getByTestId('settled').textContent).toBe('settled'))
+    expect(pair()).toBe('/')
+  })
+
+  it('keeps the fallback pending while /api/auth/me is still loading, so no empty pair is posted', async () => {
+    // The catalog can land before the grants it is judged against: `usable()` rejects a
+    // server pair meanwhile, so dropping `aiPending` would enable Continue on '' (#591).
+    catalog = SERVER_CATALOG
+    auth.loading = true
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    let releaseCatalog: (value: unknown) => void = () => {}
+    get.mockImplementation(() => new Promise((resolve) => { releaseCatalog = resolve }))
+    const view = render(<Harness provider="claude" model="sonnet" />)
+    await waitFor(() => expect(get).toHaveBeenCalled())
+    await act(async () => releaseCatalog(SERVER_CATALOG))
+
+    expect(pair()).toBe('/')
+    expect(screen.getByTestId('settled').textContent).toBe('pending')
+    // The fallback is not judged unusable yet, so it is not announced as ignored.
+    expect(debug).not.toHaveBeenCalledWith('[ai-pair] ignored an unavailable default pair', 'claude/sonnet')
+
+    auth.loading = false
+    auth.canUseServerProviders = true
+    view.rerender(<Harness provider="claude" model="sonnet" />)
+    await waitFor(() => expect(pair()).toBe('claude/sonnet'))
+    expect(screen.getByTestId('settled').textContent).toBe('settled')
+  })
+
+  it('applies a manual model id for a no-listing provider', async () => {
+    // The backend keeps the provider in the catalog with an empty model list and reports
+    // modelListingSupported: false, so the provider key exists and a manual pair is usable.
+    catalog = {
+      providers: { cursor: [] },
+      provider_status: { cursor: { has_api_key: true, modelListingSupported: false } },
+    }
+    await mount({ provider: 'cursor', model: 'cursor:manual-only' })
+    await waitFor(() => expect(pair()).toBe('cursor/cursor:manual-only'))
+    expect(screen.getByTestId('settled').textContent).toBe('settled')
+  })
+
+  it('keeps an in-progress draft even when the fallback is unavailable', async () => {
+    await mount({ provider: 'cursor', model: 'cursor:cursor-grok-4.6-high' })
+    await waitFor(() => expect(pair()).toBe('/'))
+    await click('pick provider')
+    await waitFor(() => expect(pair()).toBe('claude/'))
   })
 
   it('remembers a committed pair for the next mount of the same user', async () => {
@@ -148,15 +259,16 @@ describe('useAiSelection', () => {
     await mount({ provider: 'openai', model: 'gpt-4o' })
     await waitFor(() => expect(readLastAiPair('alice')).toBeNull())
     // A dropped entry means nothing remembered — the surface default applies, not ''.
-    expect(pair()).toBe('openai/gpt-4o')
+    await waitFor(() => expect(pair()).toBe('openai/gpt-4o'))
   })
 
   it('drops a remembered pair the user may no longer use with server credentials', async () => {
     writeLastAiPair('alice', { provider: 'claude', model: 'sonnet' })
     catalog = SERVER_CATALOG
-    await mount()
+    await mount({ provider: 'claude', model: 'sonnet' })
     await waitFor(() => expect(readLastAiPair('alice')).toBeNull())
-    expect(pair()).toBe('fallback/fallback-model')
+    // The default names the same server-backed pair, which this user cannot use either.
+    expect(pair()).toBe('/')
   })
 
   it('never drops a pair while the catalog is empty or failed', async () => {
