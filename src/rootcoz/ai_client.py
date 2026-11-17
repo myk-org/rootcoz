@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import AsyncExitStack, suppress
 from contextvars import ContextVar
 from dataclasses import replace
@@ -426,37 +426,69 @@ async def require_selected_server_pair(provider: str, model: str) -> None:
         )
 
 
+def server_credential_providers(
+    stored: Iterable[str] = (),
+    deployment: Mapping[str, Any] | None = None,
+    sidecar_declared: Iterable[str] = (),
+) -> dict[str, str]:
+    """Folded provider id to public name, one entry per server-credential holder.
+
+    The one membership rule (#586). A provider holds a server credential when
+    it has
+
+    * a stored server key row — verified or not, a key being repaired is still
+      configured and must stay restrictable,
+    * an entry in :func:`deployment_provider_credentials`, or
+    * an ``apiKey`` of its own in the sidecar's ``models.json``
+      (:func:`sidecar_declared_provider_ids`) — the sidecar resolves that key,
+      so the deployment map deliberately omits it and nothing is stored here.
+
+    A provider that merely appears in the sidecar catalog does not: it cannot
+    serve on a server credential, so a checkbox for it would mean nothing.
+
+    Keys carry both spellings so each caller can match its own form — the
+    public name (the admin picker, ``claude``) and the normalized raw id (the
+    Server providers card, ``cli-claude``). Values are public names, so
+    ``sorted(set(values))`` is the picker's option list: one entry per provider
+    even when a stored row and a credential disagree on casing (the card folds
+    providers the same way), and the deployment/manifest spelling wins so both
+    surfaces label it alike.
+
+    Names only, never key material. ``deployment=None`` — an unreadable
+    manifest or a cold catalog — contributes no names rather than clearing the
+    other sources.
+    """
+    providers: dict[str, str] = {}
+    for provider in (*(deployment or {}), *stored, *sidecar_declared):
+        public = public_provider_name(provider)
+        providers.setdefault(public.lower(), public)
+        providers.setdefault(normalize_provider(provider), public)
+    return providers
+
+
 async def server_provider_options() -> list[str]:
     """Public names of the providers that hold a server credential, sorted.
 
     The values the admin picker may offer for ``active_server_providers``
-    (#586): every stored server key — verified or not, a key being repaired is
-    still configured and must stay restrictable — union every deployment-env
-    credential. Catalog-only providers are excluded: they cannot serve on
-    server credentials, so a checkbox for them would mean nothing.
+    (#586), built by :func:`server_credential_providers` — the one membership
+    rule ``list_server_providers_endpoint`` reports as ``holds_credential``,
+    so the picker and the Server providers card cannot disagree.
 
-    The Server providers card (``list_server_providers_endpoint``) reads the
-    same two sources with the same rule — a stored row means a key, a
-    deployment map entry means a credential — so the picker and the card
-    cannot disagree. It cannot call this helper: it resolves the deployment
-    credentials before its capture and the stored rows after it, because a key
-    stored while the capture runs must win.
-
-    Only names are returned, never key material. Each stored row keeps its own
-    spelling — the normalized join key is not a display name. An empty list
-    means no provider is known to hold a credential right now (nothing stored,
-    nothing resolved from the deployment); a stored restriction — the
-    setting's own value — stays in effect regardless, which is how the UI
-    reads an empty list.
+    Only names are returned, never key material. An empty list means no
+    provider is known to hold a credential right now (nothing stored, nothing
+    resolved from the deployment, nothing declared in the sidecar's own
+    config); a stored restriction — the setting's own value — stays in effect
+    regardless, which is how the UI reads an empty list.
     """
     from rootcoz.storage import list_server_ai_providers
 
     stored = await list_server_ai_providers()
-    deployment = deployment_provider_credentials()
-    return sorted(
-        {public_provider_name(row["provider"]) for row in stored}
-        | {public_provider_name(provider) for provider in deployment or {}}
+    providers = server_credential_providers(
+        stored=(row["provider"] for row in stored),
+        deployment=deployment_provider_credentials(),
+        sidecar_declared=sidecar_declared_provider_ids(),
     )
+    return sorted(set(providers.values()))
 
 
 async def require_server_provider_grant(provider: str = "", model: str = "") -> None:
@@ -1232,9 +1264,44 @@ def _agent_manifest() -> dict[str, Any] | None:
     return providers if isinstance(providers, dict) else {}
 
 
+def _manifest_declared_provider_ids(providers: Mapping[str, Any]) -> set[str]:
+    """Lowercase IDs of the manifest entries that carry an ``apiKey``.
+
+    A literal key and a ``$VAR`` reference both mean the sidecar holds that
+    provider's credential, so :func:`deployment_provider_credentials` leaves it
+    out of its own map: that credential is not Rootcoz's to resolve or report.
+    A key-less entry (``modelOverrides`` only) declares no key — it changes
+    model metadata and nothing else (#389).
+    """
+    return {
+        provider.lower()
+        for provider, config in providers.items()
+        if isinstance(provider, str)
+        and isinstance(config, dict)
+        and config.get("apiKey")
+    }
+
+
 def _is_key_scoped_provider(config: object) -> bool:
     """The one ``trustKeyScopedListing`` read."""
     return isinstance(config, dict) and config.get("trustKeyScopedListing") is True
+
+
+def sidecar_declared_provider_ids() -> set[str]:
+    """Lowercase IDs of the providers the sidecar's own config authenticates.
+
+    A ``models.json`` entry carrying an ``apiKey`` — literal or ``$VAR``
+    reference — is the key the sidecar serves with, so such a provider does
+    hold a server credential even though nothing is stored and
+    :func:`deployment_provider_credentials` reports no map entry for it (that
+    map is only what Rootcoz resolves itself). The admin picker must offer it
+    (#586), or saving any restriction silently blocks it.
+
+    Names only, never key material. An unset agent dir declares nothing; an
+    unreadable one is already reported by :func:`_agent_manifest`, and the
+    stored and deployment sources still answer.
+    """
+    return _manifest_declared_provider_ids(_agent_manifest() or {})
 
 
 def _manifest_session_models() -> dict[str, set[str]]:
@@ -1365,13 +1432,12 @@ def deployment_provider_credentials() -> dict[str, str] | None:
             # not "no eligible providers" (#376): the caller would sweep every
             # captured deployment listing away over a transient blip.
             return None
+        # Only an entry that supplies a key owns it; a key-less entry
+        # (``modelOverrides`` only) leaves the key to the ambient env.
+        declared = _manifest_declared_provider_ids(providers)
         for provider, config in providers.items():
             if not isinstance(provider, str) or not isinstance(config, dict):
                 continue
-            # Only an entry that supplies a key owns it; a key-less entry
-            # (``modelOverrides`` only) leaves the key to the ambient env.
-            if config.get("apiKey"):
-                declared.add(provider.lower())
             if not _is_key_scoped_provider(config):
                 continue
             var = _env_reference_var(config.get("apiKey"))

@@ -347,6 +347,12 @@ async def test_case_insensitive_grant_for_custom_provider(monkeypatch):
         await ai_client.require_server_provider_grant("openai", "m")
 
 
+@pytest.fixture(autouse=True)
+def _no_host_agent_manifest(monkeypatch):
+    """No host agent-dir manifest declares a credential behind a test's back."""
+    monkeypatch.setattr(ai_client, "_agent_manifest", dict)
+
+
 def _stored_keys(monkeypatch, *rows: dict) -> None:
     """Stored server provider rows as storage.list_server_ai_providers returns."""
     monkeypatch.setattr(
@@ -410,3 +416,38 @@ async def test_picker_options_are_public_names_only(monkeypatch):
     options = await ai_client.server_provider_options()
     assert options == ["claude", "cursor"]
     assert json.dumps(options) == '["claude", "cursor"]'
+
+
+@pytest.mark.asyncio
+async def test_picker_options_include_sidecar_declared_key(monkeypatch):
+    """#586: a key the sidecar's own models.json declares is a server credential.
+
+    Neither stored nor deployment-resolved (the deployment map deliberately
+    skips a declared key), yet the provider does serve on a server
+    credential — dropping it would let a saved restriction block it silently.
+    A key-less entry (``modelOverrides`` only) authenticates nothing (#389).
+    """
+    _catalog(monkeypatch)
+    _stored_keys(monkeypatch)
+    _deployment_keys(monkeypatch, {})
+    monkeypatch.setattr(
+        ai_client,
+        "_agent_manifest",
+        lambda: {
+            "sidecaronly": {"apiKey": "sidecar-key"},  # pragma: allowlist secret
+            "keyless": {"modelOverrides": {"m": {"contextWindow": 1000}}},
+        },
+    )
+    options = await ai_client.server_provider_options()
+    assert options == ["sidecaronly"]
+    # Names only: the declared key never reaches the payload.
+    assert "sidecar-key" not in json.dumps(options)
+
+
+@pytest.mark.asyncio
+async def test_picker_options_fold_case_variants_to_one_option(monkeypatch):
+    """#586: one provider, one checkbox — stored casing vs deployment casing."""
+    _catalog(monkeypatch, "openai")
+    _stored_keys(monkeypatch, {"provider": "OpenAI"})
+    _deployment_keys(monkeypatch, {"openai": "sk-deployment"})
+    assert await ai_client.server_provider_options() == ["openai"]

@@ -13,7 +13,7 @@ import { ModelCombobox, type ModelOption } from './ModelCombobox'
 import { ConfirmDialog } from './ConfirmDialog'
 
 export type ServerProviderModel = { id: string; name?: string; included: boolean; free: boolean }
-export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; /** Stored key or deployment-credential refresh eligibility; absent on older servers. */ can_refresh_models?: boolean; /** A deployment credential (manifest $VAR / ambient <PROVIDER>_API_KEY) is resolvable, listing or not; absent on older servers. */ has_deployment_credential?: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: ServerProviderModel[] }
+export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; /** Stored key or deployment-credential refresh eligibility; absent on older servers. */ can_refresh_models?: boolean; /** A deployment credential (manifest $VAR / ambient <PROVIDER>_API_KEY) is resolvable, listing or not; absent on older servers. */ has_deployment_credential?: boolean; /** Any source holds a server credential (stored key, deployment credential, sidecar models.json apiKey) — the server's one membership rule; absent on older servers. */ holds_credential?: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: ServerProviderModel[] }
 
 /** GET /api/admin/server-providers — one entry per catalog + stored provider. */
 type ServerProviderListResult = { providers: ServerProvider[] }
@@ -23,10 +23,14 @@ type VerifyKeyResult = { ok: boolean; outcome?: string; message?: string }
 
 type KeyDialogMode = 'store' | 'edit'
 
-/** A row only exists for a provider actually credentialed — a stored key or a
- * resolvable deployment credential. Catalog models alone are not a credential:
- * such a provider must stay in Find a provider so its key can be added. */
+/** A row only exists for a provider actually credentialed — a stored key, a
+ * resolvable deployment credential, or the sidecar's own models.json key. The
+ * server answers membership with one rule (holds_credential); the two flags
+ * are the fallback for a server that predates it. Catalog models alone are not
+ * a credential: such a provider must stay in Find a provider so its key can be
+ * added. */
 function isProviderRow(item: ServerProvider): boolean {
+  if (item.holds_credential !== undefined) return item.holds_credential
   return item.has_key === true || item.has_deployment_credential === true
 }
 

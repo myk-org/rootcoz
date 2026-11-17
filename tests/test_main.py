@@ -15763,6 +15763,8 @@ class TestAdminSettingsEndpoints:
         discover = AsyncMock(side_effect=httpx.ConnectError("sidecar down"))
         monkeypatch.setattr(ai_client, "_list_models_raw", discover)
         monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+        # No host agent-dir manifest may add a declared credential here.
+        monkeypatch.setattr(ai_client, "_agent_manifest", dict)
         monkeypatch.setattr(
             storage,
             "list_server_ai_providers",
@@ -15785,6 +15787,12 @@ class TestAdminSettingsEndpoints:
             "deployment_provider_credentials",
             lambda: {"openai": "deployment-value"},
         )
+        # The sidecar's own declared key is a server credential too (#586).
+        monkeypatch.setattr(
+            ai_client,
+            "_agent_manifest",
+            lambda: {"mygateway": {"apiKey": "sk-side"}},  # pragma: allowlist secret
+        )
         monkeypatch.setattr(
             storage,
             "list_server_ai_providers",
@@ -15794,9 +15802,10 @@ class TestAdminSettingsEndpoints:
         assert response.status_code == 200
         item = next(s for s in response.json() if s["key"] == "active_server_providers")
         # The fixture catalog's providers (claude, gemini) hold no credential.
-        assert item["options"] == ["EnMaaS", "openai"]
-        # Names only: the resolved credential value never reaches the response.
+        assert item["options"] == ["EnMaaS", "mygateway", "openai"]
+        # Names only: no credential value reaches the response.
         assert "deployment-value" not in response.text
+        assert "sk-side" not in response.text
 
     def test_get_settings_non_admin_forbidden(self, test_client) -> None:
         """Non-admin users cannot access settings."""

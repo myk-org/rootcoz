@@ -2838,6 +2838,60 @@ async def test_list_reports_deployment_credential_without_a_captured_listing(
     assert providers["mistral"]["has_deployment_credential"] is False
 
 
+async def test_picker_and_card_agree_on_credential_membership(
+    client, monkeypatch, tmp_path
+):
+    """#586: one membership rule — stored, env, sidecar-declared; catalog-only out.
+
+    The admin picker values and the Server providers card rows are the same
+    set for the same credentials, on one fixture covering every source.
+    """
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {
+            # A literal key: the sidecar holds it, Rootcoz stores nothing.
+            "sidecaronly": {"apiKey": "sidecar-key"},  # pragma: allowlist secret
+            "mygateway": _deployment_provider(),  # $MYGATEWAY_API_KEY
+        },
+    )
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    monkeypatch.setenv("OPENAI_API_KEY", AMBIENT_KEY)
+    _register_providers(monkeypatch, "mygateway", "openai", "catalagonly")
+    _fake_catalog(
+        monkeypatch,
+        [
+            {"provider": provider, "id": f"{provider}/m"}
+            for provider in (
+                "mygateway",
+                "openai",
+                "catalagonly",
+                "storedonly",
+                "sidecaronly",
+            )
+        ],
+    )
+    _mock_supported(
+        monkeypatch, ["mygateway", "openai", "catalagonly", "storedonly", "sidecaronly"]
+    )
+    # No listing endpoint: this load captures no rows at all.
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+    await storage.set_server_ai_credential("storedonly", SECRET, "admin")
+
+    listed = _providers(client)
+    card = {name for name, row in listed.items() if row["holds_credential"]}
+    options = set(await ai_client.server_provider_options())
+
+    assert card == {"mygateway", "openai", "sidecaronly", "storedonly"}
+    # Both call sites answer the same membership, casing aside.
+    assert {name.lower() for name in card} == {name.lower() for name in options}
+    # A catalog-only provider holds no credential on either surface.
+    assert listed["catalagonly"]["holds_credential"] is False
+    assert "catalagonly" not in options
+    # The sidecar's declared key is names-only payload material.
+    assert "sidecar-key" not in str(listed)
+
+
 async def test_can_refresh_models_false_for_ambient_provider(client, monkeypatch):
     """No stored key and no capturable credential: nothing to refresh (#376)."""
     _fake_catalog(monkeypatch, [{"provider": "google", "id": "gemini-2.5-pro"}])

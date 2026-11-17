@@ -1990,6 +1990,23 @@ ServerProviderHasDeploymentCredential = Annotated[
     ),
 ]
 
+# Whether any source holds a server credential for a provider (#586): a stored
+# key, a deployment/ambient credential, or the sidecar's own ``models.json``
+# ``apiKey``. The membership rule the admin picker and the Server providers
+# card share — a catalog-only provider is False. Independent of the two flags
+# above: a sidecar-declared key is a credential but is neither stored here nor
+# resolvable by the deployment env.
+ServerProviderHoldsCredential = Annotated[
+    bool,
+    Field(
+        description=(
+            "True when the provider holds a server credential from any "
+            "source: stored key, deployment credential, or the sidecar's own "
+            "manifest apiKey. Boolean only, never key material."
+        ),
+    ),
+]
+
 
 class ServerProviderModelEntry(BaseModel):
     """One model in a per-provider server model selection (#347)."""

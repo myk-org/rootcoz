@@ -278,6 +278,7 @@ from rootcoz.models import (
     ReportPortalPushResult,
     ServerProviderCanRefreshModels,
     ServerProviderHasDeploymentCredential,
+    ServerProviderHoldsCredential,
     ServerProviderKeyInput,
     ServerProviderKeyScopedSource,
     SetCanUseServerProvidersRequest,
@@ -21450,7 +21451,11 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     # would capture their key-scoped listing. Capture it here (TTL-cached) so
     # the offered set is the live listing, not the provider's static manifest.
     # One resolved map feeds both the capture and the source field below.
-    from rootcoz.ai_client import deployment_provider_credentials
+    from rootcoz.ai_client import (
+        deployment_provider_credentials,
+        server_credential_providers,
+        sidecar_declared_provider_ids,
+    )
 
     # One capability answer per page load (#376): it gates the deployment
     # capture below and feeds the ``supports_key`` flag further down.
@@ -21460,8 +21465,9 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     # rows are read after it — a key stored while the capture runs must win
     # (``test_stored_key_appearing_mid_capture_wins``), so the two halves of
     # ``ai_client.server_provider_options()`` (#586) cannot be one read here.
-    # Both sides use the same rule: a stored row means a key, a deployment map
-    # entry means a credential, nothing else counts.
+    # Membership itself is not decided here: ``holds_credential`` below comes
+    # from ``ai_client.server_credential_providers()``, the one rule the picker
+    # uses too, once the stored rows have been read.
     deployment_credentials = deployment_provider_credentials()
     # Providers this load holds a deployment credential for — the same
     # ``capturable`` scope the capture writes with, so a stored key is not
@@ -21493,6 +21499,15 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
         normalize_provider(row["provider"]): row
         for row in await storage.list_server_ai_providers()
     }
+    # Which providers hold a server credential, from the one shared rule (#586)
+    # — the same answer the settings picker derives its options from, so the
+    # card and the picker cannot drift apart. Both spellings of every holder
+    # are keys, so a catalog ID and a public name both match.
+    credential_providers = server_credential_providers(
+        stored=(row["provider"] for row in stored.values()),
+        deployment=deployment_credentials,
+        sidecar_declared=sidecar_declared_provider_ids(),
+    )
     selections: dict[str, dict[str, bool]] = {}
     for row in await storage.list_server_provider_models():
         selections.setdefault(row["provider"].lower(), {})[row["model"]] = True
@@ -21624,6 +21639,13 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
         has_deployment_credential: ServerProviderHasDeploymentCredential = (
             record is None and normalize_provider(provider) in deployment_credential_ids
         )
+        # Whether any source holds a server credential for this provider (#586)
+        # — a stored key, a deployment/ambient credential, or the sidecar's own
+        # ``models.json`` key. The row membership the card renders and the
+        # admin picker both read, from ``server_credential_providers()``.
+        holds_credential: ServerProviderHoldsCredential = (
+            provider_lower in credential_providers
+        )
         providers.append(
             {
                 "provider": provider,
@@ -21648,6 +21670,7 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
                 "key_scoped_source": key_scoped_source,
                 "can_refresh_models": can_refresh_models,
                 "has_deployment_credential": has_deployment_credential,
+                "holds_credential": holds_credential,
                 "models": models,
             }
         )
