@@ -15751,12 +15751,15 @@ class TestAdminSettingsEndpoints:
             == 200
         )
 
-    def test_settings_provider_options_ignore_sidecar_discovery(
+    def test_settings_provider_options_survive_a_sidecar_outage(
         self, test_client, monkeypatch
     ) -> None:
-        """#586: the picker reads stored keys + deployment creds, not the catalog.
+        """#586: a cold catalog gets one discovery attempt; an outage is not empty.
 
-        A sidecar outage used to empty the picker; discovery is not even asked.
+        The ambient half of the deployment resolve needs the catalog snapshot,
+        so a cold cache asks once instead of silently dropping those providers
+        (#586 r3). A sidecar outage must still leave the stored keys offered —
+        the failed attempt never empties the picker.
         """
         from rootcoz import ai_client
 
@@ -15774,7 +15777,7 @@ class TestAdminSettingsEndpoints:
         assert response.status_code == 200
         item = next(s for s in response.json() if s["key"] == "active_server_providers")
         assert item["options"] == ["EnMaaS"]
-        discover.assert_not_awaited()
+        assert discover.await_count == 1
 
     def test_settings_provider_options_exclude_catalog_only_providers(
         self, test_client, monkeypatch

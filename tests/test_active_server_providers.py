@@ -458,3 +458,54 @@ async def test_picker_options_fold_case_variants_to_one_option(monkeypatch):
     _stored_keys(monkeypatch, {"provider": "OpenAI"})
     _deployment_keys(monkeypatch, {"openai": "sk-deployment"})
     assert await ai_client.server_provider_options() == ["openai"]
+
+
+@pytest.mark.asyncio
+async def test_picker_options_resolve_ambient_credentials_on_a_cold_catalog(
+    monkeypatch,
+):
+    """#586: a cold catalog must not hide an ambient provider from the picker.
+
+    The ambient half of the deployment resolve reads the catalog snapshot, so
+    ``get_admin_settings`` on a freshly started server used to offer an option
+    list silently missing every ambient provider. One discovery answers it, and
+    a warm snapshot answers the very same set without another pass.
+    """
+    entries = [{"provider": "openai", "id": "openai-model", "name": "openai"}]
+
+    async def _discover() -> list[dict]:
+        ai_client.update_model_catalog(entries)
+        return entries
+
+    monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+    discovery = AsyncMock(side_effect=_discover)
+    monkeypatch.setattr(ai_client, "_get_model_catalog", discovery)
+    _stored_keys(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-ambient-cold-cache")
+
+    cold = await ai_client.server_provider_options()
+    assert cold == ["openai"]
+    assert discovery.await_count == 1
+    assert await ai_client.server_provider_options() == cold
+    assert discovery.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_picker_options_keep_the_manifest_declared_casing(monkeypatch):
+    """#586: a declared ``MyProvider`` is offered as declared, not lowercased.
+
+    The runtime resolves a provider by its exact ID, so the manifest's casing
+    is the label — and a case-variant from another source dedupes into it.
+    """
+    declared_key = "declared-literal-key"  # pragma: allowlist secret
+    _catalog(monkeypatch)
+    _deployment_keys(monkeypatch, {})
+    _stored_keys(monkeypatch)
+    monkeypatch.setattr(
+        ai_client, "_agent_manifest", lambda: {"MyProvider": {"apiKey": declared_key}}
+    )
+    assert await ai_client.server_provider_options() == ["MyProvider"]
+
+    # The same provider from storage, different casing: one entry, no dup.
+    _stored_keys(monkeypatch, {"provider": "myprovider"})
+    assert await ai_client.server_provider_options() == ["MyProvider"]

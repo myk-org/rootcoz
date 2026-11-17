@@ -2480,6 +2480,58 @@ def test_unparseable_manifest_declares_nothing_and_does_not_raise(
     assert any("manifest unreadable" in r.getMessage() for r in caplog.records)
 
 
+def test_non_string_api_key_invalidates_the_manifest_like_pi(
+    tmp_path, monkeypatch, caplog
+):
+    """A non-string ``apiKey`` drops every provider, exactly as pi does (#586).
+
+    pi validates the whole file against ``ModelsConfigSchema``, where ``apiKey``
+    is an optional *string*, and falls back to an EMPTY provider map. Counting
+    ``123`` as a credential would badge a provider ``Sidecar credentials`` for
+    a provider pi has already dropped.
+    """
+    _write_manifest(
+        monkeypatch,
+        tmp_path,
+        json.dumps(
+            {
+                "providers": {
+                    "numeric": {"apiKey": 123},
+                    "literal": {"apiKey": "plain-key"},  # pragma: allowlist secret
+                }
+            }
+        ),
+    )
+    with capture_main_logs(caplog, logging.WARNING, logger=ai_client.logger):
+        assert ai_client.sidecar_declared_provider_ids() == set()
+        assert ai_client.deployment_provider_credentials() == {}
+    warnings = [r for r in caplog.records if "non-string apiKey" in r.getMessage()]
+    assert len(warnings) == 1
+    # Names only: the rejected value is never echoed.
+    assert "123" not in warnings[0].getMessage()
+
+
+def test_string_api_key_shapes_still_declare_the_provider(tmp_path, monkeypatch):
+    """A literal key and a set ``$VAR`` reference both survive the schema check.
+
+    The same file with an ``apiKey`` of the right shape declares normally (#586).
+    """
+    _write_manifest(
+        monkeypatch,
+        tmp_path,
+        json.dumps(
+            {
+                "providers": {
+                    "literal": {"apiKey": "plain-key"},  # pragma: allowlist secret
+                    "reffed": {"apiKey": f"${DEPLOYMENT_ENV}"},
+                }
+            }
+        ),
+    )
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    assert ai_client.sidecar_declared_provider_ids() == {"literal", "reffed"}
+
+
 def test_declared_ids_skip_a_manifest_key_that_cannot_resolve(tmp_path, monkeypatch):
     """An unset ``$VAR`` authenticates nothing, so it is not a credential (#586).
 

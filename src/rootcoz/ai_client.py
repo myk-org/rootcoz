@@ -451,15 +451,15 @@ def server_credential_providers(
     Server providers card, ``cli-claude``). Values are public names, so
     ``sorted(set(values))`` is the picker's option list: one entry per provider
     even when a stored row and a credential disagree on casing (the card folds
-    providers the same way), and the deployment/manifest spelling wins so both
-    surfaces label it alike.
+    providers the same way), and the manifest's declared spelling wins — it is
+    the exact ID the runtime resolves (#586) — then the deployment's.
 
     Names only, never key material. ``deployment=None`` — an unreadable
     manifest or a cold catalog — contributes no names rather than clearing the
     other sources.
     """
     providers: dict[str, str] = {}
-    for provider in (*(deployment or {}), *stored, *sidecar_declared):
+    for provider in (*sidecar_declared, *(deployment or {}), *stored):
         public = public_provider_name(provider)
         providers.setdefault(public.lower(), public)
         providers.setdefault(normalize_provider(provider), public)
@@ -497,6 +497,16 @@ async def server_provider_options() -> list[str]:
     """
     from rootcoz.storage import list_server_ai_providers
 
+    if _model_catalog_cache is None:
+        # The ambient half of the resolve reads the catalog snapshot, so a cold
+        # cache would silently drop ambient providers from the picker (#586):
+        # one discovery here, no caching of its own.
+        try:
+            await _get_model_catalog()
+        except httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError:
+            logger.warning(
+                "Unable to load the sidecar model catalog for server provider options"
+            )
     stored = await list_server_ai_providers()
     deployment, sidecar_declared = server_credential_sources()
     providers = server_credential_providers(
@@ -1315,7 +1325,23 @@ def _agent_manifest() -> dict[str, Any] | None:
         )
         return None
     providers = manifest.get("providers") if isinstance(manifest, dict) else None
-    return providers if isinstance(providers, dict) else {}
+    if not isinstance(providers, dict):
+        return {}
+    # pi validates the whole file against ModelsConfigSchema (``apiKey`` is an
+    # optional *string*) and falls back to an EMPTY provider map, so one
+    # non-string ``apiKey`` drops every provider — for us too (#586).
+    if any(
+        isinstance(config, dict)
+        and "apiKey" in config
+        and not isinstance(config["apiKey"], str)
+        for config in providers.values()
+    ):
+        logger.warning(
+            "Deployment provider manifest declares a non-string apiKey;"
+            " pi rejects the file, so no provider is declared"
+        )
+        return {}
+    return providers
 
 
 def _manifest_declared_provider_ids(providers: Mapping[str, Any]) -> set[str]:
@@ -1349,22 +1375,26 @@ def _manifest_api_key_resolves(api_key: object) -> bool:
     authenticate the provider, and :func:`deployment_provider_credentials`
     skips the same entry for the same reason (#586).
     """
-    if not api_key:
+    if not isinstance(api_key, str) or not api_key:
         return False
     var = _env_reference_var(api_key)
     return var is None or bool(os.environ.get(var, "").strip())
 
 
 def _manifest_credential_provider_ids(providers: Mapping[str, Any]) -> set[str]:
-    """Lowercase IDs of the manifest entries that hold an available key.
+    """Declared IDs of the manifest entries that hold an available key.
 
     :func:`_manifest_declared_provider_ids` narrowed to a key that can
     authenticate now (:func:`_manifest_api_key_resolves`): this is the
     membership the admin picker and the Server providers card report, so an
     unresolvable ``$VAR`` gets no checkbox that a save would then enforce.
+
+    Each ID keeps the manifest's own casing: the runtime resolves a provider by
+    its exact ID, so a declared ``MyProvider`` must not be shown as
+    ``myprovider`` (#586). Every comparison still lowercases both sides.
     """
     return {
-        provider.lower()
+        provider
         for provider, config in providers.items()
         if isinstance(provider, str)
         and isinstance(config, dict)
@@ -1377,7 +1407,7 @@ _UNREAD_MANIFEST: Any = object()
 
 
 def sidecar_declared_provider_ids(manifest: Any = _UNREAD_MANIFEST) -> set[str]:
-    """Lowercase IDs of the providers the sidecar's own config authenticates.
+    """IDs of the providers the sidecar's own config authenticates, as declared.
 
     A ``models.json`` entry carrying an ``apiKey`` — a literal key, or a
     ``$VAR`` reference whose variable is set — is the key the sidecar serves
@@ -1390,6 +1420,7 @@ def sidecar_declared_provider_ids(manifest: Any = _UNREAD_MANIFEST) -> set[str]:
 
     ``manifest`` is the already-read ``providers`` mapping when the caller read
     it (:func:`server_credential_sources`), so a page load reads the file once.
+    The IDs keep the manifest's casing; every caller matches case-insensitively.
 
     Names only, never key material. An unset agent dir declares nothing; an
     unreadable one is already reported by :func:`_agent_manifest`, and the
