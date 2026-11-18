@@ -9368,7 +9368,30 @@ async def get_server_credential_generation(provider: str) -> int | None:
     return None if row is None else row[0]
 
 
-async def set_server_ai_credential(provider: str, key: str, updated_by: str) -> int:
+class ServerCredentialConflictError(RuntimeError):
+    """A credential write lost a race: the stored row is not the one read.
+
+    Raised by :func:`set_server_ai_credential` when its compare-and-swap
+    expectation no longer holds — another add/rotate/remove landed between
+    the caller's read and this write — so the caller can answer a retryable
+    conflict instead of silently overwriting the newer credential.
+    """
+
+    def __init__(self, provider: str) -> None:
+        super().__init__(
+            f"Server provider credential for '{provider}' changed concurrently"
+        )
+        self.provider = provider
+
+
+async def set_server_ai_credential(
+    provider: str,
+    key: str,
+    updated_by: str,
+    *,
+    expected_generation: int | None = None,
+    expect_absent: bool = False,
+) -> int:
     """Upsert one admin-stored server provider key (encrypted at rest).
 
     Provider identity is case-insensitive: a rotate hitting an existing row
@@ -9377,6 +9400,14 @@ async def set_server_ai_credential(provider: str, key: str, updated_by: str) -> 
     next value from the durable global sequence (#350 r3) so in-flight
     key-scoped captures can detect that the credential moved on — including
     a rotation to the same key value, and a removal followed by a re-add.
+
+    The write is a compare-and-swap when the caller names its expectation:
+    ``expected_generation`` is the generation it read (a rotate), and
+    ``expect_absent`` is "no row yet" (a fresh add) — both tested inside this
+    transaction, so a concurrent add/rotate landing after the caller's own
+    read is refused with :class:`ServerCredentialConflictError` instead of
+    settling on whichever write lands last. Omitted, the write is
+    unconditional (seeding a credential no admin raced for).
 
     Returns the generation this write assigned, from inside the same
     transaction — the only value a capture may bind to. A separate later
@@ -9387,11 +9418,18 @@ async def set_server_ai_credential(provider: str, key: str, updated_by: str) -> 
         await db.execute("BEGIN IMMEDIATE")
         row = await (
             await db.execute(
-                "SELECT provider FROM server_ai_providers"
+                "SELECT provider, generation FROM server_ai_providers"
                 " WHERE lower(provider) = lower(?)",
                 (provider,),
             )
         ).fetchone()
+        stored_generation = None if row is None else row[1]
+        if expect_absent and row is not None:
+            await db.rollback()
+            raise ServerCredentialConflictError(provider)
+        if expected_generation is not None and stored_generation != expected_generation:
+            await db.rollback()
+            raise ServerCredentialConflictError(provider)
         canonical = row[0] if row is not None else provider
         # Seed once from the table max (pre-sequence rows), then advance —
         # all inside this transaction, so concurrent upserts serialize on

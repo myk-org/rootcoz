@@ -13,7 +13,7 @@ import { ModelCombobox, type ModelOption } from './ModelCombobox'
 import { ConfirmDialog } from './ConfirmDialog'
 
 export type ServerProviderModel = { id: string; name?: string; included: boolean; free: boolean }
-export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; /** Stored key or deployment-credential refresh eligibility; absent on older servers. */ can_refresh_models?: boolean; /** A deployment credential (manifest $VAR / ambient <PROVIDER>_API_KEY) is resolvable, listing or not; absent on older servers. */ has_deployment_credential?: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: ServerProviderModel[] }
+export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; /** Stored key or deployment-credential refresh eligibility; absent on older servers. */ can_refresh_models?: boolean; /** A deployment credential (manifest $VAR / ambient <PROVIDER>_API_KEY) is resolvable, listing or not; absent on older servers. */ has_deployment_credential?: boolean; /** Any source holds a server credential (stored key, deployment credential, sidecar models.json apiKey) — the server's one membership rule; absent on older servers. */ holds_credential?: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: ServerProviderModel[] }
 
 /** GET /api/admin/server-providers — one entry per catalog + stored provider. */
 type ServerProviderListResult = { providers: ServerProvider[] }
@@ -23,11 +23,21 @@ type VerifyKeyResult = { ok: boolean; outcome?: string; message?: string }
 
 type KeyDialogMode = 'store' | 'edit'
 
-/** A row only exists for a provider actually credentialed — a stored key or a
- * resolvable deployment credential. Catalog models alone are not a credential:
- * such a provider must stay in Find a provider so its key can be added. */
+/** A row only exists for a provider actually credentialed — a stored key, a
+ * resolvable deployment credential, or the sidecar's own models.json key. The
+ * server answers membership with one rule (holds_credential); the two flags
+ * are the fallback for a server that predates it. Catalog models alone are not
+ * a credential: such a provider must stay in Find a provider so its key can be
+ * added. */
 function isProviderRow(item: ServerProvider): boolean {
+  if (item.holds_credential !== undefined) return item.holds_credential
   return item.has_key === true || item.has_deployment_credential === true
+}
+
+/** The sidecar's own models.json apiKey is the credential: neither a key stored
+ * here (has_key) nor one the deployment env resolves for RootCoz. */
+function isSidecarCredentialRow(item: ServerProvider): boolean {
+  return item.holds_credential === true && !item.has_key && item.has_deployment_credential !== true
 }
 
 /** POST refresh-models — re-run of key-scoped discovery with the stored key. */
@@ -98,7 +108,11 @@ export function ServerProvidersCard() {
   const rows = listed.filter(isProviderRow)
   // A provider already shown as a row is managed from that row (Store/Edit
   // key, Models) — offering it in Find a provider would duplicate the path.
-  const added = new Set(rows.map((item) => normalizeProvider(item.provider)))
+  // A sidecar-keyed row is the exception: nothing is stored for it here and it
+  // has no RootCoz key action, so a key-capable one stays addable (#586).
+  const added = new Set(rows
+    .filter((item) => item.has_key || item.has_deployment_credential === true || !item.supports_key)
+    .map((item) => normalizeProvider(item.provider)))
   // Only providers the server accepts keys for are offered — ambient/
   // deployment-credential providers would just 400 on key verification.
   const keySupported = new Set(listed.filter((item) => item.supports_key).map((item) => normalizeProvider(item.provider)))
@@ -329,6 +343,18 @@ export function ServerProvidersCard() {
                           {/* Credential-derived, not listing-derived: the key can be
                               promoted even when no listing was captured. */}
                           {item.has_deployment_credential && <Badge variant="outline">Deployment credentials</Badge>}
+                          {isSidecarCredentialRow(item) && (
+                            // The sidecar's own models.json apiKey serves this
+                            // provider; nothing is stored or promoted here.
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Badge variant="outline">Sidecar credentials</Badge>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                The sidecar authenticates this provider with the key in its own models.json — RootCoz stores no key for it. Add a key to serve it from RootCoz's store instead.
+                              </TooltipContent>
+                            </Tooltip>
+                          )}
                           {canRefresh && refreshButton}
                           {item.supports_key && item.has_deployment_credential && (
                             <HintButton variant="outline" size="sm" disabled={busy !== null} onClick={() => openKeyDialog(item.provider, 'store')} aria-label={`Store ${item.provider} API key`} hint="Promotes the deployment credential into RootCoz's encrypted store — pick a model to verify it; nothing is typed.">Store API key</HintButton>

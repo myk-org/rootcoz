@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import AsyncExitStack, suppress
 from contextvars import ContextVar
 from dataclasses import replace
@@ -61,6 +61,20 @@ _GENERATION_UNREAD: Any = object()
 # keepalives reset httpx's per-read timeout, so without this bound a lost
 # `turn_end` frame would park the turn — and the per-user chat lock — forever.
 _STREAM_TERMINAL_GRACE_SECONDS = 5.0
+# Bound on the cold-cache catalog discovery a settings load awaits. The sidecar
+# client's own timeout is minutes, so an unresponsive sidecar would hold every
+# admin settings page; a healthy one lists in well under this.
+_COLD_CATALOG_TIMEOUT_SECONDS = 2.0
+# How long a timed-out cold-cache discovery suppresses the next attempt. Without
+# it every settings load while the sidecar hangs pays the same bound again. The
+# catalog cache stays cold (never a stale snapshot) and the window is short: the
+# first load after it retries, so a recovered sidecar comes back on its own.
+_COLD_CATALOG_RETRY_SECONDS = 30.0
+# ``monotonic()`` deadline of that window; 0.0 = no timed-out attempt recorded.
+_cold_catalog_retry_at = 0.0
+# The one in-flight cold-cache discovery every concurrent waiter shares, holding
+# the catalog it fetched; ``None`` = no attempt running.
+_cold_catalog_attempt: asyncio.Task[list[dict[str, Any]] | None] | None = None
 
 # Only explicitly initiated AI tasks set this; unrelated request tasks never inherit credentials.
 ai_username: ContextVar[str] = ContextVar("ai_username", default="")
@@ -436,44 +450,92 @@ async def require_selected_server_pair(provider: str, model: str) -> None:
         )
 
 
-# Cached settings picker options (monotonic_ts, provider list) — success and
-# failure alike, so a sidecar outage costs one attempt, not one per page load.
-_server_capable_cache: tuple[float, list[str]] | None = None
-_SERVER_CAPABLE_CACHE_TTL_SEC = 60.0
+def server_credential_providers(
+    stored: Iterable[str] = (),
+    deployment: Mapping[str, Any] | None = None,
+    sidecar_declared: Iterable[str] = (),
+) -> dict[str, str]:
+    """Folded provider id to public name, one entry per server-credential holder.
 
+    The one membership rule (#586). A provider holds a server credential when
+    it has
 
-def _invalidate_server_capable_cache() -> None:
-    """Drop cached settings picker options whenever the catalog changes."""
-    global _server_capable_cache
-    _server_capable_cache = None
+    * a stored server key row — verified or not, a key being repaired is still
+      configured and must stay restrictable,
+    * an entry in :func:`deployment_provider_credentials`, or
+    * an ``apiKey`` of its own in the sidecar's ``models.json``
+      (:func:`sidecar_declared_provider_ids`) — the sidecar resolves that key,
+      so the deployment map deliberately omits it and nothing is stored here.
 
+    A provider that merely appears in the sidecar catalog does not: it cannot
+    serve on a server credential, so a checkbox for it would mean nothing.
 
-async def server_capable_providers() -> list[str]:
-    """Provider IDs with server-credential models, for admin settings options.
+    Keys carry both spellings so each caller can match its own form — the
+    public name (the admin picker, ``claude``) and the normalized raw id (the
+    Server providers card, ``cli-claude``). Values are public names, so
+    ``sorted(set(values))`` is the picker's option list: one entry per provider
+    even when a stored row and a credential disagree on casing (the card folds
+    providers the same way), and the manifest's declared spelling wins — it is
+    the exact ID the runtime resolves (#586) — then the deployment's.
 
-    Both success and failure are cached for a short TTL: an unreachable
-    sidecar must not slow (or queue behind the catalog lock on) every
-    admin settings page load. Only public names are ever returned —
-    internal ``cli-*``/``acpx-*`` catalog IDs map through
-    :func:`public_provider_name`, collapsing to one entry per name.
+    Names only, never key material. ``deployment=None`` — an unreadable
+    manifest or a cold catalog — contributes no names rather than clearing the
+    other sources.
     """
-    global _server_capable_cache
-    now = time.monotonic()
-    if (
-        _server_capable_cache is not None
-        and now - _server_capable_cache[0] < _SERVER_CAPABLE_CACHE_TTL_SEC
-    ):
-        return _server_capable_cache[1]
-    try:
-        catalog = await _get_model_catalog()
-        providers = sorted(
-            {public_provider_name(p) for p in build_friendly_catalog(catalog)}
-        )
-    except httpx.HTTPError, OSError, RuntimeError, ValueError:
-        logger.warning("Unable to list server-capable providers for settings")
-        providers = []
-    _server_capable_cache = (now, providers)
+    providers: dict[str, str] = {}
+    for provider in (*sidecar_declared, *(deployment or {}), *stored):
+        public = public_provider_name(provider)
+        providers.setdefault(public.lower(), public)
+        providers.setdefault(normalize_provider(provider), public)
     return providers
+
+
+def server_credential_sources() -> tuple[dict[str, str] | None, set[str]]:
+    """``(deployment credentials, sidecar-declared ids)`` from one manifest read.
+
+    Both answers come from the same ``models.json``, so a page load asking for
+    both must not read — and report — the file twice (#586). The first value is
+    :func:`deployment_provider_credentials`' (``None`` = unknown), the second
+    :func:`sidecar_declared_provider_ids`'.
+    """
+    manifest = _agent_manifest()
+    return (
+        deployment_provider_credentials(manifest),
+        sidecar_declared_provider_ids(manifest),
+    )
+
+
+async def server_provider_options() -> list[str]:
+    """Public names of the providers that hold a server credential, sorted.
+
+    The values the admin picker may offer for ``active_server_providers``
+    (#586), built by :func:`server_credential_providers` — the one membership
+    rule ``list_server_providers_endpoint`` reports as ``holds_credential``,
+    so the picker and the Server providers card cannot disagree.
+
+    Only names are returned, never key material. An empty list means no
+    provider is known to hold a credential right now (nothing stored, nothing
+    resolved from the deployment, nothing declared in the sidecar's own
+    config); a stored restriction — the setting's own value — stays in effect
+    regardless, which is how the UI reads an empty list.
+    """
+    from rootcoz.storage import list_server_ai_providers
+
+    # The ambient half of the resolve reads the catalog snapshot, so a cold
+    # cache would silently drop ambient providers from the picker (#586): one
+    # bounded discovery, shared with every concurrent load and every other
+    # catalog surface, keeps them in without making each load wait for the
+    # sidecar client's own timeout. Everything resolvable without the catalog
+    # still answers while it stays cold.
+    await bounded_model_catalog()
+    stored = await list_server_ai_providers()
+    deployment, sidecar_declared = server_credential_sources()
+    providers = server_credential_providers(
+        stored=(row["provider"] for row in stored),
+        deployment=deployment,
+        sidecar_declared=sidecar_declared,
+    )
+    return sorted(set(providers.values()))
 
 
 async def require_server_provider_grant(provider: str = "", model: str = "") -> None:
@@ -916,6 +978,79 @@ def build_friendly_catalog(
     return result
 
 
+async def _cold_catalog_discovery() -> list[dict[str, Any]] | None:
+    """One bounded cold-cache discovery, shared by every concurrent waiter.
+
+    A cold cache normally means the background preload has not finished, but a
+    hung sidecar never fills it. Only a timeout arms the cooldown: an error the
+    sidecar answers with costs no wait, so it needs no suppression. The cache is
+    left cold on both, so a recovered sidecar comes back on its own, and the
+    discovery's own result is what the waiters get — not a re-read of the cache.
+    """
+    global _cold_catalog_retry_at
+    try:
+        return await asyncio.wait_for(
+            _get_model_catalog(), _COLD_CATALOG_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
+        _cold_catalog_retry_at = time.monotonic() + _COLD_CATALOG_RETRY_SECONDS
+        logger.warning(
+            "Sidecar model catalog did not answer within %.1fs; answering without"
+            " it and not retrying for %.0fs",
+            _COLD_CATALOG_TIMEOUT_SECONDS,
+            _COLD_CATALOG_RETRY_SECONDS,
+        )
+    except httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError:
+        logger.warning("Unable to load the sidecar model catalog")
+    return None
+
+
+async def bounded_model_catalog() -> list[dict[str, Any]] | None:
+    """The sidecar model catalog, waiting at most one bounded cold discovery.
+
+    The one accessor for every surface that needs the catalog (the admin
+    settings load, the provider card, the pair validators), so a hung sidecar
+    cannot stall any of them on the sidecar client's own minutes-long timeout.
+
+    A warm cache answers through the normal lookup, which returns it without
+    awaiting anything. A cold one is discovered once: concurrent callers await
+    the same in-flight attempt, so the second load inside a discovery pays only
+    the remainder of that attempt, never a second bound. A follower awaits that
+    shared result instead of taking the bounded answer: a shorter wait would
+    serve it a different provider set than the load running beside it, and the
+    remainder it waits for is bounded by the same 2s the first waiter pays.
+
+    ``None`` = no answer: the attempt timed out (which also arms the cooldown)
+    or one timed out moments ago. The caller decides whether that means "render
+    without the catalog" or "refuse"; the cache is never filled with a
+    placeholder.
+    """
+    global _cold_catalog_attempt
+    if _model_catalog_cache is not None:
+        # Kept as a call, not the cache read: an overridden catalog still wins.
+        # Warm, this returns the cache without awaiting anything, so the bound
+        # only ever applies to a cold cache. A future writer that invalidates
+        # the cache between that check and this call re-enters the client's
+        # unbounded lookup — structural only if the bound moved into the
+        # client, which is why it is not attempted here (#586 r7).
+        return await _get_model_catalog()
+    running_loop = asyncio.get_running_loop()
+    if _cold_catalog_attempt is not None and (
+        _cold_catalog_attempt.done()
+        # A task from another loop would never run here: drop it, retry below.
+        or _cold_catalog_attempt.get_loop() is not running_loop
+    ):
+        _cold_catalog_attempt = None
+    if _cold_catalog_attempt is None and time.monotonic() >= _cold_catalog_retry_at:
+        _cold_catalog_attempt = asyncio.create_task(_cold_catalog_discovery())
+    attempt = _cold_catalog_attempt
+    if attempt is None:
+        return None
+    # Shielded: one request's cancellation must not cancel the attempt every
+    # other waiter shares.
+    return await asyncio.shield(attempt)
+
+
 async def _get_model_catalog(*, refresh: bool = False) -> list[dict[str, Any]]:
     """Return the shared successful sidecar catalog, refreshing only when asked."""
     global _model_catalog_cache
@@ -929,7 +1064,6 @@ async def _get_model_catalog(*, refresh: bool = False) -> list[dict[str, Any]]:
         if generation != _model_catalog_generation:
             return _model_catalog_cache if _model_catalog_cache is not None else catalog
         _model_catalog_cache = catalog
-        _invalidate_server_capable_cache()
         logger.debug("Loaded Pi-sidecar model catalog: %d models", len(catalog))
         return catalog
 
@@ -939,7 +1073,6 @@ def update_model_catalog(models: list[dict[str, Any]] | None = None) -> None:
     global _model_catalog_cache, _model_catalog_generation
     _model_catalog_generation += 1
     _model_catalog_cache = models
-    _invalidate_server_capable_cache()
 
 
 async def registered_provider_ids() -> set[str] | None:
@@ -1226,19 +1359,57 @@ def _cached_catalog_provider_ids() -> list[str]:
     )
 
 
+# Pi's own models.json tolerance, mirrored: one optional leading UTF-8 BOM,
+# ``//`` line comments and trailing commas are accepted. String literals are
+# left untouched, so a ``"https://host"`` value survives. Block comments are
+# not pi syntax, so a manifest holding one is malformed for pi and for us.
+_JSON_STRING_OR_LINE_COMMENT = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*')
+_JSON_STRING_OR_TRAILING_COMMA = re.compile(r'"(?:\\.|[^"\\])*"|,(\s*[}\]])')
+
+
+def _strip_manifest_comments(text: str) -> str:
+    """Drop ``//`` comments and trailing commas, string literals untouched.
+
+    The exact preparation pi applies before ``JSON.parse`` (#586), so a
+    manifest pi loads parses here too — otherwise a provider the sidecar does
+    authenticate is missing from the admin picker.
+    """
+    text = _JSON_STRING_OR_LINE_COMMENT.sub(
+        lambda match: match.group(0) if match.group(0).startswith('"') else "",
+        text,
+    )
+    return _JSON_STRING_OR_TRAILING_COMMA.sub(
+        lambda match: match.group(1) if match.group(1) is not None else match.group(0),
+        text,
+    )
+
+
 def _agent_manifest() -> dict[str, Any] | None:
     """The agent-dir ``models.json`` ``providers`` mapping, or ``None``.
 
     One read and one failure behaviour for every consumer: a configured agent
     dir whose manifest is missing, unreadable or unparseable is *unknown*
     (``None``), never "nothing declared". An unset ``PI_SIDECAR_AGENT_DIR``
-    also answers ``None`` — there is no manifest to read.
+    answers ``{}`` — there is no manifest, so nothing is declared and the
+    ambient environment still supplies what it can.
+
+    The text is prepared the way pi prepares it — a leading BOM is dropped and
+    ``//`` comments and trailing commas are stripped (:func:
+    `_strip_manifest_comments`) — so a manifest the sidecar loads is read here
+    too, not misjudged as unparseable (#586).
     """
     agent_dir = _sidecar_agent_dir()
     if agent_dir is None:
-        return None
+        return {}
     try:
-        manifest = json.loads((agent_dir / "models.json").read_text())
+        content = (agent_dir / "models.json").read_text()
+        prepared = _strip_manifest_comments(content.removeprefix("\ufeff"))
+        if prepared != content:
+            logger.debug(
+                "Sidecar manifest carried a BOM, comments or trailing commas;"
+                " stripped before parsing"
+            )
+        manifest = json.loads(prepared)
     except (OSError, ValueError) as exc:
         logger.warning(
             "Deployment provider manifest unreadable (%s); keeping captured"
@@ -1248,12 +1419,109 @@ def _agent_manifest() -> dict[str, Any] | None:
         )
         return None
     providers = manifest.get("providers") if isinstance(manifest, dict) else None
-    return providers if isinstance(providers, dict) else {}
+    if not isinstance(providers, dict):
+        return {}
+    # pi validates the whole file against ModelsConfigSchema (``apiKey`` is an
+    # optional *string*) and falls back to an EMPTY provider map, so one
+    # non-string ``apiKey`` drops every provider — for us too (#586).
+    if any(
+        isinstance(config, dict)
+        and "apiKey" in config
+        and not isinstance(config["apiKey"], str)
+        for config in providers.values()
+    ):
+        logger.warning(
+            "Deployment provider manifest declares a non-string apiKey;"
+            " pi rejects the file, so no provider is declared"
+        )
+        return {}
+    return providers
+
+
+def _manifest_declared_provider_ids(providers: Mapping[str, Any]) -> set[str]:
+    """Lowercase IDs of the manifest entries that carry an ``apiKey``.
+
+    A literal key and a ``$VAR`` reference both mean the sidecar holds that
+    provider's credential, so :func:`deployment_provider_credentials` leaves it
+    out of its own map: that credential is not Rootcoz's to resolve or report.
+    A key-less entry (``modelOverrides`` only) declares no key — it changes
+    model metadata and nothing else (#389).
+    """
+    return {
+        provider.lower()
+        for provider, config in providers.items()
+        if isinstance(provider, str)
+        and isinstance(config, dict)
+        and config.get("apiKey")
+    }
 
 
 def _is_key_scoped_provider(config: object) -> bool:
     """The one ``trustKeyScopedListing`` read."""
     return isinstance(config, dict) and config.get("trustKeyScopedListing") is True
+
+
+def _manifest_api_key_resolves(api_key: object) -> bool:
+    """Whether an entry's ``apiKey`` authenticates anything right now.
+
+    A literal key does. A ``$VAR``/``${VAR}`` reference does only when the
+    variable is set to a nonempty value — unset, the sidecar cannot
+    authenticate the provider, and :func:`deployment_provider_credentials`
+    skips the same entry for the same reason (#586).
+    """
+    if not isinstance(api_key, str) or not api_key:
+        return False
+    var = _env_reference_var(api_key)
+    return var is None or bool(os.environ.get(var, "").strip())
+
+
+def _manifest_credential_provider_ids(providers: Mapping[str, Any]) -> set[str]:
+    """Declared IDs of the manifest entries that hold an available key.
+
+    :func:`_manifest_declared_provider_ids` narrowed to a key that can
+    authenticate now (:func:`_manifest_api_key_resolves`): this is the
+    membership the admin picker and the Server providers card report, so an
+    unresolvable ``$VAR`` gets no checkbox that a save would then enforce.
+
+    Each ID keeps the manifest's own casing: the runtime resolves a provider by
+    its exact ID, so a declared ``MyProvider`` must not be shown as
+    ``myprovider`` (#586). Every comparison still lowercases both sides.
+    """
+    return {
+        provider
+        for provider, config in providers.items()
+        if isinstance(provider, str)
+        and isinstance(config, dict)
+        and _manifest_api_key_resolves(config.get("apiKey"))
+    }
+
+
+# Sentinel for "the caller supplied no models.json manifest".
+_UNREAD_MANIFEST: Any = object()
+
+
+def sidecar_declared_provider_ids(manifest: Any = _UNREAD_MANIFEST) -> set[str]:
+    """IDs of the providers the sidecar's own config authenticates, as declared.
+
+    A ``models.json`` entry carrying an ``apiKey`` — a literal key, or a
+    ``$VAR`` reference whose variable is set — is the key the sidecar serves
+    with, so such a provider does hold a server credential even though nothing
+    is stored and :func:`deployment_provider_credentials` reports no map entry
+    for it (that map is only what Rootcoz resolves itself). The admin picker
+    must offer it (#586), or saving any restriction silently blocks it. An
+    unset reference is not a credential the sidecar can use, so it is not
+    offered.
+
+    ``manifest`` is the already-read ``providers`` mapping when the caller read
+    it (:func:`server_credential_sources`), so a page load reads the file once.
+    The IDs keep the manifest's casing; every caller matches case-insensitively.
+
+    Names only, never key material. An unset agent dir declares nothing; an
+    unreadable one is already reported by :func:`_agent_manifest`, and the
+    stored and deployment sources still answer.
+    """
+    providers = _agent_manifest() if manifest is _UNREAD_MANIFEST else manifest
+    return _manifest_credential_provider_ids(providers or {})
 
 
 def _manifest_session_models() -> dict[str, set[str]]:
@@ -1328,7 +1596,9 @@ def _mark_session_support(
         target["session_unsupported_reason"] = SESSION_UNSUPPORTED_REASON
 
 
-def deployment_provider_credentials() -> dict[str, str] | None:
+def deployment_provider_credentials(
+    manifest: Any = _UNREAD_MANIFEST,
+) -> dict[str, str] | None:
     """Deployment-env keys of the providers the server can list models with.
 
     Two sources, both of which leave the provider with no stored server key,
@@ -1366,6 +1636,10 @@ def deployment_provider_credentials() -> dict[str, str] | None:
     keep whatever it captured before, so ambient resolution is skipped too
     rather than reporting an empty-capture pass. An empty dict is a
     successful read of a warm catalog that resolved no credential.
+
+    ``manifest`` is the already-read ``providers`` mapping when the caller read
+    it (:func:`server_credential_sources`), so one page load reads the file
+    once; omitted, this function reads it itself.
     """
     if _model_catalog_cache is None:
         # Only a warm catalog may produce an ambient-derived map (#376): an
@@ -1375,34 +1649,30 @@ def deployment_provider_credentials() -> dict[str, str] | None:
         )
         return None
     resolved: dict[str, str] = {}
-    declared: set[str] = set()
-    agent_dir = _sidecar_agent_dir()
-    if agent_dir is not None:
-        providers = _agent_manifest()
-        if providers is None:
-            # A configured agent dir without a readable manifest is unknown,
-            # not "no eligible providers" (#376): the caller would sweep every
-            # captured deployment listing away over a transient blip.
-            return None
-        for provider, config in providers.items():
-            if not isinstance(provider, str) or not isinstance(config, dict):
-                continue
-            # Only an entry that supplies a key owns it; a key-less entry
-            # (``modelOverrides`` only) leaves the key to the ambient env.
-            if config.get("apiKey"):
-                declared.add(provider.lower())
-            if not _is_key_scoped_provider(config):
-                continue
-            var = _env_reference_var(config.get("apiKey"))
-            key = os.environ.get(var, "").strip() if var else ""
-            if not key:
-                logger.debug(
-                    "Deployment credential unavailable for provider=%s (%s unset)",
-                    provider,
-                    var or "no env reference",
-                )
-                continue
-            resolved[provider] = key
+    providers = _agent_manifest() if manifest is _UNREAD_MANIFEST else manifest
+    if providers is None:
+        # A configured agent dir without a readable manifest is unknown,
+        # not "no eligible providers" (#376): the caller would sweep every
+        # captured deployment listing away over a transient blip.
+        return None
+    # Only an entry that supplies a key owns it; a key-less entry
+    # (``modelOverrides`` only) leaves the key to the ambient env.
+    declared = _manifest_declared_provider_ids(providers)
+    for provider, config in providers.items():
+        if not isinstance(provider, str) or not isinstance(config, dict):
+            continue
+        if not _is_key_scoped_provider(config):
+            continue
+        var = _env_reference_var(config.get("apiKey"))
+        key = os.environ.get(var, "").strip() if var else ""
+        if not key:
+            logger.debug(
+                "Deployment credential unavailable for provider=%s (%s unset)",
+                provider,
+                var or "no env reference",
+            )
+            continue
+        resolved[provider] = key
     ambient: list[str] = []
     for provider in _cached_catalog_provider_ids():
         # Cursor's agents authenticate through acpx / the CLI login, so

@@ -49,7 +49,7 @@ const put = vi.mocked(api.put)
 const del = vi.mocked(api.delete)
 
 type Model = { id: string; name?: string; included: boolean; free: boolean }
-type Provider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; can_refresh_models?: boolean; has_deployment_credential?: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: Model[] }
+type Provider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; can_refresh_models?: boolean; has_deployment_credential?: boolean; holds_credential?: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: Model[] }
 
 function providersState(): Provider[] {
   return [
@@ -687,6 +687,43 @@ describe('ServerProvidersCard provider list', () => {
     await user.click(screen.getByRole('combobox', { name: 'Provider' }))
     expect(await screen.findByRole('option', { name: 'anthropic' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'openai' })).not.toBeInTheDocument()
+  })
+
+  it('shows a sidecar-declared credential as a row without key controls', async () => {
+    const user = userEvent.setup()
+    // The sidecar's models.json apiKey holds the credential: a row with its own
+    // badge, but no stored key to edit, refresh or promote here (#586).
+    get.mockResolvedValue(listResult([
+      { ...catalogEntry('sidecaronly', false), holds_credential: true },
+      { ...catalogEntry('catalagonly', true), holds_credential: false },
+    ]))
+    render(<ServerProvidersCard />)
+
+    const list = await screen.findByRole('list', { name: 'Configured server providers' })
+    expect(within(list).getByText('sidecaronly')).toBeInTheDocument()
+    expect(within(list).queryByText('catalagonly')).not.toBeInTheDocument()
+    expect(screen.getByText('Sidecar credentials')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Store .* API key/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Edit .* key/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('Deployment credentials')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('combobox', { name: 'Provider' }))
+    expect(await screen.findByRole('option', { name: 'catalagonly' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'sidecaronly' })).not.toBeInTheDocument()
+  })
+
+  it('keeps a key-capable sidecar-keyed provider addable for a RootCoz key', async () => {
+    const user = userEvent.setup()
+    // Nothing is stored for it and its row has no add-key action, so Find a
+    // provider must still offer it — the add endpoint accepts a key (#586).
+    get.mockResolvedValue(listResult([
+      { ...catalogEntry('sidecaronly', true), holds_credential: true },
+    ]))
+    render(<ServerProvidersCard />)
+
+    expect(await screen.findByText('Sidecar credentials')).toBeInTheDocument()
+    await user.click(screen.getByRole('combobox', { name: 'Provider' }))
+    expect(await screen.findByRole('option', { name: 'sidecaronly' })).toBeInTheDocument()
   })
 
   it('shows the empty state when no provider is in play', async () => {

@@ -6,6 +6,7 @@ delete warnings), the scoped-models server pool, and per-session apiKey
 injection with unchanged credential-source semantics.
 """
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -88,7 +89,6 @@ def _fake_catalog(monkeypatch, catalog):
         return catalog
 
     monkeypatch.setattr(ai_client, "_get_model_catalog", fake)
-    monkeypatch.setattr("rootcoz.main._get_model_catalog", fake, raising=False)
 
 
 def _mock_supported(monkeypatch, providers):
@@ -109,17 +109,21 @@ def _mock_verify(monkeypatch, outcome):
     return verified
 
 
-def _mock_key_discovery(monkeypatch, models, *, listing_supported=True):
+def _mock_key_discovery(monkeypatch, models, *, listing_supported=True, on_call=None):
     """Mock key-scoped discovery; ``models`` may be an exception to raise.
 
     The mock returns the normalized shape the real ``models_for_api_key``
     produces (id/name/provider/source/capabilities entries). Entries may
     carry ``"source": "manifest"`` to exercise manifest filtering.
+    ``on_call`` runs a concurrent action while this discovery is in flight —
+    the window where another admin's add/rotate can land.
     """
     calls = []
 
     async def fake(provider, key):
         calls.append((provider, key))
+        if on_call is not None:
+            await on_call(provider, key)
         if isinstance(models, Exception):
             raise models
         return {
@@ -519,6 +523,157 @@ async def test_add_key_to_unmanaged_provider_seeds_full_selection(client, monkey
     assert [m["id"] for m in scoped["openai"]] == ["gpt-5.6-luna"]
 
 
+async def test_add_key_refuses_before_storing_when_the_catalog_is_absent(
+    client, monkeypatch
+):
+    """No catalog answer: refuse while nothing is stored (#586 r7).
+
+    The seed needs the catalog only when the key-scoped capture yields no rows,
+    and it runs after the credential write — so its refusal used to land on an
+    already-managed provider: every model of it withdrawn, no
+    ``provider.key.store`` row, and the retrying admin answered ``409 use
+    rotate-key``. Resolving the seed's catalog answer first moves the refusal
+    to where it changes nothing.
+    """
+    monkeypatch.setattr(
+        rootcoz_main, "bounded_model_catalog", AsyncMock(return_value=None)
+    )
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, RuntimeError("sidecar down"))
+
+    added = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+
+    assert added.status_code == 503
+    # No credential and no selection: the provider is exactly as exposed as it
+    # was before the attempt, so nothing has to be repaired by hand.
+    assert await storage.list_server_ai_providers() == []
+    assert await storage.list_server_provider_models() == []
+    events = (await storage.list_audit_events(action="provider.key.store"))["events"]
+    assert len(events) == 1
+    assert events[0]["target_id"] == "google"
+    assert events[0]["outcome"] == "failure"
+    assert events[0]["details"] == {"reason": "http_503", "provider": "google"}
+    assert SECRET not in json.dumps(events[0])
+
+
+async def test_add_key_with_a_working_capture_never_needs_the_catalog(
+    client, monkeypatch
+):
+    """A cold catalog never blocks an add whose key-scoped capture has rows.
+
+    The seed reads the captured listing, so the catalog is only consulted when
+    that listing came back empty. Resolving it unconditionally refused a
+    perfectly good key while the catalog was cold, even though discovery had
+    just answered (#586 r8, a regression of the conditional #586 r6 had).
+    """
+    catalog = AsyncMock(return_value=None)
+    monkeypatch.setattr(rootcoz_main, "bounded_model_catalog", catalog)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gemini-3-pro"}])
+
+    added = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+
+    assert added.status_code == 200
+    # Not even asked: the capture's listing is what the seed used.
+    catalog.assert_not_awaited()
+    assert await storage.get_server_ai_credential("google") == SECRET
+    assert [
+        (row["provider"], row["model"])
+        for row in await storage.list_server_provider_models()
+    ] == [("google", "gemini-3-pro")]
+    events = (await storage.list_audit_events(action="provider.key.store"))["events"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "success"
+
+
+async def test_add_key_with_a_catalog_stores_seeds_and_audits_success(
+    client, monkeypatch
+):
+    """The same add with the catalog available: stored, seeded, one success row."""
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, RuntimeError("sidecar down"))
+
+    added = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+
+    assert added.status_code == 200
+    assert await storage.get_server_ai_credential("google") == SECRET
+    assert {
+        (row["provider"], row["model"])
+        for row in await storage.list_server_provider_models()
+    } == {("google", "gemini-2.5-pro"), ("google", "gemini-2.5-flash")}
+    events = (await storage.list_audit_events(action="provider.key.store"))["events"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "success"
+    assert events[0]["details"] == {"provider": "google", "outcome": "accepted"}
+
+
+async def test_rotate_key_never_needs_a_catalog(client, monkeypatch):
+    """A rotate reseeds nothing by design, so an absent catalog changes nothing.
+
+    The stored selection is authoritative on rotate (#347 r4), so the key is
+    replaced and the rows are untouched — the cold-catalog refusal is an add
+    concern only (#586 r7).
+    """
+    monkeypatch.setattr(
+        rootcoz_main, "bounded_model_catalog", AsyncMock(return_value=None)
+    )
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, RuntimeError("sidecar down"))
+    await storage.set_server_ai_credential("google", "old-key-value-2", "admin")
+    await storage.set_server_provider_models(
+        "google", [{"id": "gemini-2.5-pro"}], "admin"
+    )
+
+    rotated = client.post(
+        "/api/admin/server-providers/google/rotate-key",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+
+    assert rotated.status_code == 200
+    assert await storage.get_server_ai_credential("google") == SECRET
+    assert [
+        (row["provider"], row["model"])
+        for row in await storage.list_server_provider_models()
+    ] == [("google", "gemini-2.5-pro")]
+    events = (await storage.list_audit_events(action="provider.key.rotate"))["events"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "success"
+
+
 async def test_existing_selection_survives_key_add_and_rotate(client, monkeypatch):
     """An admin selection is authoritative — neither add nor rotate reseeds it."""
     _fake_catalog(monkeypatch, CATALOG)
@@ -843,20 +998,28 @@ async def test_non_catalog_provider_with_listing_appears_in_scoped_models(
 
 
 async def test_concurrent_rotation_supersedes_stale_capture(client, monkeypatch):
-    """A capture whose key was rotated mid-discovery is discarded (#350 r1)."""
+    """A capture whose key was rotated after the add's write is discarded (#350 r2).
+
+    The discovery runs before that write — the add must know whether its seed
+    needs the catalog before anything is stored (#586 r8) — so the race this
+    guards is a rotation landing between the write and the capture's
+    post-discovery check: the older capture must store nothing rather than
+    wear the newer credential's generation.
+    """
     _fake_catalog(monkeypatch, CATALOG)
     _mock_supported(monkeypatch, ["google"])
     _mock_verify(monkeypatch, "accepted")
     discovery_calls = _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}])
-    # Rotate the credential while discovery is in flight — between the
-    # capture's start and its post-discovery key check.
-    inner_discovery = ai_client.models_for_api_key
+    # Rotate the credential right after this add's write — before the capture's
+    # post-discovery key check.
+    real_set = storage.set_server_ai_credential
 
-    async def rotating_discovery(provider, key):
-        await storage.set_server_ai_credential(provider, "newer-key-value-9", "admin")
-        return await inner_discovery(provider, key)
+    async def set_then_rotate(provider, key, updated_by, **kwargs):
+        generation = await real_set(provider, key, updated_by, **kwargs)
+        await real_set(provider, "newer-key-value-9", "admin")
+        return generation
 
-    monkeypatch.setattr(ai_client, "models_for_api_key", rotating_discovery)
+    monkeypatch.setattr(storage, "set_server_ai_credential", set_then_rotate)
     added = client.post(
         "/api/admin/server-providers",
         headers=_admin_headers(),
@@ -875,7 +1038,6 @@ async def test_concurrent_rotation_supersedes_stale_capture(client, monkeypatch)
 
 def test_repeated_model_ids_dedupe_in_storage(tmp_path, monkeypatch):
     """A discovery response repeating an id must not fail the write (#350 r1)."""
-    import asyncio
 
     async def run():
         monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp.db")
@@ -1932,24 +2094,26 @@ async def test_stale_capture_write_is_generation_gated(tmp_path, monkeypatch):
 async def test_concurrent_same_key_rotation_supersedes_stale_capture(
     client, monkeypatch
 ):
-    """A same-value re-store mid-discovery still discards the stale capture.
+    """A same-value re-store after the add's write still discards the capture.
 
-    The old key-equality check let this capture through (same key value);
-    only the generation binding — every credential write bumps it — makes
-    the overlapping write lose (#350 r2).
+    The key-equality check lets this capture through (the value never
+    changed); only the generation binding — every credential write bumps it —
+    makes the overlapping write lose (#350 r2). The discovery runs before the
+    add's write (#586 r8), so the rotation is rigged to land right after it.
     """
     _fake_catalog(monkeypatch, CATALOG)
     _mock_supported(monkeypatch, ["google"])
     _mock_verify(monkeypatch, "accepted")
     _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}])
-    inner_discovery = ai_client.models_for_api_key
+    real_set = storage.set_server_ai_credential
 
-    async def rotating_discovery(provider, key):
-        # Re-store the SAME key value while discovery is in flight.
-        await storage.set_server_ai_credential(provider, key, "admin")
-        return await inner_discovery(provider, key)
+    async def set_then_restore(provider, key, updated_by, **kwargs):
+        generation = await real_set(provider, key, updated_by, **kwargs)
+        # Re-store the SAME key value right after this add's write.
+        await real_set(provider, key, "admin")
+        return generation
 
-    monkeypatch.setattr(ai_client, "models_for_api_key", rotating_discovery)
+    monkeypatch.setattr(storage, "set_server_ai_credential", set_then_restore)
     added = client.post(
         "/api/admin/server-providers",
         headers=_admin_headers(),
@@ -1961,6 +2125,9 @@ async def test_concurrent_same_key_rotation_supersedes_stale_capture(
     )
     assert added.status_code == 200
     assert added.json()["ok"] is True
+    # The stored key value never changed, so the key-equality check alone would
+    # have let this capture through.
+    assert await storage.get_server_ai_credential("google") == SECRET
     # The stale capture was discarded: no rows were written.
     assert await storage.list_server_provider_key_models() == []
 
@@ -2152,8 +2319,8 @@ async def test_same_key_rotation_cannot_lend_its_generation(client, monkeypatch)
     _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}])
     real_set = storage.set_server_ai_credential
 
-    async def set_then_overlap(provider, key, updated_by):
-        generation = await real_set(provider, key, updated_by)
+    async def set_then_overlap(provider, key, updated_by, **kwargs):
+        generation = await real_set(provider, key, updated_by, **kwargs)
         # An overlapping rotation to the SAME key lands before the endpoint
         # could read the generation back.
         await real_set(provider, key, "other-admin")
@@ -2173,6 +2340,131 @@ async def test_same_key_rotation_cannot_lend_its_generation(client, monkeypatch)
     assert added.json()["ok"] is True
     # The older capture (bound to its own generation) was discarded.
     assert await storage.list_server_provider_key_models() == []
+
+
+async def test_credential_write_refuses_a_stale_expectation(tmp_path, monkeypatch):
+    """Storage: the credential write is a compare-and-swap (#350 r3).
+
+    ``expect_absent`` (a fresh add) and ``expected_generation`` (a rotate) are
+    both tested inside the write's transaction, so the older of two overlapping
+    writes refuses instead of overwriting the newer key.
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-cas.db")
+    await storage.init_db()
+    first = await storage.set_server_ai_credential("google", SECRET, "admin")
+    with pytest.raises(storage.ServerCredentialConflictError):
+        await storage.set_server_ai_credential(
+            "google", "fresh-add-key-value", "admin", expect_absent=True
+        )
+    newer = await storage.set_server_ai_credential("google", "newer-key-value", "admin")
+    with pytest.raises(storage.ServerCredentialConflictError):
+        await storage.set_server_ai_credential(
+            "google", "stale-rotation-key", "admin", expected_generation=first
+        )
+    # Neither refusal wrote anything.
+    assert await storage.get_server_ai_credential("google") == "newer-key-value"
+    assert await storage.get_server_credential_generation("google") == newer
+
+
+async def test_overlapping_rotations_keep_the_newer_key(client, monkeypatch):
+    """An older rotation loses the race instead of replacing a newer key.
+
+    The loser read the credential generation before it verified and
+    discovered; a rotation landing in that window must make its write refuse
+    (``409``) rather than settle last — and its capture must have written no
+    rows, since it never got that far.
+    """
+    winner = "winning-key-value-111"
+    _add_google_provider(client, monkeypatch, [{"id": "gemini-2.5-pro"}])
+    rows_before = await storage.list_server_provider_key_models()
+
+    # The newer rotation lands while the older one is still in discovery.
+    async def winner_lands(provider: str, key: str) -> None:
+        await storage.set_server_ai_credential(provider, winner, "other-admin")
+
+    _mock_key_discovery(monkeypatch, [{"id": "gemini-9-stale"}], on_call=winner_lands)
+    loser = client.post(
+        "/api/admin/server-providers/google/rotate-key",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": "older-rotation-key-value",  # pragma: allowlist secret
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+
+    assert loser.status_code == 409
+    assert "concurrently" in loser.json()["detail"]
+    # The newer key is what remains, and the losing capture stored nothing.
+    assert await storage.get_server_ai_credential("google") == winner
+    assert await storage.list_server_provider_key_models() == rows_before
+
+
+async def test_overlapping_fresh_adds_store_the_first_key_only(client, monkeypatch):
+    """Two racing adds: one stores and audits success, the other 409s.
+
+    The loser's duplicate re-check still saw no row (that is the race), so the
+    write itself has to refuse: exactly one credential row, one success row and
+    one failure row whose reason is the conflict.
+    """
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}])
+    # Both requests pass the pre-check and re-check before either writes.
+    monkeypatch.setattr(
+        rootcoz_main, "_has_stored_server_key", AsyncMock(return_value=False)
+    )
+
+    def add(api_key: str):
+        return client.post(
+            "/api/admin/server-providers",
+            headers=_admin_headers(),
+            json={
+                "provider": "google",
+                "api_key": api_key,
+                "verification_model": "gemini-2.5-pro",
+            },
+        )
+
+    stored = add(SECRET)
+    raced = add("second-admin-key-value")
+
+    assert stored.status_code == 200
+    assert raced.status_code == 409
+    assert "concurrently" in raced.json()["detail"]
+    assert len(await storage.list_server_ai_providers()) == 1
+    assert await storage.get_server_ai_credential("google") == SECRET
+    events = (await storage.list_audit_events(action="provider.key.store"))["events"]
+    assert sorted(event["outcome"] for event in events) == ["failure", "success"]
+    failed = next(event for event in events if event["outcome"] == "failure")
+    assert failed["details"] == {"reason": "conflict", "provider": "google"}
+    assert SECRET not in json.dumps(events)
+
+
+async def test_sequential_add_and_rotate_never_conflict(client, monkeypatch):
+    """The ordinary path is unchanged: no serialised admin ever sees a CAS error."""
+    rotated_key = "rotated-key-value-222"
+    _add_google_provider(client, monkeypatch, [{"id": "gemini-2.5-pro"}])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gemini-3-pro"}])
+
+    rotated = client.post(
+        "/api/admin/server-providers/google/rotate-key",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": rotated_key,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+
+    assert rotated.status_code == 200
+    assert rotated.json()["ok"] is True
+    assert await storage.get_server_ai_credential("google") == rotated_key
+    events = (await storage.list_audit_events(action="provider.key.rotate"))["events"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "success"
 
 
 async def test_readded_key_never_reuses_removed_generation(tmp_path, monkeypatch):
@@ -2420,6 +2712,143 @@ def test_deployment_credentials_missing_manifest_is_unknown(tmp_path, monkeypatc
     # No agent dir configured: nothing to read, so an honest empty resolve.
     monkeypatch.delenv("PI_SIDECAR_AGENT_DIR")
     assert ai_client.deployment_provider_credentials() == {}
+
+
+def _write_manifest(monkeypatch, tmp_path, text: str):
+    """Write a raw manifest body and point the agent dir at it."""
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    (agent_dir / "models.json").write_text(text)
+    monkeypatch.setenv("PI_SIDECAR_AGENT_DIR", str(agent_dir))
+    return agent_dir
+
+
+def test_manifest_comments_and_bom_are_read_like_pi(tmp_path, monkeypatch, caplog):
+    """A manifest pi loads — BOM, ``//`` comments, trailing commas — is read (#586).
+
+    Strict ``json.loads`` used to answer "nothing declared" for a manifest the
+    sidecar authenticates providers with, so the picker hid them.
+    """
+    _write_manifest(
+        monkeypatch,
+        tmp_path,
+        "\ufeff{\n"
+        "  // the sidecar's own gateway key\n"
+        '  "providers": {\n'
+        '    "literal": {"apiKey": "plain-key", // pragma: allowlist secret\n'
+        '                "baseUrl": "https://gw.example/v1",},\n'
+        '    "reffed": {"apiKey": "${MYGATEWAY_API_KEY}", '
+        '"trustKeyScopedListing": true,},\n'
+        "  },\n"
+        "}\n",
+    )
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    with capture_main_logs(caplog, logging.DEBUG, logger=ai_client.logger):
+        declared = ai_client.sidecar_declared_provider_ids()
+        # The same prepared text feeds the deployment resolve (#586 r2).
+        assert ai_client.deployment_provider_credentials() == {"reffed": DEPLOYMENT_KEY}
+    assert declared == {"literal", "reffed"}
+    assert any("stripped before parsing" in r.getMessage() for r in caplog.records)
+    # Names only: the literal key never leaves the manifest.
+    assert "plain-key" not in str(declared)
+
+
+def test_unparseable_manifest_declares_nothing_and_does_not_raise(
+    tmp_path, monkeypatch, caplog
+):
+    """A malformed manifest degrades to no declared providers (#586).
+
+    A block comment is not pi syntax either, so this is a manifest pi rejects
+    too — the point is that RootCoz reports it and carries on.
+    """
+    _write_manifest(
+        monkeypatch,
+        tmp_path,
+        '{"providers": { /* not pi syntax */ "x": {"apiKey": "$K"} }}',
+    )
+    with capture_main_logs(caplog, logging.WARNING, logger=ai_client.logger):
+        assert ai_client.sidecar_declared_provider_ids() == set()
+        assert ai_client.deployment_provider_credentials() is None
+    assert any("manifest unreadable" in r.getMessage() for r in caplog.records)
+
+
+def test_non_string_api_key_invalidates_the_manifest_like_pi(
+    tmp_path, monkeypatch, caplog
+):
+    """A non-string ``apiKey`` drops every provider, exactly as pi does (#586).
+
+    pi validates the whole file against ``ModelsConfigSchema``, where ``apiKey``
+    is an optional *string*, and falls back to an EMPTY provider map. Counting
+    ``123`` as a credential would badge a provider ``Sidecar credentials`` for
+    a provider pi has already dropped.
+    """
+    _write_manifest(
+        monkeypatch,
+        tmp_path,
+        json.dumps(
+            {
+                "providers": {
+                    "numeric": {"apiKey": 123},
+                    "literal": {"apiKey": "plain-key"},  # pragma: allowlist secret
+                }
+            }
+        ),
+    )
+    with capture_main_logs(caplog, logging.WARNING, logger=ai_client.logger):
+        assert ai_client.sidecar_declared_provider_ids() == set()
+        assert ai_client.deployment_provider_credentials() == {}
+    warnings = [r for r in caplog.records if "non-string apiKey" in r.getMessage()]
+    assert len(warnings) == 1
+    # Names only: the rejected value is never echoed.
+    assert "123" not in warnings[0].getMessage()
+
+
+def test_string_api_key_shapes_still_declare_the_provider(tmp_path, monkeypatch):
+    """A literal key and a set ``$VAR`` reference both survive the schema check.
+
+    The same file with an ``apiKey`` of the right shape declares normally (#586).
+    """
+    _write_manifest(
+        monkeypatch,
+        tmp_path,
+        json.dumps(
+            {
+                "providers": {
+                    "literal": {"apiKey": "plain-key"},  # pragma: allowlist secret
+                    "reffed": {"apiKey": f"${DEPLOYMENT_ENV}"},
+                }
+            }
+        ),
+    )
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    assert ai_client.sidecar_declared_provider_ids() == {"literal", "reffed"}
+
+
+def test_declared_ids_skip_a_manifest_key_that_cannot_resolve(tmp_path, monkeypatch):
+    """An unset ``$VAR`` authenticates nothing, so it is not a credential (#586).
+
+    A literal key still counts. Counting an unresolvable reference would offer
+    a checkbox for a provider the sidecar cannot authenticate — the same entry
+    the deployment resolver skips.
+    """
+    _write_manifest(
+        monkeypatch,
+        tmp_path,
+        json.dumps(
+            {
+                "providers": {
+                    "literal": {"apiKey": "plain-key"},  # pragma: allowlist secret
+                    "unset": {"apiKey": "$NOT_EXPORTED_KEY"},
+                    "empty": {"apiKey": "${EMPTY_KEY}"},
+                    "resolvable": {"apiKey": f"${DEPLOYMENT_ENV}"},
+                }
+            }
+        ),
+    )
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    monkeypatch.setenv("EMPTY_KEY", "   ")
+    monkeypatch.delenv("NOT_EXPORTED_KEY", raising=False)
+    assert ai_client.sidecar_declared_provider_ids() == {"literal", "resolvable"}
 
 
 async def test_deployment_capture_lists_all_models_and_keeps_selection(
@@ -2836,6 +3265,256 @@ async def test_list_reports_deployment_credential_without_a_captured_listing(
     # A stored key is the provider's credential — the deployment adds none.
     assert providers["mistral"]["has_key"] is True
     assert providers["mistral"]["has_deployment_credential"] is False
+
+
+async def test_picker_and_card_agree_on_credential_membership(
+    client, monkeypatch, tmp_path
+):
+    """#586: one membership rule — stored, env, sidecar-declared; catalog-only out.
+
+    The admin picker values and the Server providers card rows are the same
+    set for the same credentials, on one fixture covering every source.
+    """
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {
+            # A literal key: the sidecar holds it, Rootcoz stores nothing.
+            "sidecaronly": {"apiKey": "sidecar-key"},  # pragma: allowlist secret
+            "mygateway": _deployment_provider(),  # $MYGATEWAY_API_KEY
+        },
+    )
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    monkeypatch.setenv("OPENAI_API_KEY", AMBIENT_KEY)
+    _register_providers(monkeypatch, "mygateway", "openai", "catalagonly")
+    _fake_catalog(
+        monkeypatch,
+        [
+            {"provider": provider, "id": f"{provider}/m"}
+            for provider in (
+                "mygateway",
+                "openai",
+                "catalagonly",
+                "storedonly",
+                "sidecaronly",
+            )
+        ],
+    )
+    _mock_supported(
+        monkeypatch, ["mygateway", "openai", "catalagonly", "storedonly", "sidecaronly"]
+    )
+    # No listing endpoint: this load captures no rows at all.
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+    await storage.set_server_ai_credential("storedonly", SECRET, "admin")
+
+    listed = _providers(client)
+    card = {name for name, row in listed.items() if row["holds_credential"]}
+    options = set(await ai_client.server_provider_options())
+
+    assert card == {"mygateway", "openai", "sidecaronly", "storedonly"}
+    # Both call sites answer the same membership, casing aside.
+    assert {name.lower() for name in card} == {name.lower() for name in options}
+    # A catalog-only provider holds no credential on either surface.
+    assert listed["catalagonly"]["holds_credential"] is False
+    assert "catalagonly" not in options
+    # The sidecar's declared key is names-only payload material.
+    assert "sidecar-key" not in str(listed)
+
+
+def test_manifest_comment_stripping_leaves_string_values_alone():
+    """The strip helper's contract: pi's tolerance, string literals untouched."""
+    strip = ai_client._strip_manifest_comments
+    # ``//`` inside a string value is not a comment; trailing commas go.
+    assert strip('{"a": "https://gw/v1//x", "b": 1,}') == (
+        '{"a": "https://gw/v1//x", "b": 1}'
+    )
+    # Comments are removed wherever they sit, line content otherwise intact.
+    assert strip('{\n // c\n "a": 1\n}') == '{\n \n "a": 1\n}'
+    # The comma goes, the whitespace before the bracket stays (pi's exact edit).
+    assert strip('{"a": [1, 2, ]}') == '{"a": [1, 2 ]}'
+    # A literal backslash-escaped quote keeps the string boundary correct.
+    assert strip('{"a": "x\\"//y", "b": 2}') == '{"a": "x\\"//y", "b": 2}'
+
+
+async def test_card_lists_a_declared_provider_outside_catalog_and_registry(
+    client, monkeypatch, tmp_path
+):
+    """A manifest-declared provider gets a row even when nothing else lists it.
+
+    The picker offers it (``holds_credential``), so the card must show it too —
+    otherwise the two surfaces disagree again (#586).
+    """
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {"sidecaronly": {"apiKey": "sidecar-key"}},  # pragma: allowlist secret
+    )
+    _register_providers(monkeypatch)
+    _fake_catalog(monkeypatch, [{"provider": "catalagonly", "id": "catalagonly/m"}])
+    _mock_supported(monkeypatch, ["catalagonly"])
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+
+    listed = _providers(client)
+
+    assert listed["sidecaronly"]["holds_credential"] is True
+    assert listed["sidecaronly"]["has_key"] is False
+    assert ai_client.public_provider_name("sidecaronly") in set(
+        await ai_client.server_provider_options()
+    )
+
+
+async def test_card_folds_a_declared_mixed_case_provider_once(
+    client, monkeypatch, tmp_path
+):
+    """#586 r4: a declared ``EnMaaS`` beside a catalog ``enmaas`` is one row.
+
+    The declared ID is what the runtime resolves, so it is the row's spelling —
+    but the card folds providers case-insensitively, or the same provider got a
+    second lowercased row and its models were listed twice.
+    """
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {"EnMaaS": {"apiKey": "enmaas-literal-key"}},  # pragma: allowlist secret
+    )
+    _register_providers(monkeypatch)
+    _fake_catalog(monkeypatch, [{"provider": "enmaas", "id": "enmaas/glm-5-3"}])
+    _mock_supported(monkeypatch, [])
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+
+    listed = _providers(client)
+
+    assert list(listed) == ["EnMaaS"]
+    assert listed["EnMaaS"]["holds_credential"] is True
+    # The catalog's models follow the row, not the catalog's own spelling.
+    assert [m["id"] for m in listed["EnMaaS"]["models"]] == ["enmaas/glm-5-3"]
+    assert await ai_client.server_provider_options() == ["EnMaaS"]
+
+
+async def test_card_never_lists_a_case_distinct_providers_models(
+    client, monkeypatch, tmp_path
+):
+    """#586 r5: folding on the lowercase key never lends a provider another's models.
+
+    ``Foo`` and ``foo`` are two providers (``_catalog_provider_spelling``
+    refuses to pick between them), so the row spelled ``Foo`` — here taken from
+    the manifest, which is what the runtime resolves — lists exactly ``Foo``'s
+    catalog models, not the ones of the bucket that folds onto the same key.
+    """
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {"Foo": {"apiKey": "foo-literal-key"}},  # pragma: allowlist secret
+    )
+    _fake_catalog(
+        monkeypatch,
+        [
+            {"provider": "Foo", "id": "Foo/upper-model"},
+            {"provider": "foo", "id": "foo/lower-model"},
+        ],
+    )
+    _mock_supported(monkeypatch, [])
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+
+    listed = _providers(client)
+
+    assert list(listed) == ["Foo"]
+    assert [m["id"] for m in listed["Foo"]["models"]] == ["Foo/upper-model"]
+
+
+async def test_card_never_guesses_between_case_variant_buckets(
+    client, monkeypatch, tmp_path
+):
+    """#586 r6: no exact bucket and two case-variants — no models, not a guess.
+
+    The manifest declares ``FOO`` while the catalog holds ``Foo`` and ``foo``.
+    Taking whichever bucket folds onto the same key would attach another
+    provider's models to this row, so it lists none until a spelling matches.
+    """
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {"FOO": {"apiKey": "foo-literal-key"}},  # pragma: allowlist secret
+    )
+    _fake_catalog(
+        monkeypatch,
+        [
+            {"provider": "Foo", "id": "Foo/upper-model"},
+            {"provider": "foo", "id": "foo/lower-model"},
+        ],
+    )
+    _mock_supported(monkeypatch, [])
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+
+    listed = _providers(client)
+
+    assert list(listed) == ["FOO"]
+    assert listed["FOO"]["models"] == []
+
+
+async def test_card_renders_when_no_catalog_is_available(client, monkeypatch, tmp_path):
+    """#586 r6: no catalog answer must not cost the card its row.
+
+    The settings load was bounded but ``/api/admin/server-providers`` awaited
+    the catalog bare, so a hung sidecar still held the page for the client's own
+    timeout. Every catalog surface goes through the one bounded accessor now,
+    and the card renders stored/registry/manifest rows without a catalog.
+    """
+    monkeypatch.setattr(
+        rootcoz_main, "bounded_model_catalog", AsyncMock(return_value=None)
+    )
+
+    async def _unreachable(*_: object) -> list[dict]:
+        raise RuntimeError("the card must ask the bounded accessor, not the catalog")
+
+    # Any surface that bypasses the accessor hits this and 500s the card. The
+    # cache is cleared last: another fixture helper would warm it.
+    monkeypatch.setattr(ai_client, "_list_models_raw", _unreachable)
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {"sidecaronly": {"apiKey": "sidecar-key"}},  # pragma: allowlist secret
+    )
+    _mock_supported(monkeypatch, [])
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+    monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+
+    listed = _providers(client)
+
+    assert listed["sidecaronly"]["holds_credential"] is True
+    assert listed["sidecaronly"]["models"] == []
+
+
+def test_page_load_reads_and_reports_the_manifest_once(
+    client, monkeypatch, tmp_path, caplog
+):
+    """One page load reads models.json once and logs a failure once (#586).
+
+    The card resolves deployment credentials and declared ids from the same
+    manifest; reading it per consumer doubled both the read and the warning.
+    """
+    agent_dir = _point_agent_dir(
+        monkeypatch, tmp_path, {"mygateway": _deployment_provider()}
+    )
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    _mock_supported(monkeypatch, ["mygateway"])
+    reads: list[int] = []
+    real_read = ai_client._agent_manifest
+
+    def counting_read():
+        reads.append(1)
+        return real_read()
+
+    monkeypatch.setattr(ai_client, "_agent_manifest", counting_read)
+    _providers(client)
+    assert len(reads) == 1
+
+    # Unreadable: one warning, not one per consumer.
+    (agent_dir / "models.json").unlink()
+    with capture_main_logs(caplog, logging.WARNING, logger=ai_client.logger):
+        _providers(client)
+    warnings = [r for r in caplog.records if "manifest unreadable" in r.getMessage()]
+    assert len(warnings) == 1
 
 
 async def test_can_refresh_models_false_for_ambient_provider(client, monkeypatch):

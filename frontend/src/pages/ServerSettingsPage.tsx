@@ -1544,7 +1544,7 @@ export function ServerSettingsPage() {
                   </span>
                   <p className="flex items-center gap-1.5 text-xs text-signal-amber">
                     <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                    Provider discovery is currently unavailable — the stored restriction above stays in effect.
+                    The restriction above stays in effect, but none of the listed providers currently holds a credential — add one under Server providers below.
                   </p>
                   {setting.source === 'db' && (
                     <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} disabled={state.resettingKey === setting.key} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
@@ -1553,7 +1553,9 @@ export function ServerSettingsPage() {
                   )}
                 </div>
               ) : (
-                <span className="text-xs text-text-tertiary italic">No server providers available</span>
+                <span className="block text-xs text-text-tertiary italic">
+                  No server providers configured — add a key under Server providers below.
+                </span>
               )
             ) : (
               <div className="space-y-2">

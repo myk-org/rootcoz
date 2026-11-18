@@ -142,7 +142,6 @@ def test_free_models_validation_against_catalog(client, monkeypatch):
         return catalog
 
     monkeypatch.setattr(ai_client, "_get_model_catalog", fake_catalog)
-    monkeypatch.setattr("rootcoz.main._get_model_catalog", fake_catalog, raising=False)
 
     headers = _admin_headers()
     listing = client.get("/api/admin/free-models", headers=headers)
@@ -253,7 +252,7 @@ def test_stale_pairs_pass_through_and_history_is_kept(client, monkeypatch):
             {"provider": "google", "id": "gemini-2.5-pro"},
         ]
 
-    monkeypatch.setattr("rootcoz.main._get_model_catalog", catalog)
+    monkeypatch.setattr("rootcoz.ai_client._get_model_catalog", catalog)
 
     put = client.put(
         "/api/admin/free-models",
@@ -266,7 +265,7 @@ def test_stale_pairs_pass_through_and_history_is_kept(client, monkeypatch):
     async def slim_catalog(**_):
         return [{"provider": "google", "id": "gemini-2.5-pro"}]
 
-    monkeypatch.setattr("rootcoz.main._get_model_catalog", slim_catalog)
+    monkeypatch.setattr("rootcoz.ai_client._get_model_catalog", slim_catalog)
     # Adding an unrelated new pair must not be blocked by the stale one.
     put = client.put(
         "/api/admin/free-models",
@@ -308,7 +307,7 @@ def test_free_models_optimistic_versioning(client, monkeypatch):
             {"provider": "google", "id": "gemini-2.5-pro"},
         ]
 
-    monkeypatch.setattr("rootcoz.main._get_model_catalog", catalog)
+    monkeypatch.setattr("rootcoz.ai_client._get_model_catalog", catalog)
 
     initial = client.put(
         "/api/admin/free-models",

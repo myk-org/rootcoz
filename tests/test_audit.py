@@ -531,16 +531,15 @@ async def test_provider_selection_seed_records_the_request_ip(
     monkeypatch.setattr(
         storage, "set_server_provider_models", AsyncMock(return_value=True)
     )
-    monkeypatch.setattr(
-        main,
-        "_get_model_catalog",
-        AsyncMock(return_value=[{"provider": "openai", "id": "gpt-x"}]),
-    )
     request = _fake_request(client_host="10.0.0.7")
     with patch.object(
         main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=False)
     ):
-        await main._seed_server_provider_selection("openai", "alice", request=request)
+        # The catalog answer is the caller's job now (resolved before the key
+        # write), so the seed is handed one instead of fetching it (#586 r7).
+        await main._seed_server_provider_selection(
+            "openai", "alice", request=request, catalog_models=["gpt-x"]
+        )
 
     events = (await storage.list_audit_events(action="provider.selection_seed"))[
         "events"
@@ -8022,7 +8021,7 @@ def test_admin_user_key_rotate_says_the_sessions_were_invalidated(app_client) ->
 def test_provider_models_set_counts_the_whole_selection(app_client) -> None:
     admin_login(app_client)
     with patch.object(
-        main,
+        ai_client,
         "_get_model_catalog",
         AsyncMock(
             return_value=[

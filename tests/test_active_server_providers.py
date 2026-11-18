@@ -6,6 +6,9 @@ pre-existing behavior). Enforcement rechecks on every server-credential use,
 so a direct API call cannot bypass the catalog filtering.
 """
 
+import asyncio
+import json
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -346,53 +349,236 @@ async def test_case_insensitive_grant_for_custom_provider(monkeypatch):
         await ai_client.require_server_provider_grant("openai", "m")
 
 
-@pytest.mark.asyncio
-async def test_server_capable_providers_returns_public_names(monkeypatch):
-    """Settings picker options never leak internal cli-* catalog IDs."""
-    _catalog(monkeypatch, "cli-claude", "cli-gemini", "cli-cursor", "openai")
-    assert await ai_client.server_capable_providers() == [
-        "claude",
-        "cursor",
-        "gemini",
-        "openai",
-    ]
+@pytest.fixture(autouse=True)
+def _no_host_agent_manifest(monkeypatch):
+    """No host agent-dir manifest declares a credential behind a test's back."""
+    monkeypatch.setattr(ai_client, "_agent_manifest", dict)
+
+
+def _stored_keys(monkeypatch, *rows: dict) -> None:
+    """Stored server provider rows as storage.list_server_ai_providers returns."""
+    monkeypatch.setattr(
+        storage, "list_server_ai_providers", AsyncMock(return_value=list(rows))
+    )
+
+
+def _deployment_keys(monkeypatch, credentials: dict[str, str] | None) -> None:
+    """Deployment-env credentials as the resolver answers them (None = unknown).
+
+    The picker passes the manifest it already read, so the fake takes it.
+    """
+    monkeypatch.setattr(
+        ai_client, "deployment_provider_credentials", lambda *_: credentials
+    )
 
 
 @pytest.mark.asyncio
-async def test_server_capable_providers_dedupes_internal_and_canonical(monkeypatch):
-    """An internal and a canonical ID for the same provider yield one entry."""
-    _catalog(monkeypatch, "cli-claude", "claude", "acpx-cursor")
-    assert await ai_client.server_capable_providers() == ["claude", "cursor"]
+async def test_picker_options_include_db_only_keys_with_empty_catalog(monkeypatch):
+    """#586: a DB-stored key is an option even when the sidecar catalog is empty."""
+    _catalog(monkeypatch)
+    _stored_keys(monkeypatch, {"provider": "EnMaaS"}, {"provider": "openai"})
+    _deployment_keys(monkeypatch, {})
+    assert await ai_client.server_provider_options() == ["EnMaaS", "openai"]
 
 
 @pytest.mark.asyncio
-async def test_catalog_update_invalidates_server_capable_cache(monkeypatch):
-    """update_model_catalog() refreshes picker options without the 60s TTL wait."""
-    ai_client.update_model_catalog(None)
+async def test_picker_options_include_deployment_credential(monkeypatch):
+    """#586: a deployment/env-credential provider is an option with no stored key."""
+    _catalog(monkeypatch)
+    _stored_keys(monkeypatch)
+    _deployment_keys(monkeypatch, {"openai": "sk-deployment"})
+    assert await ai_client.server_provider_options() == ["openai"]
+
+
+@pytest.mark.asyncio
+async def test_picker_options_exclude_catalog_only_providers(monkeypatch):
+    """#586: a catalog-only provider holds no server credential — no option."""
+    _catalog(monkeypatch, "cli-claude", "openai", "EnMaaS")
+    _stored_keys(monkeypatch, {"provider": "EnMaaS"})
+    _deployment_keys(monkeypatch, {})
+    assert await ai_client.server_provider_options() == ["EnMaaS"]
+
+
+@pytest.mark.asyncio
+async def test_picker_options_include_stored_but_unverified_key(monkeypatch):
+    """#586: a key being repaired stays restrictable, so it stays an option."""
+    _catalog(monkeypatch)
+    _stored_keys(monkeypatch, {"provider": "EnMaaS", "verified_at": None})
+    _deployment_keys(monkeypatch, {})
+    assert await ai_client.server_provider_options() == ["EnMaaS"]
+
+
+@pytest.mark.asyncio
+async def test_picker_options_are_public_names_only(monkeypatch):
+    """#586: options are de-duplicated public names — row metadata is not echoed."""
+    _catalog(monkeypatch)
+    _stored_keys(
+        monkeypatch,
+        {"provider": "cli-claude", "verified_at": "2026-01-01", "extra": "ignored"},
+        {"provider": "claude"},
+    )
+    _deployment_keys(monkeypatch, {"acpx-cursor": "deployment-value"})
+    options = await ai_client.server_provider_options()
+    assert options == ["claude", "cursor"]
+    assert json.dumps(options) == '["claude", "cursor"]'
+
+
+@pytest.mark.asyncio
+async def test_picker_options_include_sidecar_declared_key(monkeypatch):
+    """#586: a key the sidecar's own models.json declares is a server credential.
+
+    Neither stored nor deployment-resolved (the deployment map deliberately
+    skips a declared key), yet the provider does serve on a server
+    credential — dropping it would let a saved restriction block it silently.
+    A key-less entry (``modelOverrides`` only) authenticates nothing (#389).
+    An unset ``$VAR`` reference cannot authenticate either (#586).
+    """
+    _catalog(monkeypatch)
+    _stored_keys(monkeypatch)
+    _deployment_keys(monkeypatch, {})
     monkeypatch.setattr(
         ai_client,
-        "_list_models_raw",
-        AsyncMock(return_value=[{"provider": "openai", "id": "m", "name": "m"}]),
+        "_agent_manifest",
+        lambda: {
+            "sidecaronly": {"apiKey": "sidecar-key"},  # pragma: allowlist secret
+            "keyless": {"modelOverrides": {"m": {"contextWindow": 1000}}},
+            # An unset reference authenticates nothing: no option (#586).
+            "unresolved": {"apiKey": "$NOT_EXPORTED_KEY"},
+        },
     )
-    assert await ai_client.server_capable_providers() == ["openai"]
-    ai_client.update_model_catalog([{"provider": "cli-cursor", "id": "m", "name": "m"}])
-    assert await ai_client.server_capable_providers() == ["cursor"]
+    monkeypatch.delenv("NOT_EXPORTED_KEY", raising=False)
+    options = await ai_client.server_provider_options()
+    assert options == ["sidecaronly"]
+    # Names only: the declared key never reaches the payload.
+    assert "sidecar-key" not in json.dumps(options)
 
 
 @pytest.mark.asyncio
-async def test_catalog_refresh_invalidates_server_capable_cache(monkeypatch):
-    """A catalog refresh (not just replacement) also drops the picker cache."""
-    ai_client.update_model_catalog(None)
+async def test_picker_options_fold_case_variants_to_one_option(monkeypatch):
+    """#586: one provider, one checkbox — stored casing vs deployment casing."""
+    _catalog(monkeypatch, "openai")
+    _stored_keys(monkeypatch, {"provider": "OpenAI"})
+    _deployment_keys(monkeypatch, {"openai": "sk-deployment"})
+    assert await ai_client.server_provider_options() == ["openai"]
+
+
+@pytest.mark.asyncio
+async def test_picker_options_resolve_ambient_credentials_on_a_cold_catalog(
+    monkeypatch,
+):
+    """#586: a cold catalog must not hide an ambient provider from the picker.
+
+    The ambient half of the deployment resolve reads the catalog snapshot, so
+    ``get_admin_settings`` on a freshly started server used to offer an option
+    list silently missing every ambient provider. One discovery pass answers
+    it, and a warm snapshot answers the very same set without fetching again.
+    Counted at the raw sidecar call: a warm load may still re-enter the catalog
+    lookup (that is what lets a caller override the catalog), but it must not
+    pay for another sidecar pass.
+    """
+    entries = [{"provider": "openai", "id": "openai-model", "name": "openai"}]
+    passes: list[int] = []
+
+    async def _discover(_path: str) -> list[dict]:
+        passes.append(1)
+        return entries
+
+    monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+    monkeypatch.setattr(ai_client, "_cold_catalog_attempt", None)
+    monkeypatch.setattr(ai_client, "_cold_catalog_retry_at", 0.0)
+    monkeypatch.setattr(ai_client, "_list_models_raw", _discover)
+    _stored_keys(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-ambient-cold-cache")
+
+    cold = await ai_client.server_provider_options()
+    assert cold == ["openai"]
+    assert len(passes) == 1
+    assert await ai_client.server_provider_options() == cold
+    assert len(passes) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cold_catalog_loads_share_one_bounded_attempt(monkeypatch):
+    """#586 r6: a load arriving mid-discovery pays only the remainder.
+
+    A timed-out discovery released the catalog lock, so with no in-flight
+    marker a second settings load starting inside the first one's wait ran its
+    own full bound. Both await the same attempt now: one attempt, one bound.
+    """
+    attempts: list[int] = []
+
+    async def _hang(*_: object) -> list[dict]:
+        attempts.append(1)
+        await asyncio.sleep(1)
+        return []
+
+    monkeypatch.setattr(ai_client, "_COLD_CATALOG_TIMEOUT_SECONDS", 0.4)
+    monkeypatch.setattr(ai_client, "_cold_catalog_retry_at", 0.0)
+    monkeypatch.setattr(ai_client, "_cold_catalog_attempt", None)
+    monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+    monkeypatch.setattr(ai_client, "_list_models_raw", _hang)
+    monkeypatch.setattr(ai_client, "_agent_manifest", dict)
+    _stored_keys(monkeypatch, {"provider": "EnMaaS"})
+
+    started = time.monotonic()
+    first = asyncio.create_task(ai_client.server_provider_options())
+    await asyncio.sleep(0.3)
+    # Arrives while the first wait is still running.
+    second = await ai_client.server_provider_options()
+    results = [await first, second]
+    elapsed = time.monotonic() - started
+
+    assert results == [["EnMaaS"], ["EnMaaS"]]
+    assert len(attempts) == 1
+    # One bound (0.4), not the 0.7 two separate waits would take.
+    assert elapsed < 0.65
+
+
+@pytest.mark.asyncio
+async def test_bounded_model_catalog_answers_without_a_hanging_sidecar(monkeypatch):
+    """#586 r6: the one shared accessor never waits on the sidecar's own timeout.
+
+    Measured on the accessor, not through an endpoint: the app's startup
+    preload can fill the cache mid-test, which made an endpoint-level clock
+    assertion pass either way.
+    """
+
+    async def _hang(*_: object) -> list[dict]:
+        await asyncio.sleep(5)
+        return []
+
+    monkeypatch.setattr(ai_client, "_COLD_CATALOG_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(ai_client, "_cold_catalog_retry_at", 0.0)
+    monkeypatch.setattr(ai_client, "_cold_catalog_attempt", None)
+    monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+    monkeypatch.setattr(ai_client, "_list_models_raw", _hang)
+
+    started = time.monotonic()
+    assert await ai_client.bounded_model_catalog() is None
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    # The cooldown the timeout armed suppresses the next attempt.
+    assert await ai_client.bounded_model_catalog() is None
+    assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.asyncio
+async def test_picker_options_keep_the_manifest_declared_casing(monkeypatch):
+    """#586: a declared ``MyProvider`` is offered as declared, not lowercased.
+
+    The runtime resolves a provider by its exact ID, so the manifest's casing
+    is the label — and a case-variant from another source dedupes into it.
+    """
+    declared_key = "declared-literal-key"  # pragma: allowlist secret
+    _catalog(monkeypatch)
+    _deployment_keys(monkeypatch, {})
+    _stored_keys(monkeypatch)
     monkeypatch.setattr(
-        ai_client,
-        "_list_models_raw",
-        AsyncMock(return_value=[{"provider": "openai", "id": "m", "name": "m"}]),
+        ai_client, "_agent_manifest", lambda: {"MyProvider": {"apiKey": declared_key}}
     )
-    assert await ai_client.server_capable_providers() == ["openai"]
-    monkeypatch.setattr(
-        ai_client,
-        "_list_models_raw",
-        AsyncMock(return_value=[{"provider": "cli-gemini", "id": "m", "name": "m"}]),
-    )
-    await ai_client._get_model_catalog(refresh=True)
-    assert await ai_client.server_capable_providers() == ["gemini"]
+    assert await ai_client.server_provider_options() == ["MyProvider"]
+
+    # The same provider from storage, different casing: one entry, no dup.
+    _stored_keys(monkeypatch, {"provider": "myprovider"})
+    assert await ai_client.server_provider_options() == ["MyProvider"]

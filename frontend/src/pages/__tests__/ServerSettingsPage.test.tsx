@@ -1184,11 +1184,16 @@ describe('ServerSettingsPage active server providers', () => {
     expect(screen.getByRole('button', { name: 'Show history' })).toBeInTheDocument()
   })
 
-  it('shows a hint when no server providers are available', async () => {
+  it('names the next step when no server provider is configured at all (#586)', async () => {
+    // Empty options + empty value means nothing is configured — not a
+    // failed discovery, so the "unavailable" warning must stay away.
     get.mockResolvedValue(restricted('', { options: [] }) as never)
 
     await openAnalysisTab()
-    expect(screen.getByText('No server providers available')).toBeInTheDocument()
+    expect(screen.getByText(/No server providers configured/)).toBeInTheDocument()
+    expect(screen.getByText(/add a key under Server providers/)).toBeInTheDocument()
+    expect(screen.queryByText(/Provider discovery is currently unavailable/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Restricted to:/)).not.toBeInTheDocument()
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
   })
 
@@ -1202,14 +1207,18 @@ describe('ServerSettingsPage active server providers', () => {
     )
   })
 
-  it('keeps the stored value read-only with a reset when discovery is unavailable', async () => {
+  it('keeps the stored restriction read-only with a reset when no listed provider holds a credential', async () => {
+    // An empty options list now means no provider holds a credential, not that
+    // discovery failed: the stored restriction still wins and must never fall
+    // through to the "nothing configured" copy (#586).
     get.mockResolvedValue(
       restricted('gemini', { options: [], source: 'db', updated_by: 'admin' }) as never,
     )
 
     await openAnalysisTab()
     expect(screen.getByText('Restricted to:')).toBeInTheDocument()
-    expect(screen.getByText(/Provider discovery is currently unavailable/)).toBeInTheDocument()
+    expect(screen.getByText(/none of the listed providers currently holds a credential/)).toBeInTheDocument()
+    expect(screen.queryByText(/No server providers configured/)).not.toBeInTheDocument()
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
 
     const del = vi.mocked(api.delete)
