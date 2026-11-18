@@ -10515,11 +10515,9 @@ async def create_user_with_identity(
 ) -> str:
     """Create an account **and** its SSO link in one transaction, or neither.
 
-    ``create_user`` cannot be reused here: it also answers "existing account
-    without a key" by minting one, which for an SSO "create" would hand an
-    existing — possibly someone else's — keyless account to the caller. This is
-    insert-only, and both rows land together so a failure cannot leave an account
-    with no identity behind.
+    ``create_user`` cannot be reused here: its insert commits on its own, so the
+    account could land without its identity. This writes both rows in one
+    transaction, or neither.
 
     Args:
         username: Name chosen on the choice screen (already validated).
@@ -11606,12 +11604,12 @@ async def create_keyless_user(
     #
     # Keyless on purpose — the header is this account's credential, so there is
     # no secret to show and none to leak. That is not the same as "nobody has
-    # claimed this name": ``create_user`` refuses to hand a first key to a
-    # row provisioned this way, because a name-based claim would let anyone who
-    # knows a provisioned username take the account over, and this project
-    # never finds or claims an account by name or email. The recovery path for
-    # a person whose proxy went away is an administrator rotating their key
-    # (``admin users rotate-key``), which is audited.
+    # claimed this name": ``create_user`` refuses every existing row, because a
+    # name-based claim would let anyone who knows a provisioned username take
+    # the account over, and this project never finds or claims an account by
+    # name or email. The recovery path for a person whose proxy went away is an
+    # administrator rotating their key (``admin users rotate-key``), which is
+    # audited.
     async with _connect_db() as db:
         try:
             await db.execute(
@@ -11628,6 +11626,16 @@ async def create_keyless_user(
             raise
 
 
+# Registration's only refusal for an existing name. One message whatever the
+# row's shape: saying "has a key" or "has none" would tell a stranger which
+# names are worth probing. Both remedies are named because the caller cannot
+# tell which one applies to them.
+_REGISTRATION_NAME_TAKEN = (
+    "User '{username}' already exists. Sign in with your API key, or ask an"
+    " administrator to issue one (admin users rotate-key)."
+)
+
+
 async def create_user(
     username: str,
     *,
@@ -11637,10 +11645,12 @@ async def create_user(
     can_use_server_providers: bool | None = None,
     created_via: str = DEFAULT_CREATED_VIA,
 ) -> tuple[str, str]:
-    """Create a new user or generate an API key for an existing user without one.
+    """Create a new user and return its first API key.
 
-    Returns (username, raw_api_key).
-    Raises ValueError if username is invalid, reserved, or user already has a key.
+    Insert-only: an existing name is always refused, whatever shape its row has.
+    A name is not a credential, so registering one must never mint a key for an
+    account somebody else already holds — and because the refusal is about
+    existence alone, no credential decision on this path reads ``created_via``.
 
     Args:
         username: The username to create.
@@ -11648,9 +11658,19 @@ async def create_user(
         role: Role to assign. Empty string uses DEFAULT_USER_ROLE from settings.
         can_view_reports: Whether the user may access /api/reports/* (admins
             always can, regardless of this flag).
+        can_use_server_providers: Initial server-provider grant, or None to keep
+            the column default.
         created_via: How the account came to exist (``internal`` / ``admin`` /
             a provider name). Recorded once at creation, never updated, and
             never read by an authentication decision.
+
+    Returns:
+        ``(username, raw_api_key)`` — the key is shown once and stored hashed.
+
+    Raises:
+        ValueError: When the name is malformed or reserved, when ``status`` or
+            ``created_via`` is not a known value, or when the name already has
+            an account.
 
     Uses BEGIN IMMEDIATE to prevent TOCTOU races between the
     existence check and the INSERT.
@@ -11667,60 +11687,32 @@ async def create_user(
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
+            # Existence only: reading the row's key or provenance here would
+            # make a credential decision depend on how the account was made.
             cursor = await db.execute(
-                "SELECT id, role, api_key_hash, created_via FROM users"
-                " WHERE username = ?",
-                (username,),
+                "SELECT 1 FROM users WHERE username = ?", (username,)
             )
-            existing = await cursor.fetchone()
-
-            if existing:
-                if existing["role"] == "admin":
-                    msg = f"User '{username}' is not eligible for self-registration"
-                    raise ValueError(msg)
-                # A keyless row is only up for grabs when no provider vouched for
-                # it. ``create_keyless_user`` leaves the proxy's accounts without
-                # a key, so "no key" there means "the header is the credential",
-                # not "nobody claimed this name" — handing out a key on a name
-                # claim would be the takeover this project refuses everywhere
-                # else. Refused with the same message a key-bearing row sends, so
-                # a stranger learns nothing about which shape the row has.
-                if existing["api_key_hash"] or existing["created_via"] == "proxy":
-                    msg = f"User '{username}' already has an API key. Please log in."
-                    raise ValueError(msg)
-                # Existing user without key — generate one.
-                # Do NOT reset can_view_reports (preserve any admin-granted flag).
-                update_cursor = await db.execute(
-                    "UPDATE users SET api_key_hash = ?, can_use_server_providers = "
-                    "COALESCE(?, can_use_server_providers)"
-                    " WHERE username = ? AND role != 'admin'",
-                    (
-                        key_hash,
-                        int(can_use_server_providers)
-                        if can_use_server_providers is not None
-                        else None,
-                        username,
-                    ),
-                )
-                if update_cursor.rowcount == 0:
-                    msg = f"User '{username}' not found or is an admin user"
-                    raise ValueError(msg)
-            else:
-                await db.execute(
-                    "INSERT INTO users"
-                    " (username, api_key_hash, role, status, can_view_reports,"
-                    " created_via, can_use_server_providers)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        username,
-                        key_hash,
-                        role,
-                        status,
-                        reports_flag,
-                        created_via,
-                        int(bool(can_use_server_providers)),
-                    ),
-                )
+            if await cursor.fetchone():
+                # Same message for every existing row, on purpose: telling a
+                # keyless row apart from a key-bearing one would show a stranger
+                # which names are worth probing.
+                msg = _REGISTRATION_NAME_TAKEN.format(username=username)
+                raise ValueError(msg)
+            await db.execute(
+                "INSERT INTO users"
+                " (username, api_key_hash, role, status, can_view_reports,"
+                " created_via, can_use_server_providers)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    username,
+                    key_hash,
+                    role,
+                    status,
+                    reports_flag,
+                    created_via,
+                    int(bool(can_use_server_providers)),
+                ),
+            )
             await db.commit()
         except ValueError:
             await db.execute("ROLLBACK")
@@ -11728,7 +11720,8 @@ async def create_user(
         except Exception as exc:
             await db.execute("ROLLBACK")
             if "UNIQUE constraint" in str(exc):
-                msg = f"User '{username}' already has an API key"
+                # The loser of the race answers exactly like the check above.
+                msg = _REGISTRATION_NAME_TAKEN.format(username=username)
                 raise ValueError(msg) from exc
             raise
     return username, raw_key

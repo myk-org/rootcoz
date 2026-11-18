@@ -51,16 +51,10 @@ async def test_created_via_is_recorded_once_and_defaults_to_internal(
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
         await storage.create_user("bob", created_via="github")
-        # The "existing account, no key" path (register / SSO attaching a key)
-        # must leave the recorded provenance alone.
-        async with storage._connect_db() as db:
-            await db.execute("DELETE FROM users WHERE username = 'bob'")
-            await db.execute(
-                "INSERT INTO users (username, role, status, created_via)"
-                " VALUES ('bob', 'reviewer', 'active', 'github')"
-            )
-            await db.commit()
-        await storage.create_user("bob", created_via="google")
+        # A later call naming the same account is refused, and the recorded
+        # provenance keeps what creation wrote.
+        with pytest.raises(ValueError, match="already exists"):
+            await storage.create_user("bob", created_via="google")
 
         async with storage._connect_db() as db:
             cursor = await db.execute(
@@ -1288,11 +1282,42 @@ async def test_a_provisioned_name_cannot_be_claimed_by_registering_it(
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_keyless_user("sso-provisioned", created_via="proxy")
 
-        with pytest.raises(ValueError, match="already has an API key"):
+        with pytest.raises(ValueError, match="already exists"):
             await storage.create_user("sso-provisioned")
 
         # Still keyless: the refused claim wrote nothing.
         assert await storage.user_has_key("sso-provisioned") is False
+
+
+async def test_registering_an_existing_keyless_row_reveals_no_more_than_a_keyed_one(
+    setup_test_db: Path,
+) -> None:
+    """One refusal for both shapes: the reply must not fingerprint the row.
+
+    A keyless row is what ``create_keyless_user`` leaves behind (the proxy's
+    accounts), so ``created_via``/``api_key_hash`` must not steer the answer —
+    the caller learns only that the name is taken.
+    """
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_keyless_user("sso-provisioned", created_via="proxy")
+        _name, existing_key = await storage.create_user("keyed")
+
+        errors = []
+        for username in ("sso-provisioned", "keyed"):
+            with pytest.raises(ValueError) as refusal:
+                await storage.create_user(username)
+            errors.append(str(refusal.value))
+
+        # Same wording apart from the name it echoes.
+        assert errors[0] == storage._REGISTRATION_NAME_TAKEN.format(
+            username="sso-provisioned"
+        )
+        assert errors[1] == storage._REGISTRATION_NAME_TAKEN.format(username="keyed")
+
+        # Neither attempt wrote a key: the keyless row stays keyless and the
+        # keyed row keeps the one key its owner already has.
+        assert await storage.user_has_key("sso-provisioned") is False
+        assert (await storage.get_user_by_key(existing_key))["username"] == "keyed"
 
 
 async def test_an_administrator_rotation_gives_a_keyless_account_a_key(
@@ -1307,3 +1332,14 @@ async def test_an_administrator_rotation_gives_a_keyless_account_a_key(
         assert (await storage.get_user_by_key(raw_key))["username"] == (
             "sso-provisioned"
         )
+
+
+async def test_a_new_name_still_registers_and_gets_its_key(
+    setup_test_db: Path,
+) -> None:
+    """Refusing every existing name must not refuse the names that are free."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        username, raw_key = await storage.create_user("newcomer")
+
+        assert username == "newcomer"
+        assert (await storage.get_user_by_key(raw_key))["username"] == "newcomer"

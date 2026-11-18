@@ -10,7 +10,7 @@ import {
 } from '@/lib/ssoProviders'
 import { Button } from '@/components/ui/button'
 
-/** Session-scoped dismissal: the prompt is a nudge, not a notification. */
+/** Session-scoped, per-account dismissal: the prompt is a nudge, not a notification. */
 const DISMISS_KEY = 'rootcoz-connect-banner-dismissed'
 
 interface IdentitiesResponse {
@@ -29,10 +29,19 @@ interface IdentitiesResponse {
  * per-session one is forgotten when the browser is.
  */
 export function ConnectSignInMethodBanner() {
-  const { authenticated, role, username } = useAuth()
+  const { username } = useAuth()
+  // Dismissing is one person's decision about their own account, so the stored
+  // flag is keyed by username and there is no flag at all until we know whose
+  // it would be — otherwise the next person on this tab inherits it.
+  if (!username) return null
+  return <ConnectBannerForUser key={username} username={username} />
+}
+
+function ConnectBannerForUser({ username }: { username: string }) {
+  const { authenticated, role } = useAuth()
   const [providers, setProviders] = useState<SsoProvider[]>([])
   const [unlinked, setUnlinked] = useState(false)
-  const [dismissed, setDismissed] = useSessionState<boolean>(DISMISS_KEY, false)
+  const [dismissed, setDismissed] = useSessionState<boolean>(`${DISMISS_KEY}:${username}`, false)
 
   useEffect(() => {
     // Nothing to offer a viewer, and nothing to load without a session.

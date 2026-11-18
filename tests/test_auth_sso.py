@@ -20,6 +20,7 @@ import sqlite3
 import time
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import unquote
 
 import pytest
 
@@ -517,6 +518,84 @@ def test_the_post_login_destination_cannot_leave_the_site(
 ) -> None:
     """An SSO link must not double as an open redirect."""
     assert sso_state.safe_next(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "/%09/evil",
+        "/\t/evil",
+        "//evil",
+        "\\\\evil",
+        "/a\tb",
+        "/report/\x7f1",
+        "/a\nb",
+        "/a\rb",
+        "/report/1\n",
+        "\n",
+        "\r",
+    ],
+)
+def test_a_destination_carrying_a_control_character_is_refused(raw: str) -> None:
+    """A tab is dropped by the browser's URL parser: a path becomes ``//host``.
+
+    The first case is the query-string form and the second its decoded form —
+    the route reads ``next`` through ``request.query_params``, so ``/%09/evil``
+    is what the guard is handed. Qodo found that tab surviving into the cookie,
+    the ticket and the JSON ``next``, leaving only the sinks to stop the jump.
+    """
+    assert sso_state.safe_next(unquote(raw)) == "/"
+
+
+@pytest.mark.parametrize("path", ["/report/1?x=1", "/settings", "/"])
+def test_an_ordinary_destination_survives_the_control_character_rule(
+    path: str,
+) -> None:
+    """The refusal is aimed at control characters, not at deep links."""
+    assert sso_state.safe_next(path) == path
+
+
+async def test_a_tabbed_destination_never_reaches_a_sink(temp_db_path: Path) -> None:
+    """The end-to-end case Qodo described, guarded at the one point they share.
+
+    ``?next=/%09/evil`` arrives decoded as ``/\t/evil``; a browser dropping that
+    tab would read it as the scheme-relative ``//evil``. The sealed attempt must
+    already say ``/``, so the 303, the cookie, the ticket and ``navigate()`` all
+    get the same safe value instead of one that only the sink happens to stop.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        # A returning identity, so the callback signs in and redirects straight
+        # to the destination instead of minting a first-login ticket.
+        await storage.create_user("ruthn")
+        await storage.add_user_identity("ruthn", "google", "sub-1")
+
+        with patch.object(
+            GoogleProvider,
+            "authorization_url",
+            return_value="https://accounts.google.com/o/oauth2/v2/auth?state=xyz",
+            autospec=True,
+        ):
+            started = client.get(
+                "/api/auth/sso/google/login?next=/%09/evil", follow_redirects=False
+            )
+
+        assert started.status_code == 303
+        sealed = started.cookies.get(sso_state.STATE_COOKIE)
+        assert sealed
+        attempt = sso_state.open_attempt(sealed, provider="google")
+        assert attempt.next_path == "/"
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={attempt.state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        # The real header: ``//evil`` is what the tab would have produced.
+        assert response.headers["location"] == "/"
 
 
 def _github_transport(*, emails: object, user: dict | None = None):
@@ -5424,8 +5503,12 @@ async def test_registering_a_provisioned_name_is_refused(temp_db_path: Path) -> 
         )
 
         assert response.status_code == 400
+        # One message for every existing name, so the answer says nothing about
+        # whether this row holds a key — that difference is what would tell a
+        # stranger which names are worth probing.
         assert response.json()["detail"] == (
-            "User 'sso-provisioned' already has an API key. Please log in."
+            "User 'sso-provisioned' already exists. Sign in with your API key, or"
+            " ask an administrator to issue one (admin users rotate-key)."
         )
         assert "api_key" not in response.json()
 
