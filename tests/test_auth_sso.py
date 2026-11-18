@@ -4752,6 +4752,154 @@ async def test_an_oidc_login_without_an_id_token_is_refused_and_audited(
             assert (await cursor.fetchone())["n"] == 0
 
 
+async def test_a_key_document_with_no_key_list_is_refused_and_audited(
+    temp_db_path: Path,
+) -> None:
+    """A ``jwks_uri`` answering ``{}`` is a sign-in refusal, not a 500.
+
+    ``KeySet.import_key_set`` raises ``KeyError`` on a document with no ``keys``,
+    and nothing on the sign-in path catches that: the browser would get a 500 and
+    the trail no row. It is the handled ``jwks_failed`` refusal instead.
+    """
+    import httpx
+
+    from rootcoz.auth.sso import oidc as oidc_module
+
+    oidc_module._reset_discovery_cache()
+    token, _key_set = _signed_id_token()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/.well-known/openid-configuration":
+            return httpx.Response(
+                200,
+                json={
+                    "issuer": "https://accounts.google.com",
+                    "authorization_endpoint": "https://accounts.google.com/auth",
+                    "token_endpoint": "https://accounts.google.com/token",
+                    "jwks_uri": "https://accounts.google.com/jwks",
+                },
+            )
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"id_token": token, "token_type": "Bearer"})
+        # The broken document under test: a JSON object with no key list.
+        return httpx.Response(200, json={})
+
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        sealed, state = _sealed()
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with _github_client(httpx.MockTransport(handler)):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        assert response.headers["location"].startswith("/login?sso_error=")
+        assert response.cookies.get("rootcoz_session") is None
+        refusal = await _last_sso_refusal(temp_db_path)
+        assert refusal["details"]["reason"] == "jwks_failed"
+
+
+async def test_a_broken_key_document_is_never_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document that failed validation must cost one login, not the whole TTL.
+
+    Caching it would answer every login for ``METADATA_TTL_SECONDS`` from the
+    same broken document, so the second attempt must refetch.
+    """
+    from rootcoz.auth.sso import oidc as oidc_module
+
+    oidc_module._reset_discovery_cache()
+    jwks_uri = "https://idp.example/jwks"
+    fetches = 0
+
+    async def _counting(*args: object, **kwargs: object) -> dict:
+        nonlocal fetches
+        fetches += 1
+        return {}
+
+    monkeypatch.setattr(oidc_module, "request_json", _counting)
+    provider = RedHatSSOProvider(
+        client_id="cid",
+        client_secret="secret",  # pragma: allowlist secret
+        issuer="https://idp.example",
+    )
+
+    for _attempt in range(2):
+        with pytest.raises(AuthError) as excinfo:
+            await provider._jwks_for(jwks_uri)
+        assert excinfo.value.reason == "jwks_failed"
+        # The message names the cause, so the audit row is enough to fix it.
+        assert "key list" in str(excinfo.value)
+    assert fetches == 2
+    assert jwks_uri not in oidc_module._JWKS_CACHE
+
+
+async def test_a_key_list_that_cannot_be_imported_is_refused_and_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A list of unknown keys is a ``jwks_failed`` refusal, and not cached either."""
+    from rootcoz.auth.sso import oidc as oidc_module
+
+    oidc_module._reset_discovery_cache()
+    jwks_uri = "https://idp.example/jwks"
+    fetches = 0
+
+    async def _counting(*args: object, **kwargs: object) -> dict:
+        nonlocal fetches
+        fetches += 1
+        return {"keys": [{"kty": "nope"}]}
+
+    monkeypatch.setattr(oidc_module, "request_json", _counting)
+    provider = RedHatSSOProvider(
+        client_id="cid",
+        client_secret="secret",  # pragma: allowlist secret
+        issuer="https://idp.example",
+    )
+
+    for _attempt in range(2):
+        with pytest.raises(AuthError) as excinfo:
+            await provider._jwks_for(jwks_uri)
+        assert excinfo.value.reason == "jwks_failed"
+    assert fetches == 2
+    assert jwks_uri not in oidc_module._JWKS_CACHE
+
+
+async def test_a_valid_key_set_verifies_and_a_warm_cache_avoids_a_refetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shape check must admit real keys, and the cache must still serve them."""
+    from rootcoz.auth.sso import oidc as oidc_module
+
+    oidc_module._reset_discovery_cache()
+    jwks_uri = "https://idp.example/jwks"
+    token, key_set = _signed_id_token(
+        issuer="https://idp.example", audience="cid", nonce="n1"
+    )
+    document = key_set.as_dict(private=False)
+    fetches = 0
+
+    async def _counting(*args: object, **kwargs: object) -> dict:
+        nonlocal fetches
+        fetches += 1
+        return document
+
+    monkeypatch.setattr(oidc_module, "request_json", _counting)
+    provider = RedHatSSOProvider(
+        client_id="cid",
+        client_secret="secret",  # pragma: allowlist secret
+        issuer="https://idp.example",
+    )
+
+    for _attempt in range(2):
+        claims = await provider._verify_id_token({"jwks_uri": jwks_uri}, token, "n1")
+        assert claims["sub"] == "sub-1"
+    # The second verification is served from the cache, not the network.
+    assert fetches == 1
+
+
 async def test_oidc_discovery_rejects_a_plaintext_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
