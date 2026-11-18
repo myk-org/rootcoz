@@ -271,10 +271,16 @@ class TestCanViewReports:
             match = next(u for u in users if u["username"] == "reporter")
             assert match["can_view_reports"] is True
 
-    async def test_create_user_key_gen_preserves_can_view_reports(
+    async def test_key_rotation_preserves_can_view_reports(
         self, temp_db_path: Path
     ) -> None:
-        """Existing-user key generation must not reset can_view_reports."""
+        """Issuing a key for an existing row must not reset can_view_reports.
+
+        Registration no longer mints a key for a name that already exists — a
+        key handed out by name is how an account is taken over — so the grant a
+        row carries is re-checked against the audited path that does issue one:
+        an administrator's rotation.
+        """
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
             await storage.track_user("tracked_flag")
@@ -283,7 +289,13 @@ class TestCanViewReports:
             assert user["can_view_reports"] is True
             assert not await storage.user_has_key("tracked_flag")
 
-            _, api_key = await storage.create_user("tracked_flag")
+            # Registration refuses the existing name: the row is not a grant of
+            # a credential, so nothing is written and no key appears.
+            with pytest.raises(ValueError, match="already exists"):
+                await storage.create_user("tracked_flag")
+            assert not await storage.user_has_key("tracked_flag")
+
+            api_key = await storage.rotate_user_key("tracked_flag")
             assert api_key.startswith("rootcoz_")
             user = await storage.get_user_by_username("tracked_flag")
             assert user["can_view_reports"] is True

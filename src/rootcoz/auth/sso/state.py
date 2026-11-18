@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from rootcoz.encryption import decrypt_sealed_or_none, encrypt_value
+from rootcoz.url_utils import has_whitespace_or_control
 
 #: Cookie carrying the sealed attempt.
 STATE_COOKIE = "rootcoz_sso_state"
@@ -105,21 +106,34 @@ def ticket_binding_hash(binding: str) -> str:
 def safe_next(next_path: str) -> str:
     """Accept only a same-site absolute path as a post-login destination.
 
+    Refused here, once, instead of at each sink, because the danger is the
+    browser's and not the server's: a tab is dropped while a URL is parsed, so
+    ``/\t/evil`` reaches ``navigate()`` as the scheme-relative ``//evil`` even
+    though every check before it saw a path. Control characters therefore never
+    leave this function, and neither does anything that only looks like a path
+    until they are removed.
+
     Args:
         next_path: The caller-supplied destination.
 
     Returns:
-        The destination, or ``/`` when it is empty, over-long, or could send the
-        browser off-site (``//host``, ``http://...``, a backslash trick).
+        The destination, or ``/`` when it is empty, over-long, carries a
+        whitespace or control character, or could send the browser off-site
+        (``//host``, ``http://...``, a backslash trick). The answer is the same
+        for the 303 redirect, the sealed cookie, the ticket and the SPA.
     """
-    candidate = next_path.strip()
-    if not candidate or len(candidate) > MAX_NEXT_LENGTH:
+    if not next_path or len(next_path) > MAX_NEXT_LENGTH:
         return "/"
-    if not candidate.startswith("/") or candidate.startswith("//"):
+    # The shared rule from :mod:`rootcoz.url_utils`, not a second copy of it:
+    # a control character has no place in a destination, and refusing beats
+    # stripping — a stripped tab is what re-forms ``//evil`` downstream.
+    if has_whitespace_or_control(next_path) or "\\" in next_path:
         return "/"
-    if "\\" in candidate or "\n" in candidate or "\r" in candidate:
+    # Only now, on the value that survived: checking the raw one would let
+    # ``/\t/evil`` pass the prefix test it fails once the tab is gone.
+    if not next_path.startswith("/") or next_path.startswith("//"):
         return "/"
-    return candidate
+    return next_path
 
 
 def _pack(token: str) -> str:

@@ -10,7 +10,7 @@ vi.mock('@/lib/api', async (importActual) => ({
   api: { get: (...args: unknown[]) => get(...args) },
 }))
 
-const auth = { authenticated: true, role: 'reviewer' }
+const auth = { authenticated: true, role: 'reviewer', username: 'reviewer1' }
 vi.mock('@/lib/auth', () => ({ useAuth: () => auth }))
 
 function mockApi(identities: unknown[], providers: unknown[], browserLogin = true) {
@@ -36,6 +36,7 @@ function renderBanner() {
 beforeEach(() => {
   auth.authenticated = true
   auth.role = 'reviewer'
+  auth.username = 'reviewer1'
   get.mockReset()
   window.sessionStorage.clear()
 })
@@ -97,6 +98,59 @@ it('stays dismissed for the session', async () => {
   renderBanner()
   await waitFor(() => expect(get).toHaveBeenCalled())
   expect(screen.queryByText(/Connect Google in/i)).toBeNull()
+})
+
+it('does not carry one person\'s dismissal to the next on the same tab', async () => {
+  mockApi([], PROVIDERS)
+  auth.username = 'alice'
+  const alice = renderBanner()
+  await screen.findByText(/Connect Google in/i)
+  await userEvent.click(screen.getByRole('button', { name: /dismiss/i }))
+  expect(screen.queryByText(/Connect Google in/i)).toBeNull()
+  alice.unmount()
+
+  // Bob signs in on the same tab: alice's decision about her account says
+  // nothing about his, so he is prompted.
+  auth.username = 'bob'
+  renderBanner()
+  expect(await screen.findByText(/Connect Google in/i)).toBeTruthy()
+})
+
+it('remembers alice\'s dismissal when alice signs back in', async () => {
+  mockApi([], PROVIDERS)
+  auth.username = 'alice'
+  const alice = renderBanner()
+  await screen.findByText(/Connect Google in/i)
+  await userEvent.click(screen.getByRole('button', { name: /dismiss/i }))
+  alice.unmount()
+
+  get.mockClear()
+  renderBanner()
+  await waitFor(() => expect(get).toHaveBeenCalled())
+  expect(screen.queryByText(/Connect Google in/i)).toBeNull()
+})
+
+it('never reads or writes an unscoped dismissal key', async () => {
+  mockApi([], PROVIDERS)
+  auth.username = 'alice'
+  renderBanner()
+  await screen.findByText(/Connect Google in/i)
+  await userEvent.click(screen.getByRole('button', { name: /dismiss/i }))
+
+  expect(window.sessionStorage.getItem('rootcoz-connect-banner-dismissed')).toBeNull()
+  expect(window.sessionStorage.getItem('rootcoz-connect-banner-dismissed:alice')).toBe('true')
+})
+
+it('writes nothing until the signed-in username is known', async () => {
+  mockApi([], PROVIDERS)
+  auth.username = ''
+  renderBanner()
+
+  // No username means no key to attribute a dismissal to, so nothing is
+  // fetched and nothing is stored.
+  await waitFor(() => expect(get).not.toHaveBeenCalled())
+  expect(screen.queryByText(/Connect Google in/i)).toBeNull()
+  expect(window.sessionStorage.length).toBe(0)
 })
 
 it('stays quiet when the server has no browser sign-in', async () => {
