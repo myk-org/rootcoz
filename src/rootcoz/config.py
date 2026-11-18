@@ -2269,15 +2269,60 @@ def csv_entries(value: str | None, *, lower: bool = True) -> list[str]:
     return [entry.lower() for entry in entries] if lower else entries
 
 
+#: One DNS label: 1-63 characters of a-z, 0-9 and '-', not starting or ending
+#: with '-'. Applied to an already lower-cased entry, so no re.IGNORECASE.
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
+
+
+def domain_entry_is_valid(candidate: str) -> bool:
+    """Whether a normalised allow-list entry can ever equal an email domain.
+
+    A DNS label is one dot-separated piece of a host name: 1-63 characters drawn
+    from ``a-z``, ``0-9`` and ``-``, and it may not begin or end with ``-``. A
+    name needs at least two labels, so a single label such as ``com`` is refused:
+    it admits nothing an operator means (a mail domain always has a registrable
+    part) and is almost always a truncated paste.
+
+    The check also swallows the wildcard, scheme, path, space and leading-dot
+    cases: none of them is a legal label, so ``*``, ``https://redhat.com``,
+    ``redhat.com/x`` and ``.redhat.com`` all fail here.
+
+    Args:
+        candidate: One entry, already lower-cased and stripped of ``@`` and the
+            trailing dot.
+
+    Returns:
+        True when the entry is a plausible email domain.
+    """
+    labels = candidate.split(".")
+    # A one-label name (or none at all) can never match `local@domain`.
+    if len(labels) < 2:
+        return False
+    return all(
+        len(label) <= 63 and _DNS_LABEL.fullmatch(label) is not None for label in labels
+    )
+
+
 def normalize_domain_list(value: str | None) -> frozenset[str]:
     """Parse a comma-separated domain allow-list.
 
     Entries are trimmed, lower-cased, and a leading ``@`` is dropped, so
     ``@RedHat.com`` and ``redhat.com`` mean the same thing; a trailing dot (the
-    DNS root) is stripped. ``*``, a scheme or a path is rejected — an allow-list
-    whose value is "everything" is a typo, not an intention — and so is a list
-    whose entries are all blank, which would otherwise disable the policy. An
-    entry that starts with ``.`` is refused too: ``.redhat.com`` matches nothing.
+    DNS root) is stripped. Every entry must then be a real domain name (see
+    :func:`domain_entry_is_valid`), and a list whose entries are all blank is
+    refused because it would otherwise disable the policy.
+
+    This setting is admission control, so an entry that no email address can
+    match is a lockout, not a typo the operator will notice: while it is the only
+    entry, every SSO sign-in is refused with ``domain_not_allowed``. Hence an
+    entry such as ``alice@redhat.com`` (an address pasted whole) or
+    ``redhat..com`` is rejected where it is saved.
+
+    Internationalised domains are refused: the address that reaches the check is
+    compared as the IdP wrote it, so a ``münchen.de`` entry could only match if
+    the claim arrived in the same non-ASCII form — which is not guaranteed, and
+    a guess there silently locks the domain out. The punycode form
+    (``xn--mnchen-3ya.de``) is plain ASCII, so it is accepted.
 
     Args:
         value: The raw setting.
@@ -2286,12 +2331,13 @@ def normalize_domain_list(value: str | None) -> frozenset[str]:
         The domains. Empty means "no restriction".
 
     Raises:
-        ValueError: When an entry is a wildcard, a scheme, a path or starts with
-            a dot, or when the value contains no usable domain at all.
+        ValueError: When an entry is not a real domain name (wildcard, scheme,
+            path, a pasted address, a single label, a non-ASCII domain), or when
+            the value contains no usable domain at all.
     """
     if not value or not value.strip():
-        # Unset means "no restriction"; a value that is only blanks/comma is a
-        # typo and is refused below.
+        # Unset (or whitespace alone) means "no restriction"; a list of bare
+        # separators such as "," is refused below.
         return frozenset()
     entries = csv_entries(value)
     domains: set[str] = set()
@@ -2302,11 +2348,13 @@ def normalize_domain_list(value: str | None) -> frozenset[str]:
         candidate = candidate.rstrip(".")
         if not candidate:
             continue
-        if "*" in candidate or "/" in candidate or ":" in candidate or " " in candidate:
-            msg = f"Invalid SSO domain entry: '{entry}'"
+        if not candidate.isascii():
+            msg = (
+                f"Invalid SSO domain entry: '{entry}': internationalised domains"
+                " are not supported yet, write the punycode form"
+            )
             raise ValueError(msg)
-        if candidate.startswith("."):
-            # `.redhat.com` is not `redhat.com` and would match nothing.
+        if not domain_entry_is_valid(candidate):
             msg = f"Invalid SSO domain entry: '{entry}'"
             raise ValueError(msg)
         domains.add(candidate)

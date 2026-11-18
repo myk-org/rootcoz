@@ -15,6 +15,7 @@ from rootcoz.config import (
     jira_availability,
     jira_method_missing_fields,
     jira_unavailable_reason,
+    normalize_domain_list,
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
@@ -1363,3 +1364,59 @@ class TestDeviceCodePollInterval:
             settings = Settings(_env_file=None)
             assert settings.sso_device_code_ttl_seconds == 600
             assert settings.sso_device_poll_interval_seconds == 5
+
+
+class TestSSODomainAllowList:
+    """An allow-list entry no email domain can match is a lockout, not a typo."""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # An address pasted whole: no email domain ever equals it.
+            "alice@redhat.com",
+            # An empty label can never appear in a host name.
+            "redhat..com",
+            # A label may not start or end with '-', nor carry a path.
+            "-x.com",
+            "x-.com",
+            "redhat.com/foo",
+            # A single label admits nothing a mail domain can satisfy.
+            "com",
+            # 64 characters is one past the DNS limit.
+            f"{'a' * 64}.com",
+            # Internationalised domains need the punycode form.
+            "münchen.de",
+        ],
+    )
+    def test_an_entry_that_cannot_match_is_refused(self, raw: str) -> None:
+        """Saved as-is, each of these would refuse every SSO sign-in."""
+        with pytest.raises(ValueError, match="Invalid SSO domain entry"):
+            normalize_domain_list(raw)
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("@RedHat.com", frozenset({"redhat.com"})),
+            ("redhat.com.", frozenset({"redhat.com"})),
+            ("eng.redhat.com", frozenset({"eng.redhat.com"})),
+            ("@RedHat.com,example.org", frozenset({"redhat.com", "example.org"})),
+            # Punycode is plain ASCII, so it is a usable entry.
+            ("xn--mnchen-3ya.de", frozenset({"xn--mnchen-3ya.de"})),
+        ],
+    )
+    def test_a_real_domain_is_normalised(
+        self, raw: str, expected: frozenset[str]
+    ) -> None:
+        """The '@', the trailing dot and the case never change the meaning."""
+        assert normalize_domain_list(raw) == expected
+
+    def test_a_blank_value_disables_the_check(self) -> None:
+        """Unset means no restriction, and so does whitespace alone."""
+        assert normalize_domain_list("") == frozenset()
+        assert normalize_domain_list(None) == frozenset()
+        assert normalize_domain_list("   ") == frozenset()
+
+    def test_a_list_of_separators_is_refused(self) -> None:
+        """Reading it as 'no restriction' would silently disable the policy."""
+        with pytest.raises(ValueError, match="Invalid SSO domain entry"):
+            normalize_domain_list(",")
