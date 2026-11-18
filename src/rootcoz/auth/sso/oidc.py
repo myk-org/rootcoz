@@ -113,6 +113,26 @@ def _date_claim(claims: dict[str, Any], name: str) -> float | None:
     return float(value)
 
 
+def _key_document(document: dict[str, Any]) -> dict[str, Any]:
+    """Refuse a key-set document that cannot hold keys.
+
+    Args:
+        document: The ``jwks_uri`` response.
+
+    Returns:
+        The same document, once it is known to carry a key list.
+
+    Raises:
+        AuthError: ``jwks_failed`` when ``keys`` is not a list. Checked here so
+            a document with no key list never reaches the cache and never raises
+            ``KeyError`` out of ``KeySet.import_key_set`` — that would escape the
+            refusals the callback handles and answer a 500.
+    """
+    if not isinstance(document.get("keys"), list):
+        raise AuthError("jwks_failed", "key set document has no key list")
+    return document
+
+
 class OIDCProvider(SSOProvider):
     """An OpenID Connect provider, configured from settings.
 
@@ -490,17 +510,37 @@ class OIDCProvider(SSOProvider):
             A key set usable by :mod:`joserfc`.
 
         Raises:
-            AuthError: When the keys cannot be fetched.
+            AuthError: ``jwks_failed`` when the keys cannot be fetched, when the
+                document carries no key list, or when its key entries cannot be
+                imported (an unknown ``kty``, a malformed key).
         """
+        from joserfc.errors import JoseError
         from joserfc.jwk import KeySet
 
         now = time.monotonic()
         cached = _JWKS_CACHE.get(jwks_uri)
-        if force_refresh or cached is None or now - cached[0] >= METADATA_TTL_SECONDS:
-            document = await request_json("GET", jwks_uri, reason="jwks_failed")
-            cached = (now, document)
-            _JWKS_CACHE[jwks_uri] = cached
-        return KeySet.import_key_set(cached[1])
+        fetched = (
+            force_refresh or cached is None or now - cached[0] >= METADATA_TTL_SECONDS
+        )
+        if fetched:
+            # Validated before it is cached, not after: a document that cannot be
+            # imported must cost one login, not every login for the TTL.
+            _JWKS_CACHE[jwks_uri] = (
+                now,
+                _key_document(
+                    await request_json("GET", jwks_uri, reason="jwks_failed")
+                ),
+            )
+        # Total: `get` above returned None only in the branch that filled it.
+        document = _JWKS_CACHE[jwks_uri][1]
+        try:
+            return KeySet.import_key_set(document)
+        except (JoseError, KeyError, ValueError, TypeError) as exc:
+            if fetched:
+                # A key list of unimportable entries is still a broken document:
+                # drop it so the next attempt refetches instead of repeating it.
+                _JWKS_CACHE.pop(jwks_uri, None)
+            raise AuthError("jwks_failed", f"key set is unusable: {exc}") from exc
 
     def _normalise(self, claims: dict[str, Any]) -> ClaimSet:
         """Turn provider claims into the provider-agnostic shape.
