@@ -143,6 +143,7 @@ from rootcoz.config import (
     SQLITE_INT_MAX,
     Settings,
     atlassian_cloud_id_error,
+    browser_provider_without_base_url,
     csv_entries,
     duplicate_additional_repo_names,
     get_settings,
@@ -500,6 +501,14 @@ def _sso_sensitive_settings() -> frozenset[str]:
         for provider in auth_sso.PROVIDER_CLASSES
         for name in provider.sensitive_settings
     )
+
+
+#: Settings that decide :func:`rootcoz.config.browser_provider_without_base_url`.
+#: A save that touches none of them cannot leave a configured provider without a
+#: base URL, so the rule is only asked for a batch that does.
+_SSO_BROWSER_LOGIN_SETTINGS: frozenset[str] = frozenset(
+    {"public_base_url", *_sso_provider_settings()}
+)
 
 
 def _sso_restart_required_settings() -> frozenset[str]:
@@ -19940,6 +19949,38 @@ async def _ticket_or_404(ticket: str) -> dict[str, Any]:
     return record
 
 
+async def _require_configured_provider(
+    request: Request, record: dict[str, Any], settings: Settings
+) -> None:
+    """Refuse a ticket whose provider this deployment no longer offers.
+
+    A ticket lives for minutes and names the provider that issued it. If an
+    operator clears that provider's credentials in the meantime, redeeming the
+    ticket would still create an account or attach the provider to an existing
+    one — the ticket outlived the configuration that justified it. Both ticket
+    redemption routes ask this before spending it.
+
+    The ticket is only read (``peek``), never consumed: the person's next
+    attempt answers the same way, and no state changes under a refusal.
+
+    Args:
+        request: The request that carried the ticket (for the audit row).
+        record: The ticket view returned by :func:`_ticket_or_404`.
+        settings: Application settings to resolve the provider against.
+
+    Raises:
+        HTTPException: 404 when the provider named on the ticket is no longer
+            configured. A dead ticket answers identically, so the caller learns
+            nothing about which of the two happened.
+    """
+    if auth_sso.get_provider(record["provider"], settings) is not None:
+        return
+    # Audited, unlike an unknown ticket: this ticket stands for a real person the
+    # provider once authenticated, so the row explains why their login stopped.
+    await _audit_sso_refusal(request, record["provider"], "unknown_provider")
+    raise HTTPException(status_code=404, detail="This sign-in link has expired")
+
+
 def _email_domain(email: str | None) -> str:
     """The domain of a provider-reported address, for the choice screen.
 
@@ -20007,9 +20048,10 @@ async def sso_create_account(request: Request) -> Response:
         never readable again.
 
     Raises:
-        HTTPException: 404 for a dead ticket, 400 for a rejected name, 403 when
-            the provider cannot create accounts (``can_provision_user`` is
-            false), 409 when the identity was linked elsewhere in the meantime.
+        HTTPException: 404 for a dead ticket or a provider that is no longer
+            configured, 400 for a rejected name, 403 when the provider cannot
+            create accounts (``can_provision_user`` is false), 409 when the
+            identity was linked elsewhere in the meantime.
     """
     body = await _read_json_object(request)
     ticket = str(body.get("ticket", ""))
@@ -20017,6 +20059,7 @@ async def sso_create_account(request: Request) -> Response:
     await _require_ticket_binding(request, ticket)
     record = await _ticket_or_404(ticket)
     settings = get_settings()
+    await _require_configured_provider(request, record, settings)
     # Validate before spending the ticket: a rejected name must not cost the
     # person another trip through the IdP.
     try:
@@ -20086,9 +20129,10 @@ async def sso_link_account(request: Request) -> Response:
         ``{"username", "status"}`` with a session cookie.
 
     Raises:
-        HTTPException: 404 for a dead ticket, 401 for bad credentials, 403 when
-            the account may not act (pending, rejected, disabled, or a viewer,
-            who may not add a sign-in method), 409 when the link conflicts.
+        HTTPException: 404 for a dead ticket or a provider that is no longer
+            configured, 401 for bad credentials, 403 when the account may not
+            act (pending, rejected, disabled, or a viewer, who may not add a
+            sign-in method), 409 when the link conflicts.
     """
     body = await _read_json_object(request)
     ticket = str(body.get("ticket", ""))
@@ -20100,6 +20144,7 @@ async def sso_link_account(request: Request) -> Response:
     await _require_ticket_binding(request, ticket)
     record = await _ticket_or_404(ticket)
     settings = get_settings()
+    await _require_configured_provider(request, record, settings)
     # Verify before spending the ticket: a mistyped key must not cost another
     # IdP trip either.
     verified = await auth_password.PasswordLogin().verify(username, api_key, settings)
@@ -20211,8 +20256,6 @@ async def sso_link_account(request: Request) -> Response:
     return response
 
 
-#: Why an account cannot lose its last sign-in method. Shared by the self-service
-#: and admin routes so both name the same two remedies.
 def _identities_payload(identities: list[dict[str, Any]]) -> dict[str, Any]:
     """Shape the sign-in-methods answer for the self-service and admin routes.
 
@@ -20304,9 +20347,14 @@ async def _unlink_identity(
     )
 
 
+#: Why an account cannot lose its last sign-in method. Shared by the self-service
+#: and admin routes so both name the same remedies. The guard is unconditional on
+#: purpose — a stored key hash cannot prove its owner still holds that key — so
+#: the remedies are the two that can actually be carried out.
 _LAST_IDENTITY_DETAIL = (
-    "This is the only way to sign in to this account. Link another provider, or "
-    "rotate the API key and keep the new one, before removing it."
+    "This is the only way to sign in to this account. Connect another sign-in"
+    " method first, or ask an administrator to disable the account if losing"
+    " access is intended."
 )
 
 
@@ -24751,7 +24799,7 @@ async def admin_delete_user_identity(
     self-service: the account's API key may never have been seen by its owner,
     so removing the only way in would hand the admin a locked-out user. An admin
     who needs to cut access has ``disabled`` for that, and one who needs the
-    person back in can rotate their key first.
+    person back in can rotate their key, which hands them a fresh credential.
 
     Args:
         username: The account to modify.
@@ -25561,6 +25609,28 @@ async def _validate_settings_updates(
                 continue
             settings_updates[key] = str(validated_int)
         accepted[key] = getattr(validated, key)
+
+    # A provider whose id and secret are saved without PUBLIC_BASE_URL is a
+    # provider the login page hides: the callback cannot be built without a
+    # trusted origin, and nothing else reports it, so the administrator would
+    # find the feature simply missing. Refused here rather than in a startup
+    # validator — an env-configured deployment must still boot into Server
+    # Settings to be fixed. Only a batch that touches these settings is judged,
+    # so a deployment already in that state can still save anything else.
+    if not errors and settings_updates.keys() & _SSO_BROWSER_LOGIN_SETTINGS:
+        try:
+            effective = _validate_effective_setting(settings_updates)
+        except ValidationError:
+            # Every unusable key was reported above; the pair rule cannot judge
+            # a candidate that does not load.
+            effective = None
+        if effective is not None and (
+            hidden_provider := browser_provider_without_base_url(effective)
+        ):
+            errors.append(
+                f"{hidden_provider}: PUBLIC_BASE_URL must be set for browser"
+                " sign-in — without it this provider is hidden from the login page"
+            )
 
     return errors
 

@@ -22,7 +22,7 @@ from fastapi import BackgroundTasks, HTTPException
 from pydantic import SecretStr
 
 from rootcoz import storage, temp_paths
-from rootcoz.config import Settings
+from rootcoz.config import Settings, clear_settings_cache, get_settings
 from rootcoz.encryption import encrypt_sensitive_fields
 from rootcoz.engine.core import AnalysisIncompleteError
 from rootcoz.error_messages import (
@@ -36,6 +36,7 @@ from rootcoz.models import (
 )
 from rootcoz.sources.jenkins_source import JenkinsError
 from tests.conftest import (
+    admin_login,
     build_test_env,
     capture_main_logs,
     make_app_client,
@@ -16004,6 +16005,100 @@ class TestStaticAssetHeaders:
         )
 
 
+class TestSSOBaseURLSaveGuard:
+    """A browser provider saved without PUBLIC_BASE_URL is silently hidden.
+
+    The provider is offered only when its id and secret are set *and* a public
+    base URL can build the callback. Saving the credentials without it used to
+    be accepted and the button simply never appeared, so the administrator had no
+    signal at all.
+    """
+
+    _PROVIDER_SETTINGS: ClassVar[dict[str, str]] = {
+        "sso_google_client_id": "client-id",
+        "sso_google_client_secret": "client-secret",  # pragma: allowlist secret
+    }
+
+    def test_a_provider_saved_without_a_base_url_is_refused(self, test_client) -> None:
+        """The refusal names the provider and the setting that is missing."""
+        response = test_client.put(
+            "/api/admin/settings", json={"settings": self._PROVIDER_SETTINGS}
+        )
+
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "google" in detail
+        assert "PUBLIC_BASE_URL" in detail
+
+    def test_the_provider_and_its_base_url_may_be_saved_together(
+        self, test_client
+    ) -> None:
+        """One batch that stores both sides of the rule is the fix, not a refusal."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    **self._PROVIDER_SETTINGS,
+                    "public_base_url": "https://rootcoz.example",
+                }
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+
+    def test_a_half_configured_provider_is_not_judged(self, test_client) -> None:
+        """No secret means no provider: its button was never offered."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sso_google_client_id": "client-id"}},
+        )
+
+        assert response.status_code == 200, response.json()
+
+    def test_a_device_only_deployment_still_saves(self, test_client) -> None:
+        """With no browser provider there is nothing a base URL is needed for."""
+        assert get_settings().public_base_url is None
+
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sso_device_code_ttl_seconds": "900"}},
+        )
+
+        assert response.status_code == 200, response.json()
+        assert get_settings().sso_device_code_ttl_seconds == 900
+
+
+def test_an_env_configured_deployment_is_never_locked_out_of_settings(
+    temp_db_path: Path,
+) -> None:
+    """It boots into this state on purpose, so only what creates it is refused.
+
+    Credentials in the environment with no base URL is what an upgrade looks
+    like. Refusing every save would trap the administrator on the very page that
+    fixes it; the fix is one save, and anything unrelated stays savable.
+    """
+    for client in make_app_client(
+        temp_db_path,
+        {
+            "SSO_GOOGLE_CLIENT_ID": "client-id",
+            "SSO_GOOGLE_CLIENT_SECRET": "client-secret",  # pragma: allowlist secret
+        },
+    ):
+        admin_login(client)
+
+        unrelated = client.put(
+            "/api/admin/settings", json={"settings": {"audit_retention_days": "90"}}
+        )
+        assert unrelated.status_code == 200, unrelated.json()
+
+        fixed = client.put(
+            "/api/admin/settings",
+            json={"settings": {"public_base_url": "https://rootcoz.example"}},
+        )
+        assert fixed.status_code == 200, fixed.json()
+        assert get_settings().public_base_url == "https://rootcoz.example"
+
+
 class TestAdminSettingsEndpoints:
     """Tests for /api/admin/settings endpoints."""
 
@@ -23550,6 +23645,110 @@ async def test_only_a_reviewer_can_unlink_a_sign_in_method(
             identity["provider"]
             for identity in await storage.list_user_identities("ruthn")
         ] == ["google"]
+
+
+async def _sso_ticket(client: Any, provider: str = "google") -> str:
+    """Mint a first-login ticket and attach the browser-binding cookie."""
+    from rootcoz.auth.sso import state as sso_state
+
+    binding = sso_state.new_ticket_binding()
+    ticket = await storage.create_sso_ticket(
+        provider=provider,
+        subject="sub-1",
+        email="alice@example.com",
+        suggested_username="alice",
+        binding=binding,
+    )
+    client.cookies.set(sso_state.TICKET_COOKIE, binding)
+    return ticket
+
+
+def _remove_the_google_provider() -> None:
+    """Clear Google's credentials, as an operator editing the deployment would."""
+    os.environ.pop("SSO_GOOGLE_CLIENT_ID")
+    os.environ.pop("SSO_GOOGLE_CLIENT_SECRET")
+    clear_settings_cache()
+
+
+async def test_a_ticket_for_a_removed_provider_creates_no_account(
+    temp_db_path: Path,
+) -> None:
+    """Redeeming asks the *current* configuration, not the ticket's provider."""
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        ticket = await _sso_ticket(client)
+        _remove_the_google_provider()
+
+        response = client.post(
+            "/api/auth/sso/create", json={"ticket": ticket, "username": "alice"}
+        )
+
+        # The answer a dead ticket gets: the caller learns nothing about which
+        # of the two it was, and the provider name never reaches the browser.
+        assert response.status_code == 404
+        assert response.json()["detail"] == "This sign-in link has expired"
+        assert await storage.get_user_by_username("alice") is None
+        refusal = (await storage.list_audit_events(limit=5))["events"][0]
+        assert refusal["action"] == "auth.sso_login_failed"
+        assert refusal["details"]["reason"] == "unknown_provider"
+
+        # Refused without spending the ticket: restoring the provider lets the
+        # same link finish, so the refusal consumed nothing.
+        os.environ.update(
+            {
+                "SSO_GOOGLE_CLIENT_ID": _SSO_HTTPS_ENV["SSO_GOOGLE_CLIENT_ID"],
+                "SSO_GOOGLE_CLIENT_SECRET": _SSO_HTTPS_ENV["SSO_GOOGLE_CLIENT_SECRET"],
+            }
+        )
+        clear_settings_cache()
+        retried = client.post(
+            "/api/auth/sso/create", json={"ticket": ticket, "username": "alice"}
+        )
+        assert retried.status_code == 200, retried.text
+
+
+async def test_a_ticket_for_a_removed_provider_links_nothing(
+    temp_db_path: Path,
+) -> None:
+    """The same rule on the other redemption: no identity is attached."""
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        _, api_key = await storage.create_user("bob", role="reviewer")
+        ticket = await _sso_ticket(client)
+        _remove_the_google_provider()
+
+        response = client.post(
+            "/api/auth/sso/link",
+            json={"ticket": ticket, "username": "bob", "api_key": api_key},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "This sign-in link has expired"
+        assert await storage.list_user_identities("bob") == []
+
+
+async def test_the_last_method_refusal_names_remedies_that_work(
+    temp_db_path: Path,
+) -> None:
+    """Rotation cannot unblock it — a key hash cannot prove the key is held."""
+    for client in make_app_client(temp_db_path):
+        await _sign_in_as(client, "alice")
+        await storage.add_user_identity("alice", "google", "sub-a")
+
+        response = client.delete("/api/user/identities/google")
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "Connect another sign-in method" in detail
+        assert "administrator to disable the account" in detail
+        assert "API key" not in detail
+
+        # The admin route shares the sentence, so both name the same remedies.
+        await storage.create_user("bob", role="reviewer")
+        await storage.add_user_identity("bob", "google", "sub-b")
+        admin_login(client)
+        admin = client.delete("/api/admin/users/bob/identities/google")
+
+        assert admin.status_code == 409
+        assert admin.json()["detail"] == detail
 
 
 async def test_one_account_never_sees_anothers_sign_in_methods(

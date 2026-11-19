@@ -54,6 +54,17 @@ _SAME_ORIGIN = {"sec-fetch-site": "same-origin"}
 #: name under test is provably outside it.
 _PROXY_ALLOW_LIST_ENV = {"TRUST_PROXY_HEADERS": "true", "ALLOWED_USERS": "someone-else"}
 
+#: OpenShift configured (it needs both of the cluster's origins), so a ticket it
+#: issued is still redeemable: redemption re-resolves the provider against the
+#: current settings, which is what stops a removed provider's tickets working.
+_OPENSHIFT_ENV = {
+    "SSO_OPENSHIFT_CLIENT_ID": "test-openshift-client-id",
+    "SSO_OPENSHIFT_CLIENT_SECRET": "test-openshift-client-secret",  # pragma: allowlist secret
+    "SSO_OPENSHIFT_ISSUER": "https://oauth-openshift.apps.example.com",
+    "SSO_OPENSHIFT_API_URL": "https://api.example.com:6443",
+    "PUBLIC_BASE_URL": "https://rootcoz.example",
+}
+
 
 def _claims(
     subject: str = "sub-1",
@@ -976,7 +987,7 @@ async def test_a_recycled_account_name_is_not_the_previous_person(
     temp_db_path: Path,
 ) -> None:
     """A cluster can reassign metadata.name; the link is on the immutable uid."""
-    for client in make_app_client(temp_db_path):
+    for client in make_app_client(temp_db_path, _OPENSHIFT_ENV):
         ticket = await _ticket(
             client, provider="openshift", subject="uid-old", suggested="alice"
         )
