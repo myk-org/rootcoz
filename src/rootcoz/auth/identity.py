@@ -32,7 +32,7 @@ from rootcoz import get_child_logger, storage
 from rootcoz.auth import approval as auth_approval
 from rootcoz.auth.base import RESERVED_ADMIN_USERNAME
 from rootcoz.auth.sso.base import AuthError, ClaimSet
-from rootcoz.config import Settings
+from rootcoz.config import Settings, canonical_domain
 
 logger = get_child_logger(__name__)
 
@@ -103,8 +103,9 @@ def domain_allowed(domain: str, allowed: frozenset[str]) -> bool:
     must never match ``notredhat.com`` or ``redhat.com.evil.io``.
 
     Args:
-        domain: The email domain, lower-cased.
-        allowed: The normalised allow-list.
+        domain: The email domain, already canonicalised (see
+            :func:`rootcoz.config.canonical_domain`).
+        allowed: The normalised allow-list, in the same IDNA ASCII form.
 
     Returns:
         True when the domain equals an entry or ends with ``"." + entry``.
@@ -125,6 +126,10 @@ def check_domain(claims: ClaimSet, settings: Settings) -> None:
     publishes none is refused unless its address is authoritative (see
     :attr:`rootcoz.auth.sso.base.SSOProvider.email_is_authoritative`) — an
     address the person holding the account can change is never enough.
+
+    The claim's domain is canonicalised before the match
+    (:func:`rootcoz.config.canonical_domain`), so a provider that returns
+    ``alice@münchen.de`` satisfies an ``xn--mnchen-3ya.de`` entry and vice versa.
 
     Args:
         claims: The verified claims.
@@ -163,10 +168,13 @@ def check_domain(claims: ClaimSet, settings: Settings) -> None:
                 "email_not_verified",
                 "provider did not assert that the email is verified",
             )
-    domain = email.rsplit("@", 1)[-1]
-    if not domain_allowed(domain, allowed):
-        logger.info("SSO login refused: domain '%s' is not allowed", domain)
-        raise AuthError("domain_not_allowed", f"domain '{domain}' is not allowed")
+    # The claim is compared in the same canonical form the entries are stored in,
+    # so a Unicode address matches either spelling of its domain.
+    spelled = email.rsplit("@", 1)[-1]
+    domain = canonical_domain(spelled)
+    if domain is None or not domain_allowed(domain, allowed):
+        logger.info("SSO login refused: domain '%s' is not allowed", spelled)
+        raise AuthError("domain_not_allowed", f"domain '{spelled}' is not allowed")
 
 
 def check_email_domain(email: str | None, settings: Settings) -> None:
@@ -191,9 +199,10 @@ def check_email_domain(email: str | None, settings: Settings) -> None:
     address = (email or "").strip().lower()
     if "@" not in address:
         raise AuthError("domain_not_allowed", "ticket carried no email address")
-    domain = address.rsplit("@", 1)[-1]
-    if not domain_allowed(domain, allowed):
-        raise AuthError("domain_not_allowed", f"domain '{domain}' is not allowed")
+    spelled = address.rsplit("@", 1)[-1]
+    domain = canonical_domain(spelled)
+    if domain is None or not domain_allowed(domain, allowed):
+        raise AuthError("domain_not_allowed", f"domain '{spelled}' is not allowed")
 
 
 def suggested_username(claims: ClaimSet) -> str:

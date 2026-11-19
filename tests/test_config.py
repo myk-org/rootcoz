@@ -2,11 +2,14 @@
 
 import logging
 import os
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from rootcoz.auth import identity as auth_identity
+from rootcoz.auth.sso.base import AuthError, ClaimSet
 from rootcoz.config import (
     Settings,
     clear_settings_cache,
@@ -1381,8 +1384,8 @@ class TestSSODomainAllowList:
             "com",
             # 64 characters is one past the DNS limit.
             f"{'a' * 64}.com",
-            # Internationalised domains need the punycode form.
-            "münchen.de",
+            # Not a legal IDNA name at all (a label is empty after encoding).
+            "münchen..de",
         ],
     )
     def test_an_entry_that_cannot_match_is_refused(self, raw: str) -> None:
@@ -1390,11 +1393,22 @@ class TestSSODomainAllowList:
         with pytest.raises(ValueError, match="Invalid SSO domain entry"):
             normalize_domain_list(raw)
 
+    def test_an_overlong_name_is_refused_despite_valid_labels(self) -> None:
+        """Five 63-character labels pass the label rule but exceed 253 characters."""
+        name = ".".join(["a" * 63] * 5)
+        assert all(len(label) == 63 for label in name.split("."))
+        with pytest.raises(ValueError, match="Invalid SSO domain entry"):
+            normalize_domain_list(name)
+
     @pytest.mark.parametrize(
         ("raw", "expected"),
         [
             ("@RedHat.com", frozenset({"redhat.com"})),
             ("redhat.com.", frozenset({"redhat.com"})),
+            # A Unicode entry is kept in its punycode form — the one a claim is
+            # compared in.
+            ("münchen.de", frozenset({"xn--mnchen-3ya.de"})),
+            ("MÜNCHEN.DE", frozenset({"xn--mnchen-3ya.de"})),
             ("eng.redhat.com", frozenset({"eng.redhat.com"})),
             ("@RedHat.com,example.org", frozenset({"redhat.com", "example.org"})),
             # Punycode is plain ASCII, so it is a usable entry.
@@ -1406,6 +1420,25 @@ class TestSSODomainAllowList:
     ) -> None:
         """The '@', the trailing dot and the case never change the meaning."""
         assert normalize_domain_list(raw) == expected
+
+    def test_a_unicode_entry_admits_both_spellings_of_the_claim(self) -> None:
+        """The IdP may report either form, so both sides are compared as IDNA."""
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings(_env_file=None, sso_allowed_domains="münchen.de")
+        assert settings.sso_allowed_domains_set == frozenset({"xn--mnchen-3ya.de"})
+
+        claim = ClaimSet(
+            subject="1", username_hint="alice", claims={"email_verified": True}
+        )
+        for email in ("alice@münchen.de", "alice@xn--mnchen-3ya.de"):
+            auth_identity.check_domain(replace(claim, email=email), settings)
+
+        # A look-alike suffix is still refused, and a domain that cannot be
+        # encoded matches nothing rather than raising out of the callback.
+        for refused in ("alice@notmünchen.de", "alice@münchen..de"):
+            with pytest.raises(AuthError) as excinfo:
+                auth_identity.check_domain(replace(claim, email=refused), settings)
+            assert excinfo.value.reason == "domain_not_allowed"
 
     def test_a_blank_value_disables_the_check(self) -> None:
         """Unset means no restriction, and so does whitespace alone."""

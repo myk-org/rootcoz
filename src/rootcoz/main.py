@@ -20759,6 +20759,14 @@ async def _credential_user(request: Request) -> str:
 async def get_user_identities(request: Request) -> JSONResponse:
     """List the SSO identities linked to the calling account.
 
+    Available to every signed-in role, viewer included: which sign-in methods
+    your own account holds is what the settings card renders, and reading it is
+    neither a write nor a privilege. The read is scoped to the caller by
+    construction — there is no username or provider argument that could point it
+    at another account. The writes are the reviewer-level ones: link start,
+    link and unlink each call ``_require_reviewer``, which is where the role
+    distinction belongs and why the sibling ``delete_user_identity`` checks.
+
     Self-service only: an account's own linked providers, by provider name and
     the address the provider reported. The provider's subject id is deliberately
     not returned — it is the correlation key, not something a person needs.
@@ -20771,6 +20779,11 @@ async def get_user_identities(request: Request) -> JSONResponse:
         "unlinkable": bool}``. ``unlinkable`` is False when a single identity is
         all that connects the account, so a client shows the refusal before the
         person clicks rather than after.
+
+    Raises:
+        HTTPException: 401 from the auth middleware, before this handler runs,
+            when the request carries no session — with no caller there is no
+            account to scope the read to.
     """
     identities = await storage.list_user_identities(request.state.username)
     return JSONResponse(content=_identities_payload(identities))
