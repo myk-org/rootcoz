@@ -9,6 +9,7 @@ import pytest
 
 from rootcoz.url_utils import (
     _parse_valid_url,
+    is_safe_navigation_url,
     mask_stored_url,
     mask_url_value,
     sanitize_clone_url,
@@ -130,6 +131,57 @@ class TestSanitizersDegrade:
 class TestStripNonprintable:
     def test_drops_control_and_format_characters_keeps_spaces(self) -> None:
         assert strip_nonprintable("a\x00b\x1b[31mc\x7f d\u200be") == "ab[31mc de"
+
+
+class TestNavigationUrlMalformedPort:
+    """The navigation rule is the one place a malformed port is refused (#561).
+
+    OIDC discovery, the logout endpoint and the issuer settings all ask this
+    predicate, so a discovery document publishing ``https://idp.example:bad``
+    is rejected at validation instead of being cached and failing later inside
+    the HTTP client.
+    """
+
+    @pytest.mark.parametrize(
+        ("url", "allow_loopback_http"),
+        [
+            ("https://idp.example:bad", False),
+            ("http://localhost:notaport/", True),
+            ("http://127.0.0.1:bad/", True),
+        ],
+    )
+    def test_refuses_a_malformed_port(
+        self, url: str, allow_loopback_http: bool
+    ) -> None:
+        assert is_safe_navigation_url(url, allow_loopback_http=allow_loopback_http) is (
+            False
+        )
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://idp.example:8443/path",
+            "https://idp.example",
+        ],
+    )
+    def test_accepts_a_valid_or_absent_port(self, url: str) -> None:
+        assert is_safe_navigation_url(url) is True
+
+    @pytest.mark.parametrize(
+        ("url", "allow_loopback_http", "expected"),
+        [
+            ("http://localhost:8080/logout", True, True),
+            ("http://localhost:8080/logout", False, False),
+            ("http://idp.example:8080/logout", True, False),
+        ],
+    )
+    def test_loopback_http_opt_in_is_unchanged(
+        self, url: str, allow_loopback_http: bool, expected: bool
+    ) -> None:
+        assert (
+            is_safe_navigation_url(url, allow_loopback_http=allow_loopback_http)
+            is expected
+        )
 
 
 class TestMaskUrlValueEveryOccurrence:

@@ -109,8 +109,9 @@ def is_safe_navigation_url(url: str, *, allow_loopback_http: bool = False) -> bo
 
     One rule for every place that answers "may the browser go here": https
     always, plaintext http only for a loopback host when the caller opts in
-    (a local IdP), and never a URL carrying credentials or a fragment — both
-    exist to move data, not to navigate.
+    (a local IdP), and never a URL carrying credentials, a fragment or a port
+    that does not parse — the first two exist to move data, the last one makes
+    the request that follows fail instead.
 
     Args:
         url: The candidate URL.
@@ -133,7 +134,12 @@ def is_safe_navigation_url(url: str, *, allow_loopback_http: bool = False) -> bo
         return False
     try:
         parsed = urlparse(cleaned)
-    except ValueError:  # e.g. "https://[::1/x" — invalid IPv6, fail closed
+        # Touching .port is the check, not a no-op: urlparse accepts
+        # "https://idp.example:bad" and only the property access raises. A
+        # discovery document publishing such an endpoint would otherwise be
+        # cached as valid and fail later, inside the HTTP client.
+        _ = parsed.port
+    except ValueError:  # invalid IPv6 authority or a non-numeric port: fail closed
         return False
     if parsed.fragment:
         return False
