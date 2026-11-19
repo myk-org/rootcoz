@@ -3,6 +3,7 @@
 import logging
 import os
 from dataclasses import replace
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +13,7 @@ from rootcoz.auth import identity as auth_identity
 from rootcoz.auth.sso.base import AuthError, ClaimSet
 from rootcoz.config import (
     Settings,
+    browser_provider_without_base_url,
     clear_settings_cache,
     duplicate_additional_repo_names,
     get_settings,
@@ -28,6 +30,7 @@ from rootcoz.config import (
 )
 from rootcoz.jira import resolve_jira_connection
 from tests.conftest import build_test_env as _build_env
+from tests.conftest import capture_main_logs
 
 
 class TestSettings:
@@ -1364,6 +1367,74 @@ class TestDeviceCodePollInterval:
             settings = Settings(_env_file=None)
             assert settings.sso_device_code_ttl_seconds == 600
             assert settings.sso_device_poll_interval_seconds == 5
+
+
+class TestBrowserProviderWithoutBaseUrl:
+    """A configured provider with no public origin cannot complete a login.
+
+    One predicate, asked by the settings save path (which refuses to introduce
+    it) and by ``get_settings`` (which says so once). The device flow is not
+    covered: the CLI joins a relative verification URL itself.
+    """
+
+    _GOOGLE: ClassVar[dict[str, str]] = {
+        "SSO_GOOGLE_CLIENT_ID": "client-id",
+        "SSO_GOOGLE_CLIENT_SECRET": "client-secret",  # pragma: allowlist secret
+    }
+
+    def _settings(self, **env: str) -> Settings:
+        with patch.dict(os.environ, _build_env(**env), clear=True):
+            return Settings(_env_file=None)
+
+    def test_a_device_only_deployment_is_correctly_configured(self) -> None:
+        """No provider and no base URL is the shipped CLI-only setup."""
+        assert browser_provider_without_base_url(self._settings()) is None
+
+    def test_a_configured_provider_without_a_base_url_is_named(self) -> None:
+        """The name is what makes the refusal and the warning actionable."""
+        settings = self._settings(**self._GOOGLE)
+        assert browser_provider_without_base_url(settings) == "google"
+
+    def test_a_whitespace_base_url_is_no_base_url(self) -> None:
+        """It cannot build a URL, so it must not read as configured."""
+        settings = self._settings(**self._GOOGLE, PUBLIC_BASE_URL="   ")
+        assert browser_provider_without_base_url(settings) == "google"
+
+    def test_a_base_url_settles_it(self) -> None:
+        """The pair a deployment needs: credentials and an origin."""
+        settings = self._settings(**self._GOOGLE, PUBLIC_BASE_URL="https://x.example")
+        assert browser_provider_without_base_url(settings) is None
+
+    def test_half_a_credential_is_not_a_provider(self) -> None:
+        """No secret means the button was never offered, so nothing is hidden."""
+        settings = self._settings(SSO_GOOGLE_CLIENT_ID="client-id")
+        assert browser_provider_without_base_url(settings) is None
+
+    def test_the_misconfiguration_is_warned_about_once(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A rebuild repeats neither the line nor its absence; startup stays up."""
+        from rootcoz import config
+
+        monkeypatch.setattr(config, "_warned_missing_base_url", None)
+        with patch.dict(os.environ, _build_env(**self._GOOGLE), clear=True):
+            clear_settings_cache()
+            with capture_main_logs(
+                caplog, level=logging.WARNING, logger="rootcoz.config"
+            ):
+                settings = get_settings()
+                clear_settings_cache()
+                get_settings()
+
+            lines = [
+                r.getMessage()
+                for r in caplog.records
+                if "PUBLIC_BASE_URL" in r.getMessage()
+            ]
+            assert len(lines) == 1
+            assert "'google'" in lines[0]
+        # The load itself never fails: Server Settings is where this is fixed.
+        assert settings.public_base_url is None
 
 
 class TestSSODomainAllowList:

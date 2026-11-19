@@ -2190,6 +2190,68 @@ def jira_unavailable_reason(settings: Settings) -> str:
 # selected method's token is read directly by the resolver in jira.py.
 
 
+def browser_provider_without_base_url(settings: Settings) -> str | None:
+    """Name the provider that is configured but cannot complete a browser login.
+
+    A provider is *configured* when its client id and secret (and its issuer,
+    where it needs one) are set — :meth:`SSOProvider.from_settings` owns that
+    question. Offering its button additionally needs ``PUBLIC_BASE_URL``,
+    because the callback must never be derived from request headers; without it
+    the login page hides the provider and nothing else says so.
+
+    The device flow is deliberately out of scope: the CLI joins a relative
+    verification URL itself, so a deployment with no base URL and no browser
+    provider is correctly configured, and requiring one there would break it.
+
+    Args:
+        settings: Application settings to judge.
+
+    Returns:
+        The machine name of the first misconfigured provider in declaration
+        order, or ``None`` when a base URL is set or no provider is configured.
+    """
+    if (settings.public_base_url or "").strip():
+        return None
+    # Imported here because ``rootcoz.auth.sso`` reads this module at import
+    # time: a module-level import would be a cycle.
+    from rootcoz.auth.sso import PROVIDER_CLASSES
+
+    for provider_class in PROVIDER_CLASSES:
+        if provider_class.from_settings(settings) is not None:
+            return provider_class.name
+    return None
+
+
+#: Provider already reported by :func:`_warn_browser_provider_without_base_url`,
+#: so a settings rebuild repeats neither the line nor its absence.
+_warned_missing_base_url: str | None = None
+
+
+def _warn_browser_provider_without_base_url(settings: Settings) -> None:
+    """Log the base-URL misconfiguration once per state, without failing.
+
+    Startup stays up on purpose: a deployment that upgrades into this state is
+    env-configured and cannot be repaired from the shell of a process that
+    refused to boot — Server Settings is where its administrator fixes it, and
+    that page needs the process running.
+
+    Args:
+        settings: The settings that are about to be published.
+    """
+    global _warned_missing_base_url
+    missing = browser_provider_without_base_url(settings)
+    if missing == _warned_missing_base_url:
+        return
+    _warned_missing_base_url = missing
+    if missing is not None:
+        logger.warning(
+            "SSO provider %r is configured but PUBLIC_BASE_URL is not set, so"
+            " browser sign-in with it stays hidden until a public base URL is"
+            " configured (Server Settings or the environment)",
+            missing,
+        )
+
+
 # In-memory cache for DB settings overrides.
 # Populated at startup by load_db_settings() and updated by admin settings endpoints.
 _db_settings_cache: dict[str, str] = {}
@@ -2365,6 +2427,7 @@ def get_settings() -> Settings:
             return _cached_settings
         generation = _settings_generation
     built = _build_settings()
+    _warn_browser_provider_without_base_url(built)
     hold_seconds = _settings_build_hold_seconds()
     if hold_seconds:
         time.sleep(hold_seconds)
