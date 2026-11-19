@@ -2273,6 +2273,34 @@ def csv_entries(value: str | None, *, lower: bool = True) -> list[str]:
 #: with '-'. Applied to an already lower-cased entry, so no re.IGNORECASE.
 _DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
 
+#: Longest DNS name: 253 characters (255 octets less the length bytes and the
+#: root dot). A longer name can never be a real email domain, so the entry would
+#: match nothing and, while it is the only one, refuse every SSO sign-in — the
+#: same fail-closed lockout reason as the 63-character label limit.
+_MAX_DOMAIN_LENGTH = 253
+
+
+def canonical_domain(name: str) -> str | None:
+    """The one form both sides of the allow-list compare in: IDNA ASCII.
+
+    An IdP may return ``alice@münchen.de`` while the admin wrote either
+    ``münchen.de`` or its punycode spelling, so the configured entry and the
+    claim's domain are both converted here before they are compared. A trailing
+    dot (the DNS root) is dropped first: ``redhat.com.`` is the same domain.
+
+    Args:
+        name: A domain, as an admin wrote it or as an IdP reported it.
+
+    Returns:
+        The lower-cased ASCII (punycode where needed) form, or ``None`` when the
+        name cannot be encoded — an unencodable claim then matches no entry, so
+        the login fails closed instead of raising inside the callback.
+    """
+    try:
+        return name.strip().rstrip(".").lower().encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+
 
 def domain_entry_is_valid(candidate: str) -> bool:
     """Whether a normalised allow-list entry can ever equal an email domain.
@@ -2281,15 +2309,17 @@ def domain_entry_is_valid(candidate: str) -> bool:
     from ``a-z``, ``0-9`` and ``-``, and it may not begin or end with ``-``. A
     name needs at least two labels, so a single label such as ``com`` is refused:
     it admits nothing an operator means (a mail domain always has a registrable
-    part) and is almost always a truncated paste.
+    part) and is almost always a truncated paste. The whole name is bounded too
+    (253 characters): five correctly sized labels add up to a name no email
+    domain can satisfy, and an entry that admits nobody locks the deployment out.
 
     The check also swallows the wildcard, scheme, path, space and leading-dot
     cases: none of them is a legal label, so ``*``, ``https://redhat.com``,
     ``redhat.com/x`` and ``.redhat.com`` all fail here.
 
     Args:
-        candidate: One entry, already lower-cased and stripped of ``@`` and the
-            trailing dot.
+        candidate: One entry, already lower-cased, stripped of ``@`` and in its
+            IDNA ASCII form.
 
     Returns:
         True when the entry is a plausible email domain.
@@ -2297,6 +2327,8 @@ def domain_entry_is_valid(candidate: str) -> bool:
     labels = candidate.split(".")
     # A one-label name (or none at all) can never match `local@domain`.
     if len(labels) < 2:
+        return False
+    if len(candidate) > _MAX_DOMAIN_LENGTH:
         return False
     return all(
         len(label) <= 63 and _DNS_LABEL.fullmatch(label) is not None for label in labels
@@ -2318,11 +2350,9 @@ def normalize_domain_list(value: str | None) -> frozenset[str]:
     entry such as ``alice@redhat.com`` (an address pasted whole) or
     ``redhat..com`` is rejected where it is saved.
 
-    Internationalised domains are refused: the address that reaches the check is
-    compared as the IdP wrote it, so a ``münchen.de`` entry could only match if
-    the claim arrived in the same non-ASCII form — which is not guaranteed, and
-    a guess there silently locks the domain out. The punycode form
-    (``xn--mnchen-3ya.de``) is plain ASCII, so it is accepted.
+    Every entry is stored in its IDNA ASCII form (see :func:`canonical_domain`),
+    the same form the claim is compared in, so a ``münchen.de`` entry is kept as
+    ``xn--mnchen-3ya.de`` and admits either spelling of the address.
 
     Args:
         value: The raw setting.
@@ -2332,8 +2362,9 @@ def normalize_domain_list(value: str | None) -> frozenset[str]:
 
     Raises:
         ValueError: When an entry is not a real domain name (wildcard, scheme,
-            path, a pasted address, a single label, a non-ASCII domain), or when
-            the value contains no usable domain at all.
+            path, a pasted address, a single label, a name that cannot be written
+            as IDNA, a label or name that is too long), or when the value
+            contains no usable domain at all.
     """
     if not value or not value.strip():
         # Unset (or whitespace alone) means "no restriction"; a list of bare
@@ -2343,21 +2374,17 @@ def normalize_domain_list(value: str | None) -> frozenset[str]:
     domains: set[str] = set()
     for entry in entries:
         candidate = entry.lstrip("@")
-        # A trailing dot is the DNS root, not a different domain: `redhat.com.`
-        # must mean `redhat.com`, or a login would be refused for a stray dot.
-        candidate = candidate.rstrip(".")
         if not candidate:
             continue
-        if not candidate.isascii():
-            msg = (
-                f"Invalid SSO domain entry: '{entry}': internationalised domains"
-                " are not supported yet, write the punycode form"
-            )
+        # Validate the canonical form: it is the one a claim is compared against.
+        canonical = canonical_domain(candidate)
+        if canonical is None:
+            msg = f"Invalid SSO domain entry: '{entry}': not a valid IDNA domain"
             raise ValueError(msg)
-        if not domain_entry_is_valid(candidate):
+        if not domain_entry_is_valid(canonical):
             msg = f"Invalid SSO domain entry: '{entry}'"
             raise ValueError(msg)
-        domains.add(candidate)
+        domains.add(canonical)
     if not domains:
         # A value was written but every entry was blank: treating that as "no
         # restriction" would silently disable the policy.

@@ -23487,11 +23487,90 @@ def _start_device_code(client: Any) -> dict[str, str]:
     return response.json()
 
 
+async def _sign_in_as(client: Any, username: str, *, role: str = "reviewer") -> None:
+    """Create *username* with *role* and put its session cookie on *client*."""
+    await storage.create_user(username)
+    session = await storage.create_session(username, is_admin=False, role=role)
+    client.cookies.set("rootcoz_session", session)
+
+
 async def _sign_in_a_reviewer(client: Any) -> None:
     """Create a reviewer account and put its session cookie on *client*."""
-    await storage.create_user("ruthn")
-    session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
-    client.cookies.set("rootcoz_session", session)
+    await _sign_in_as(client, "ruthn")
+
+
+async def test_a_viewer_reads_their_own_sign_in_methods(temp_db_path: Path) -> None:
+    """Reading your own linked providers is a read, not a role-gated write.
+
+    The list route deliberately does not call ``_require_reviewer``: the
+    settings card renders this for every role, and the caller's own rows are
+    all it can reach.
+    """
+    for client in make_app_client(temp_db_path):
+        await _sign_in_as(client, "vicky", role="viewer")
+        await storage.add_user_identity(
+            "vicky", "google", "sub-v", email="vicky@example.com"
+        )
+
+        response = client.get("/api/user/identities")
+
+        assert response.status_code == 200
+        assert [
+            (identity["provider"], identity["email"])
+            for identity in response.json()["identities"]
+        ] == [("google", "vicky@example.com")]
+
+
+async def test_an_anonymous_caller_cannot_list_sign_in_methods(
+    temp_db_path: Path,
+) -> None:
+    """No session, no account to scope the read to."""
+    for client in make_app_client(temp_db_path):
+        assert client.get("/api/user/identities").status_code == 401
+
+
+async def test_only_a_reviewer_can_unlink_a_sign_in_method(
+    temp_db_path: Path,
+) -> None:
+    """The writes stay reviewer-level: a viewer is refused, a reviewer proceeds."""
+    for client in make_app_client(temp_db_path):
+        await _sign_in_as(client, "vicky", role="viewer")
+        await storage.add_user_identity("vicky", "google", "sub-v")
+        await storage.add_user_identity("vicky", "github", "gh-v")
+
+        assert client.delete("/api/user/identities/github").status_code == 403
+        assert len(await storage.list_user_identities("vicky")) == 2
+
+        await _sign_in_as(client, "ruthn")
+        await storage.add_user_identity("ruthn", "google", "sub-r")
+        await storage.add_user_identity("ruthn", "github", "gh-r")
+
+        assert client.delete("/api/user/identities/github").status_code == 200
+        assert [
+            identity["provider"]
+            for identity in await storage.list_user_identities("ruthn")
+        ] == ["google"]
+
+
+async def test_one_account_never_sees_anothers_sign_in_methods(
+    temp_db_path: Path,
+) -> None:
+    """The read is the caller's own rows; a second account sees none of them."""
+    for client in make_app_client(temp_db_path):
+        await _sign_in_as(client, "alice")
+        await storage.add_user_identity(
+            "alice", "google", "sub-a", email="alice@example.com"
+        )
+        assert [
+            identity["email"]
+            for identity in client.get("/api/user/identities").json()["identities"]
+        ] == ["alice@example.com"]
+
+        await _sign_in_as(client, "bob")
+        assert client.get("/api/user/identities").json() == {
+            "identities": [],
+            "unlinkable": False,
+        }
 
 
 @pytest.mark.parametrize(
