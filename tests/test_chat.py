@@ -4424,6 +4424,44 @@ class TestAdminChatArtifactEndpoints:
         se_body = test_client.get(se_resp.json()["download_url"]).text
         assert "<style" not in se_body.lower()
 
+    def test_save_artifact_resists_foreign_style_mxss_css_hex_breakout_and_redos(
+        self, test_client
+    ):
+        """Foreign <svg>/<math> raw tags, CSS hex < > breakout, and unclosed image-set() are safe (#606)."""
+        import time
+
+        mxss_html = (
+            "<svg><style><img src=x onerror=alert(1)></style>"
+            "<title><img src=y onerror=alert(2)></title>"
+            '<rect width="10" height="10" /></svg>'
+            "<math><style><img src=z onerror=alert(3)></style></math>"
+            r"<style>\3c/style\3e\3cscript\3ealert(4)\3c/script\3e</style>"
+        )
+        resp = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={"html_content": mxss_html, "filename": "mxss.html"},
+        )
+        assert resp.status_code == 200
+        body = test_client.get(resp.json()["download_url"]).text
+        assert "onerror" not in body.lower()
+        assert "<img" not in body.lower()
+        assert "<script" not in body.lower()
+        assert "</style><script" not in body.lower()
+        assert '<rect width="10" height="10" />' in body
+
+        # Unclosed image-set() with long body must complete in linear time (no ReDoS)
+        redos_html = f"<style>body{{background:image-set({'a' * 50_000}</style>"
+        start = time.monotonic()
+        redos_resp = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={"html_content": redos_html, "filename": "redos.html"},
+        )
+        elapsed = time.monotonic() - start
+        assert redos_resp.status_code == 200
+        assert elapsed < 2.0
+        redos_body = test_client.get(redos_resp.json()["download_url"]).text
+        assert "image-set(" not in redos_body.lower()
+
 
 @pytest.mark.asyncio
 class TestCiBuildDataForwarding:

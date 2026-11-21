@@ -28632,9 +28632,24 @@ _ADMIN_ARTIFACT_CSP_META_TAG = (
     f'<meta http-equiv="Content-Security-Policy" content="{_ADMIN_ARTIFACT_META_CSP}">'
 )
 _HTML_STRIP_WITH_CONTENT_TAGS: frozenset[str] = frozenset(
-    {"script", "iframe", "object", "applet"}
+    {
+        "script",
+        "iframe",
+        "object",
+        "applet",
+        "xmp",
+        "noembed",
+        "noframes",
+        "noscript",
+    }
 )
-_HTML_STRIP_VOID_TAGS: frozenset[str] = frozenset({"embed", "base", "link"})
+_HTML_STRIP_VOID_TAGS: frozenset[str] = frozenset(
+    {"embed", "base", "link", "plaintext"}
+)
+_HTML_FOREIGN_CONTAINER_TAGS: frozenset[str] = frozenset({"svg", "math"})
+_HTML_FOREIGN_RAW_CONTENT_TAGS: frozenset[str] = frozenset(
+    {"style", "title", "textarea"}
+)
 _HTML_BLOCKED_META_HTTP_EQUIV: frozenset[str] = frozenset(
     {"refresh", "content-security-policy", "set-cookie"}
 )
@@ -28685,9 +28700,7 @@ _CSS_HEX_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?")
 _CSS_CHAR_ESCAPE_RE = re.compile(r"\\([a-zA-Z@(-])")
 _CSS_IMPORT_RE = re.compile(r"@\s*import\b[^;]*(?:;|$)", re.IGNORECASE)
 _CSS_URL_RE = re.compile(r"url\s*\(([^)]*)\)", re.IGNORECASE)
-_CSS_IMAGE_SET_RE = re.compile(
-    r"(?:-[a-z]+-)?image-set\s*\((?:[^()]*|\([^)]*\))*\)", re.IGNORECASE
-)
+_CSS_IMAGE_SET_START_RE = re.compile(r"(?:-[a-z]+-)?image-set\s*\(", re.IGNORECASE)
 _CSS_EXPRESSION_RE = re.compile(r"expression\s*\(", re.IGNORECASE)
 
 
@@ -28700,9 +28713,44 @@ def _decode_css_hex_escape(match: re.Match[str]) -> str:
     if codepoint == 0 or codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
         return "\ufffd"
     ch = chr(codepoint)
-    if ch in ("'", '"', "\\"):
+    # Never decode into HTML markup delimiters or CSS string/escape delimiters.
+    if ch in ("'", '"', "\\", "<", ">", "&"):
         return match.group(0)
     return ch
+
+
+def _strip_css_image_set(css: str) -> str:
+    """Replace CSS image-set(...) calls with 'none' in linear time (no ReDoS)."""
+    out: list[str] = []
+    pos = 0
+    length = len(css)
+    while pos < length:
+        match = _CSS_IMAGE_SET_START_RE.search(css, pos)
+        if match is None:
+            out.append(css[pos:])
+            break
+        out.append(css[pos : match.start()])
+        depth = 1
+        quote: str | None = None
+        idx = match.end()
+        while idx < length and depth > 0:
+            ch = css[idx]
+            if quote is not None:
+                if ch == "\\" and idx + 1 < length:
+                    idx += 2
+                    continue
+                if ch == quote:
+                    quote = None
+            elif ch in ("'", '"'):
+                quote = ch
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            idx += 1
+        out.append("none")
+        pos = idx
+    return "".join(out)
 
 
 def _is_allowed_html_url(tag: str, attr: str, value: str) -> bool:
@@ -28742,7 +28790,7 @@ def _sanitize_inline_css(css: str) -> str:
         return "url()"
 
     cleaned = _CSS_URL_RE.sub(_replace_url, cleaned)
-    return _CSS_IMAGE_SET_RE.sub("none", cleaned)
+    return _strip_css_image_set(cleaned)
 
 
 class _AdminReportHTMLSanitizer(HTMLParser):
@@ -28756,6 +28804,7 @@ class _AdminReportHTMLSanitizer(HTMLParser):
         self._before_head_eligible = True
         self._seen_html_tag = False
         self._in_style = False
+        self._foreign_depth = 0
         self._doctype_end_idx: int | None = None
 
     def _is_blocked_meta(self, attrs: list[tuple[str, str | None]]) -> bool:
@@ -28804,6 +28853,11 @@ class _AdminReportHTMLSanitizer(HTMLParser):
             return
         if self._skip_stack:
             return
+        # Inside <svg>/<math>, HTML5 parses tags inside <style>/<title>/<textarea>
+        # as markup while Python's HTMLParser treats them as CDATA/RCDATA — drop them.
+        if self._foreign_depth > 0 and lower in _HTML_FOREIGN_RAW_CONTENT_TAGS:
+            self._skip_stack.append(lower)
+            return
         if lower in _HTML_STRIP_VOID_TAGS:
             return
         if lower == "meta" and self._is_blocked_meta(attrs):
@@ -28817,6 +28871,8 @@ class _AdminReportHTMLSanitizer(HTMLParser):
             self._before_head_eligible = False
         else:
             self._before_head_eligible = False
+        if lower in _HTML_FOREIGN_CONTAINER_TAGS:
+            self._foreign_depth += 1
         if lower == "style":
             self._in_style = True
 
@@ -28828,6 +28884,7 @@ class _AdminReportHTMLSanitizer(HTMLParser):
             lower in _HTML_STRIP_WITH_CONTENT_TAGS
             or lower in _HTML_STRIP_VOID_TAGS
             or lower == "style"
+            or (self._foreign_depth > 0 and lower in _HTML_FOREIGN_RAW_CONTENT_TAGS)
         ):
             return
         if lower == "meta" and self._is_blocked_meta(attrs):
@@ -28841,7 +28898,7 @@ class _AdminReportHTMLSanitizer(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         lower = tag.lower()
         if self._skip_stack:
-            if lower in _HTML_STRIP_WITH_CONTENT_TAGS and lower in self._skip_stack:
+            if lower in self._skip_stack:
                 while self._skip_stack:
                     if self._skip_stack.pop() == lower:
                         break
@@ -28850,6 +28907,8 @@ class _AdminReportHTMLSanitizer(HTMLParser):
             return
         if lower == "style":
             self._in_style = False
+        if lower in _HTML_FOREIGN_CONTAINER_TAGS and self._foreign_depth > 0:
+            self._foreign_depth -= 1
         self._parts.append(f"</{lower}>")
 
     def handle_data(self, data: str) -> None:
@@ -28858,7 +28917,7 @@ class _AdminReportHTMLSanitizer(HTMLParser):
         if data.strip():
             self._before_head_eligible = False
         if self._in_style:
-            data = _sanitize_inline_css(data)
+            data = _sanitize_inline_css(data).replace("<", r"\3c ")
         self._parts.append(data)
 
     def handle_entityref(self, name: str) -> None:
@@ -28917,7 +28976,9 @@ async def save_admin_chat_artifact(
     if not safe_filename.endswith(".html"):
         safe_filename += ".html"
 
-    sanitized_html = _sanitize_admin_report_html(body.html_content)
+    sanitized_html = await asyncio.to_thread(
+        _sanitize_admin_report_html, body.html_content
+    )
 
     artifact_id = str(uuid.uuid4())
     artifacts_dir = _get_admin_artifacts_dir(username)
