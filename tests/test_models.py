@@ -1515,5 +1515,15 @@ class TestPushEndpointModels:
                 p256dh_key="p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
                 auth_key="auth-test",  # pragma: allowlist secret  # gitleaks:allow
             )
+
+    def test_unsubscribe_allows_legacy_https_endpoints_but_rejects_http(self) -> None:
+        assert (
+            UnsubscribeRequest(endpoint="https://127.0.0.1/legacy").endpoint
+            == "https://127.0.0.1/legacy"
+        )
+        assert (
+            UnsubscribeRequest(endpoint="https://localhost/legacy").endpoint
+            == "https://localhost/legacy"
+        )
         with pytest.raises(ValidationError):
-            UnsubscribeRequest(endpoint=endpoint)
+            UnsubscribeRequest(endpoint="http://fcm.googleapis.com/fcm/send/abc123")

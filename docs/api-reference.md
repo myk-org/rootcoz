@@ -335,7 +335,7 @@ Date bounds use the `date_from` and `date_to` query names. The legacy `from` and
 | --- | --- | --- | --- |
 | GET | `/api/notifications/vapid-public-key` | viewer | Web Push public key |
 | POST | `/api/notifications/subscribe` | viewer | `endpoint` (public `https://` URL, no credentials or private/loopback/internal hosts), `p256dh_key`, `auth_key` |
-| POST | `/api/notifications/unsubscribe` | viewer | Removes a subscription (`endpoint` must be a valid public `https://` URL) |
+| POST | `/api/notifications/unsubscribe` | viewer | Removes a subscription (`endpoint` `https://` URL, including legacy subscriptions) |
 | GET | `/api/ai-models` | viewer | `provider`; lists models for `claude`, `gemini`, `cursor`. Each model may carry `session_supported` (boolean) and, when it is `false`, `session_unsupported_reason`; both are **absent** for providers that are not key-scoped (`trustKeyScopedListing`) |
 | GET | `/api/capabilities` | viewer | Feature toggles, whether server credentials exist, and `issue_attachments` limits, allowed MIME types, and per-entry availability |
 | GET | `/api/default-server-settings` | viewer | Non-sensitive settings and defaults only |

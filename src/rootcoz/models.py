@@ -1641,14 +1641,16 @@ class ExporterInfo(BaseModel):
 
 
 class _PushEndpointMixin(BaseModel):
-    """Shared validation for Web Push endpoint URLs (public HTTPS-only, length-bounded)."""
+    """Shared length-bounded HTTPS endpoint field for Web Push models."""
 
     endpoint: str = Field(max_length=2048, description="Push service endpoint URL")
 
     @field_validator("endpoint")
     @classmethod
     def validate_endpoint_url(cls, v: str) -> str:
-        return validate_public_https_url(v, field_name="Push endpoint")
+        if not v.startswith("https://"):
+            raise ValueError("Push endpoint must use HTTPS")
+        return v
 
 
 class PushSubscriptionRequest(_PushEndpointMixin):
@@ -1659,9 +1661,18 @@ class PushSubscriptionRequest(_PushEndpointMixin):
     )
     auth_key: str = Field(max_length=256, description="Client authentication secret")
 
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint_url(cls, v: str) -> str:
+        return validate_public_https_url(v, field_name="Push endpoint")
+
 
 class UnsubscribeRequest(_PushEndpointMixin):
-    """Request body for unsubscribing from Web Push notifications."""
+    """Request body for unsubscribing from Web Push notifications.
+
+    Retains the legacy HTTPS-prefix check so subscriptions stored prior to
+    public-host enforcement can still be removed cleanly.
+    """
 
 
 class BulkDeleteRequest(BaseModel):

@@ -803,3 +803,241 @@ class TestWebPushDeliveryHardening:
                 vapid_claim_email="admin@example.com",
             )
         mock_webpush.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_slow_drip_response_aborted_at_total_deadline(
+        self, tmp_path: Path
+    ) -> None:
+        """A server trickling bytes inside the per-read timeout still hits the total deadline."""
+        stop_drip = threading.Event()
+
+        class _SlowDripHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                content_len = int(self.headers.get("Content-Length", "0"))
+                if content_len:
+                    self.rfile.read(content_len)
+                self.send_response(200)
+                self.send_header("Content-Length", "10000")
+                self.end_headers()
+                for _ in range(200):
+                    if stop_drip.is_set():
+                        break
+                    try:
+                        self.wfile.write(b"x")
+                        self.wfile.flush()
+                    except OSError:
+                        break
+                    stop_drip.wait(0.05)
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        cert_path, key_path = _write_self_signed_cert(tmp_path, "drip.example.com")
+
+        class _ThreadedHTTPServer(http.server.ThreadingHTTPServer):
+            daemon_threads = True
+
+        https_server = _ThreadedHTTPServer(("127.0.0.1", 0), _SlowDripHandler)
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+        https_server.socket = ssl_ctx.wrap_socket(https_server.socket, server_side=True)
+        https_port = https_server.server_address[1]
+        https_thread = threading.Thread(target=https_server.serve_forever, daemon=True)
+        https_thread.start()
+
+        vapid = _generate_vapid_keys()
+        p256dh, auth = _make_real_push_keys()
+        subscriptions = [
+            {
+                "username": "bob",
+                "endpoint": f"https://drip.example.com:{https_port}/sub/{i}",
+                "p256dh_key": p256dh,
+                "auth_key": auth,
+            }
+            for i in range(4)
+        ]
+
+        orig_session_cls = notifications_mod._WebPushSession
+
+        class _TestCertWebPushSession(orig_session_cls):
+            def __init__(self) -> None:
+                super().__init__()
+                self.verify = str(cert_path)
+
+        def _fake_getaddrinfo(
+            host: str,
+            svc_port: int,
+            *args: object,
+            **kwargs: object,
+        ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+            if host == "drip.example.com":
+                return [
+                    (
+                        socket.AF_INET,
+                        socket.SOCK_STREAM,
+                        socket.IPPROTO_TCP,
+                        "",
+                        ("127.0.0.1", int(svc_port)),
+                    )
+                ]
+            raise OSError(f"unexpected host {host}")
+
+        try:
+            with (
+                patch(
+                    "rootcoz.notifications.get_push_subscriptions_for_users",
+                    new_callable=AsyncMock,
+                    return_value=subscriptions,
+                ),
+                patch.object(
+                    notifications_mod, "_WebPushSession", _TestCertWebPushSession
+                ),
+                patch.object(notifications_mod, "WEBPUSH_TIMEOUT_SECONDS", 0.3),
+                patch.object(notifications_mod, "is_public_ip", return_value=True),
+                patch(
+                    "rootcoz.notifications.socket.getaddrinfo",
+                    side_effect=_fake_getaddrinfo,
+                ),
+            ):
+                start = time.monotonic()
+                await asyncio.wait_for(
+                    send_mention_notifications(
+                        mentioned_usernames=["bob"],
+                        comment_author="alice",
+                        job_id="job-1",
+                        test_name="test_slow_drip",
+                        vapid_private_key=vapid["private_key"],
+                        vapid_claim_email="admin@example.com",
+                    ),
+                    timeout=3.0,
+                )
+                elapsed = time.monotonic() - start
+                assert elapsed < 2.0
+        finally:
+            stop_drip.set()
+            https_server.shutdown()
+            https_server.server_close()
+            https_thread.join(timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_dns_stall_times_out_without_blocking_executor(self) -> None:
+        """Stalled DNS lookups time out promptly and free _PUSH_EXECUTOR workers."""
+        release_dns = threading.Event()
+        vapid = _generate_vapid_keys()
+        p256dh, auth = _make_real_push_keys()
+        subscriptions = [
+            {
+                "username": "bob",
+                "endpoint": f"https://stalled-dns-{i}.example.com/push",
+                "p256dh_key": p256dh,
+                "auth_key": auth,
+            }
+            for i in range(4)
+        ]
+
+        def _stalling_getaddrinfo(*args: object, **kwargs: object) -> list[object]:
+            release_dns.wait(5.0)
+            raise socket.gaierror("stalled")
+
+        try:
+            with (
+                patch(
+                    "rootcoz.notifications.get_push_subscriptions_for_users",
+                    new_callable=AsyncMock,
+                    return_value=subscriptions,
+                ),
+                patch.object(notifications_mod, "WEBPUSH_TIMEOUT_SECONDS", 0.2),
+                patch(
+                    "rootcoz.notifications.socket.getaddrinfo",
+                    side_effect=_stalling_getaddrinfo,
+                ),
+            ):
+                start = time.monotonic()
+                await asyncio.wait_for(
+                    send_mention_notifications(
+                        mentioned_usernames=["bob"],
+                        comment_author="alice",
+                        job_id="job-1",
+                        test_name="test_dns_stall",
+                        vapid_private_key=vapid["private_key"],
+                        vapid_claim_email="admin@example.com",
+                    ),
+                    timeout=2.5,
+                )
+                elapsed = time.monotonic() - start
+                assert elapsed < 1.5
+
+                # _PUSH_EXECUTOR workers are free immediately after DNS timeouts.
+                loop = asyncio.get_running_loop()
+                probe = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        notifications_mod._PUSH_EXECUTOR, lambda: "free"
+                    ),
+                    timeout=0.5,
+                )
+                assert probe == "free"
+        finally:
+            release_dns.set()
+
+    @pytest.mark.asyncio
+    async def test_proxy_env_vars_ignored_and_proxy_manager_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Environment proxies cannot bypass connect-time public-IP validation."""
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8888")
+        monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:8888")
+
+        with notifications_mod._WebPushSession() as session:
+            assert session.trust_env is False
+
+        adapter = notifications_mod._PublicHTTPSAdapter()
+        with pytest.raises(ValueError, match="Proxies are disabled"):
+            adapter.proxy_manager_for("http://127.0.0.1:8888")
+
+        vapid = _generate_vapid_keys()
+        p256dh, auth = _make_real_push_keys()
+        subscriptions = [
+            {
+                "username": "bob",
+                "endpoint": "https://rebind.example.com/push",
+                "p256dh_key": p256dh,
+                "auth_key": auth,
+            }
+        ]
+
+        connect_calls: list[object] = []
+
+        def _forbid_connect(self: socket.socket, address: object) -> None:
+            connect_calls.append(address)
+            raise AssertionError(f"must not connect to {address}")
+
+        with (
+            patch(
+                "rootcoz.notifications.get_push_subscriptions_for_users",
+                new_callable=AsyncMock,
+                return_value=subscriptions,
+            ),
+            patch(
+                "rootcoz.notifications.socket.getaddrinfo",
+                return_value=[
+                    (
+                        socket.AF_INET,
+                        socket.SOCK_STREAM,
+                        socket.IPPROTO_TCP,
+                        "",
+                        ("127.0.0.1", 443),
+                    )
+                ],
+            ),
+            patch.object(socket.socket, "connect", _forbid_connect),
+        ):
+            await send_mention_notifications(
+                mentioned_usernames=["bob"],
+                comment_author="alice",
+                job_id="job-1",
+                test_name="test_proxy_bypass",
+                vapid_private_key=vapid["private_key"],
+                vapid_claim_email="admin@example.com",
+            )
+
+        assert connect_calls == []

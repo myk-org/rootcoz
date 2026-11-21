@@ -242,6 +242,30 @@ class TestUnsubscribeNotifications:
         )
         assert resp.status_code == 404
 
+    def test_unsubscribe_allows_removing_legacy_non_public_subscription(
+        self, client_with_push
+    ):
+        """Legacy subscriptions stored prior to public-host enforcement can still be removed."""
+        cookies = _login_user(client_with_push, "alice")
+        legacy_endpoint = "https://127.0.0.1:9443/legacy-sub"
+        asyncio.run(
+            storage.save_push_subscription(
+                username="alice",
+                endpoint=legacy_endpoint,
+                p256dh_key="p256dh-legacy",  # pragma: allowlist secret  # gitleaks:allow
+                auth_key="auth-legacy",  # pragma: allowlist secret  # gitleaks:allow
+            )
+        )
+        resp = client_with_push.post(
+            "/api/notifications/unsubscribe",
+            json={"endpoint": legacy_endpoint},
+            headers=cookies,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "unsubscribed"
+        remaining = asyncio.run(storage.get_push_subscriptions_for_users(["alice"]))
+        assert remaining == []
+
 
 class TestEndpointHttpsValidation:
     """Tests for HTTPS endpoint validation."""
