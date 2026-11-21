@@ -22816,28 +22816,57 @@ class TestUserLifecycleAndAdminSseRevocation:
         )
         await storage.init_db()
         await storage.create_admin_user("existing-adm")
+        await storage.create_user("demoted-adm", role="reviewer")
+        await storage.create_admin_user("symlink-adm")
         row = await storage.get_user_by_username("existing-adm")
         assert row is not None
 
         legacy_id = "22222222-2222-4222-8222-222222222222"
+        demoted_id = "33333333-3333-4333-8333-333333333333"
         active_legacy = main_module._ADMIN_ARTIFACTS_BASE / "existing-adm"
         active_legacy.mkdir(parents=True, exist_ok=True)
         (active_legacy / f"{legacy_id}.html").write_text(
             "<h1>migrated</h1>", encoding="utf-8"
         )
+        demoted_legacy = main_module._ADMIN_ARTIFACTS_BASE / "demoted-adm"
+        demoted_legacy.mkdir(parents=True, exist_ok=True)
+        (demoted_legacy / f"{demoted_id}.html").write_text(
+            "<h1>demoted-report</h1>", encoding="utf-8"
+        )
         orphan_legacy = main_module._ADMIN_ARTIFACTS_BASE / "deleted-adm"
         orphan_legacy.mkdir(parents=True, exist_ok=True)
         (orphan_legacy / "old.html").write_text("<h1>orphan</h1>", encoding="utf-8")
 
+        outside_dir = tmp_path / "outside-secret"
+        outside_dir.mkdir()
+        outside_file = outside_dir / "keep.html"
+        outside_file.write_text("<h1>outside</h1>", encoding="utf-8")
+        symlink_legacy = main_module._ADMIN_ARTIFACTS_BASE / "symlink-adm"
+        symlink_legacy.symlink_to(outside_dir)
+
         await main_module._migrate_legacy_admin_artifacts()
 
         assert not active_legacy.exists()
+        assert not demoted_legacy.exists()
         assert not orphan_legacy.exists()
+        # Symlink target must never be moved or touched.
+        assert outside_file.exists()
+
         adm_req = SimpleNamespace(
             state=SimpleNamespace(username="existing-adm", role="admin", is_admin=True)
         )
         resp = await main_module.get_admin_chat_artifact(legacy_id, adm_req)
         assert resp.body == b"<h1>migrated</h1>"
+
+        # Demoted admin keeps migrated report when promoted back to admin.
+        await storage.change_user_role("demoted-adm", "admin")
+        demoted_req = SimpleNamespace(
+            state=SimpleNamespace(username="demoted-adm", role="admin", is_admin=True)
+        )
+        demoted_resp = await main_module.get_admin_chat_artifact(
+            demoted_id, demoted_req
+        )
+        assert demoted_resp.body == b"<h1>demoted-report</h1>"
 
     async def test_navbar_only_admin_stream_clears_pending_count_on_logout_and_key_rotation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

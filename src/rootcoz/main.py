@@ -28731,12 +28731,25 @@ def _get_admin_artifacts_dir(username: str, *, owner_id: int | None = None) -> P
 async def _migrate_legacy_admin_artifacts() -> None:
     """Migrate pre-upgrade username-keyed admin artifact dirs into ``.by-id/<id>``.
 
-    Runs once at startup before requests are served: active DB admins keep
-    access to previously saved reports under their immutable owner_id path,
-    while orphaned directories from deleted or non-admin users are purged.
+    Runs once at startup before requests are served: existing DB accounts
+    (including temporarily demoted admins) keep their saved reports under their
+    immutable owner_id path, while orphaned directories from deleted accounts
+    are purged. Symlinks are never followed.
     """
-    if not _ADMIN_ARTIFACTS_BASE.exists() or not _ADMIN_ARTIFACTS_BASE.is_dir():
+    if (
+        _ADMIN_ARTIFACTS_BASE.is_symlink()
+        or not _ADMIN_ARTIFACTS_BASE.exists()
+        or not _ADMIN_ARTIFACTS_BASE.is_dir()
+    ):
         return
+    by_id_root = _ADMIN_ARTIFACTS_BASE / _ADMIN_ARTIFACTS_BY_ID_DIR
+    if by_id_root.is_symlink():
+        logger.warning(
+            "Admin chat: refusing legacy artifact migration because %s is a symlink",
+            by_id_root,
+        )
+        return
+    base_resolved = _ADMIN_ARTIFACTS_BASE.resolve()
     try:
         entries = list(_ADMIN_ARTIFACTS_BASE.iterdir())
     except OSError:
@@ -28749,18 +28762,34 @@ async def _migrate_legacy_admin_artifacts() -> None:
 
     for entry in entries:
         name = entry.name
-        if name == "admin" or name.startswith(".") or not entry.is_dir():
+        if (
+            name == "admin"
+            or name.startswith(".")
+            or entry.is_symlink()
+            or not entry.is_dir()
+        ):
             continue
         row = await storage.get_user_by_username(name)
-        if row is not None and row.get("role") == "admin":
+        if row is not None:
             target_dir = _get_admin_artifacts_dir(name, owner_id=int(row["id"]))
 
             def _move_dir(src: Path = entry, dst: Path = target_dir) -> None:
-                dst.mkdir(parents=True, exist_ok=True)
+                if src.is_symlink() or dst.parent.is_symlink() or dst.is_symlink():
+                    return
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.parent.is_symlink():
+                    return
+                dst.mkdir(exist_ok=True)
+                if dst.is_symlink():
+                    return
+                if not dst.resolve().is_relative_to(base_resolved):
+                    return
                 dst.chmod(0o700)
                 for item in src.iterdir():
+                    if item.is_symlink() or not item.is_file():
+                        continue
                     dest_item = dst / item.name
-                    if not dest_item.exists():
+                    if not dest_item.exists() and not dest_item.is_symlink():
                         item.replace(dest_item)
                 delete_tree(src)
 
