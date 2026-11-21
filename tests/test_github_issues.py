@@ -441,10 +441,15 @@ class TestSearchGitHubIssues:
         )
 
     async def test_returns_empty_without_http_call_when_all_keywords_sanitized_away(
-        self,
+        self, caplog
     ) -> None:
-        """If every keyword was an injected operator/qualifier, skip the API request (#608)."""
-        with patch("rootcoz.github_issues.httpx.AsyncClient") as mock_cls:
+        """If every keyword was an injected operator/qualifier, skip the API request and warn (#608)."""
+        from tests.conftest import capture_main_logs
+
+        with (
+            capture_main_logs(caplog, logging.WARNING, "rootcoz.github_issues"),
+            patch("rootcoz.github_issues.httpx.AsyncClient") as mock_cls,
+        ):
             result = await search_github_issues(
                 ["OR", "repo:private-org/secret-repo", "org:other-org", "is:pr"],
                 "https://github.com/org/repo",
@@ -453,6 +458,10 @@ class TestSearchGitHubIssues:
 
         assert result == []
         mock_cls.assert_not_called()
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "org/repo" in logged
+        assert "removed by search-query sanitization" in logged
+        assert "secret-repo" not in logged
 
 
 class TestCollectCodeFixReports:

@@ -167,6 +167,15 @@ def build_github_search_query(keywords: Sequence[str], owner: str, repo: str) ->
         part for kw in keywords if (part := _sanitize_github_search_keyword(kw))
     ]
     if not sanitized_parts:
+        non_empty_count = sum(1 for kw in keywords if kw and kw.strip())
+        if non_empty_count:
+            logger.warning(
+                "GitHub search for %s/%s skipped: all %d keyword(s) were "
+                "removed by search-query sanitization",
+                owner,
+                repo,
+                non_empty_count,
+            )
         return ""
     return f"{' '.join(sanitized_parts)} repo:{owner}/{repo} is:issue"
 
@@ -211,7 +220,7 @@ async def search_github_issues(
         return []
 
     try:
-        owner, repo = parse_github_repo_url(strip_url_credentials(repo_url))
+        owner, repo = parse_github_repo_url(repo_url)
     except ValueError:
         logger.warning(
             "Could not parse GitHub repo URL for issue search: %s",
@@ -393,7 +402,7 @@ def _namespace_candidates(
     never reaches ``SimilarIssue``.
     """
     try:
-        owner, repo = parse_github_repo_url(strip_url_credentials(repo_url))
+        owner, repo = parse_github_repo_url(repo_url)
     except ValueError:
         return list(candidates)
     return [

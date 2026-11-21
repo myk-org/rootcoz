@@ -850,6 +850,27 @@ class TestParseGithubRepoUrl:
         assert owner == "MyOrg"
         assert repo == "MyRepo"
 
+    def test_strips_userinfo_and_query_consistently_across_callers(self):
+        """Credentialed GitHub URLs parse identically across issue filing and main helpers."""
+        from rootcoz.bug_creation import parse_github_repo_url
+        from rootcoz.main import _github_repo_slug
+
+        url = "https://user:gh-secret@github.com/myorg/myrepo.git?token=query-secret#frag"  # pragma: allowlist secret
+        assert parse_github_repo_url(url) == ("myorg", "myrepo")
+        assert _github_repo_slug(url) == "myorg/myrepo"
+
+    def test_invalid_credentialed_url_masks_secrets_in_error(self):
+        """Non-GitHub credentialed URLs still raise ValueError with masked credentials."""
+        from rootcoz.bug_creation import parse_github_repo_url
+
+        bad_url = "https://user:gh-secret@gitlab.com/myorg/myrepo?token=query-secret"  # pragma: allowlist secret
+        with pytest.raises(ValueError) as exc_info:
+            parse_github_repo_url(bad_url)
+        msg = str(exc_info.value)
+        assert "gh-secret" not in msg
+        assert "query-secret" not in msg
+        assert "***" in msg
+
 
 class TestBuildFailbackContent:
     def test_github_fallback_with_product_bug(self, product_bug_failure):

@@ -562,17 +562,20 @@ def parse_github_repo_url(repo_url: str) -> tuple[str, str]:
     """Extract owner and repo from a GitHub repository URL.
 
     Supports https://github.com/owner/repo, https://github.com/owner/repo.git
-    and the ``git://`` clone form ``_validate_repo_url`` also accepts. The host
-    is matched case-insensitively (``GitHub.com``); the path is not lowercased,
-    since owner and repo names are case-sensitive.
+    and the ``git://`` clone form ``_validate_repo_url`` also accepts. Embedded
+    URL credentials (userinfo, query string, fragment) are stripped before
+    parsing so every caller agrees on credentialed URLs. The host is matched
+    case-insensitively (``GitHub.com``); the path is not lowercased, since
+    owner and repo names are case-sensitive.
 
     Returns (owner, repo) tuple.
 
     Raises ValueError if the URL cannot be parsed.
     """
+    cleaned = strip_url_credentials(str(repo_url).strip())
     match = re.match(
         r"(?:https?|git)://(?i:github\.com)/([^/?#]+)/([^/?#]+?)(?:\.git)?/?$",
-        repo_url,
+        cleaned,
     )
     if not match:
         raise ValueError(
@@ -592,7 +595,7 @@ async def search_github_duplicates(
     Swallows all errors and returns [].
     """
     try:
-        owner, repo = parse_github_repo_url(strip_url_credentials(repo_url))
+        owner, repo = parse_github_repo_url(repo_url)
     except ValueError:
         logger.warning(
             "Could not parse GitHub repo URL for duplicate search: %s",
@@ -700,7 +703,7 @@ async def create_github_issue(
 
     Raises httpx.HTTPStatusError on failure.
     """
-    owner, repo = parse_github_repo_url(strip_url_credentials(repo_url))
+    owner, repo = parse_github_repo_url(repo_url)
 
     body = apply_ai_attribution(body, attribution or AiProvenance(ai_used=False))
 
