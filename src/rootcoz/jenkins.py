@@ -10,6 +10,7 @@ import urllib3
 from pydantic import HttpUrl
 
 from rootcoz import get_child_logger
+from rootcoz.url_utils import redact_urls_in_text
 
 logger = get_child_logger(__name__)
 
@@ -35,7 +36,7 @@ class JenkinsClient(jenkins.Jenkins):
             timeout: HTTP request timeout in seconds.
         """
         super().__init__(url=url, username=username, password=password, timeout=timeout)
-        logger.info(f"Connecting to Jenkins: {url}")
+        logger.info("Connecting to Jenkins: %s", redact_urls_in_text(url))
         if not ssl_verify:
             self._session.verify = False
             # Suppress InsecureRequestWarning
@@ -133,7 +134,7 @@ class JenkinsClient(jenkins.Jenkins):
                 "Failed to fetch test report: %s #%s - %s",
                 job_name,
                 build_number,
-                err,
+                redact_urls_in_text(str(err)),
             )
             raise
 
@@ -162,12 +163,16 @@ class JenkinsClient(jenkins.Jenkins):
         parts = path.split("/")
 
         if len(parts) < 2:
-            raise ValueError(f"Invalid Jenkins URL format: {url}")
+            raise ValueError(
+                f"Invalid Jenkins URL format: {redact_urls_in_text(str(url))}"
+            )
 
         try:
             build_number = int(parts[-1])
         except ValueError as err:
-            raise ValueError(f"Could not parse build number from URL: {url}") from err
+            raise ValueError(
+                f"Could not parse build number from URL: {redact_urls_in_text(str(url))}"
+            ) from err
 
         # Find the job path by looking for /job/ segments
         job_parts = []

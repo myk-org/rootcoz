@@ -14,6 +14,7 @@ same search loop (``issue_matching.run_tracker_search``).
 Mirrors the Jira integration pattern in ``jira.py``.
 """
 
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
@@ -38,12 +39,146 @@ from rootcoz.models import (
     ProductBugReport,
     SimilarIssue,
 )
-from rootcoz.url_utils import mask_stored_url, strip_url_credentials
+from rootcoz.url_utils import (
+    mask_stored_url,
+    redact_urls_in_text,
+    strip_url_credentials,
+)
 
 logger = get_child_logger(__name__)
 
 # Classifications considered "code issues" for tests repo search
 _CODE_ISSUE_CLASSIFICATIONS = frozenset({"CODE ISSUE"})
+
+# Known GitHub Issues/PRs search qualifiers (case-insensitive).
+# Benign error tokens such as ``status:500`` or ``error:timeout`` are kept and
+# wrapped in double quotes so GitHub searches them literally rather than as
+# search qualifiers.
+_GITHUB_SEARCH_QUALIFIERS = frozenset(
+    {
+        "archived",
+        "assignee",
+        "author",
+        "base",
+        "category",
+        "closed",
+        "commenter",
+        "comments",
+        "created",
+        "draft",
+        "head",
+        "in",
+        "interactions",
+        "involves",
+        "is",
+        "label",
+        "language",
+        "linked",
+        "locked",
+        "mentions",
+        "merged",
+        "milestone",
+        "no",
+        "org",
+        "owner",
+        "project",
+        "reactions",
+        "reason",
+        "repo",
+        "review",
+        "review-requested",
+        "reviewed-by",
+        "sha",
+        "sort",
+        "state",
+        "team",
+        "team-review-requested",
+        "type",
+        "updated",
+        "user",
+        "user-review-requested",
+    }
+)
+
+_GITHUB_BOOLEAN_OPERATORS = frozenset({"AND", "OR", "NOT"})
+
+_QUOTED_QUALIFIER_RE = re.compile(
+    r'(?:^|(?<=[\s(]))[+-]?([A-Za-z][A-Za-z0-9_-]*):"[^"]*"'
+)
+_QUALIFIER_TOKEN_RE = re.compile(r"^[+-]?([A-Za-z][A-Za-z0-9_-]*):")
+
+
+def _sanitize_github_search_keyword(keyword: str) -> str:
+    """Sanitize a keyword for GitHub Issues search.
+
+    Redacts embedded URL credentials, drops GitHub Search qualifiers and
+    standalone boolean operators (``AND``, ``OR``, ``NOT``), and quotes
+    surviving tokens carrying syntax-significant characters (such as ``:`` in
+    ``status:500`` or ``error:timeout``) so untrusted AI keywords cannot widen
+    the search beyond the configured repository.
+    """
+    cleaned = redact_urls_in_text(keyword)
+    cleaned = "".join(
+        " " if ch.isspace() else ch
+        for ch in cleaned
+        if ch.isspace() or ch.isprintable()
+    )
+
+    def _drop_known_quoted_qualifier(match: re.Match[str]) -> str:
+        if match.group(1).lower() in _GITHUB_SEARCH_QUALIFIERS:
+            return " "
+        return match.group(0)
+
+    cleaned = _QUOTED_QUALIFIER_RE.sub(_drop_known_quoted_qualifier, cleaned)
+    # Break out embedded quotes/backslashes so no token can escape quoting.
+    cleaned = cleaned.replace('"', " ").replace("\\", " ")
+
+    safe_tokens: list[str] = []
+    for raw_token in cleaned.split():
+        core = raw_token.strip("()")
+        if not core or core in _GITHUB_BOOLEAN_OPERATORS:
+            continue
+        qualifier_match = _QUALIFIER_TOKEN_RE.match(core)
+        if (
+            qualifier_match
+            and qualifier_match.group(1).lower() in _GITHUB_SEARCH_QUALIFIERS
+        ):
+            continue
+
+        if (
+            ":" in raw_token
+            or "(" in raw_token
+            or ")" in raw_token
+            or raw_token[0] in ("-", "+")
+        ):
+            safe_tokens.append(f'"{raw_token}"')
+        else:
+            safe_tokens.append(raw_token)
+
+    return " ".join(safe_tokens)
+
+
+def build_github_search_query(keywords: Sequence[str], owner: str, repo: str) -> str:
+    """Build a scoped, sanitized GitHub Issues search ``q`` parameter.
+
+    Returns an empty string when no searchable terms remain after sanitization.
+    """
+    sanitized_parts = [
+        part for kw in keywords if (part := _sanitize_github_search_keyword(kw))
+    ]
+    if not sanitized_parts:
+        non_empty_count = sum(1 for kw in keywords if kw and kw.strip())
+        if non_empty_count:
+            logger.warning(
+                "GitHub search for %s/%s skipped: all %d keyword(s) were "
+                "removed by search-query sanitization",
+                owner,
+                repo,
+                non_empty_count,
+            )
+        return ""
+    return f"{' '.join(sanitized_parts)} repo:{owner}/{repo} is:issue"
+
 
 # AI token-tracking label for each question, kept distinct so spend per
 # question stays readable in the usage report.
@@ -87,16 +222,19 @@ async def search_github_issues(
     try:
         owner, repo = parse_github_repo_url(repo_url)
     except ValueError:
-        logger.warning("Could not parse GitHub repo URL for issue search: %s", repo_url)
+        logger.warning(
+            "Could not parse GitHub repo URL for issue search: %s",
+            mask_stored_url(str(repo_url).strip()),
+        )
+        return []
+
+    search_query = build_github_search_query(keywords, owner, repo)
+    if not search_query:
         return []
 
     headers: dict[str, str] = {"Accept": "application/vnd.github.v3+json"}
     if github_token:
         headers["Authorization"] = f"Bearer {github_token}"
-
-    # Build search query from keywords
-    query_parts = " ".join(keywords)
-    search_query = f"{query_parts} repo:{owner}/{repo} is:issue"
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -409,7 +547,7 @@ async def enrich_with_tests_repo_matches(
     ) -> None:
         pair[1].tests_repo_matches = matches
 
-    repo_url = str(tests_repo_url)
+    repo_url = strip_url_credentials(str(tests_repo_url))
     spec = TrackerSearchSpec(
         label="GitHub tests-repo search",
         search_label="GitHub issue search(es)",
@@ -472,7 +610,7 @@ async def enrich_with_github_duplicate_matches(
         job_id: Job identifier for token usage tracking.
         repo_urls: GitHub repository URLs in scope.
     """
-    scope = list(repo_urls)
+    scope = [strip_url_credentials(url) for url in repo_urls]
     blocker = duplicate_search_blocker(settings, github_token, scope)
     if blocker:
         logger.info("GitHub duplicate search not run for job=%s: %s", job_id, blocker)

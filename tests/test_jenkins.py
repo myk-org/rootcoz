@@ -1,6 +1,7 @@
 """Tests for Jenkins client."""
 
 import json
+import logging
 from unittest.mock import patch
 
 import jenkins
@@ -43,6 +44,55 @@ class TestJenkinsClientInit:
             password="pass",  # pragma: allowlist secret
             timeout=30,
         )
+
+    @patch("rootcoz.jenkins.jenkins.Jenkins.__init__", return_value=None)
+    def test_init_redacts_url_credentials_in_info_log(self, _mock_init, caplog) -> None:
+        """JenkinsClient.__init__ must never log userinfo or query-token URL credentials."""
+        from tests.conftest import capture_main_logs
+
+        url = (
+            "https://ci-user:dummy-jenkins-secret@jenkins.example.invalid"  # pragma: allowlist secret
+            "?token=dummy-query-secret"
+        )
+        with capture_main_logs(caplog, logging.INFO, "rootcoz.jenkins"):
+            JenkinsClient(
+                url=url,
+                username="user",
+                password="pass",  # pragma: allowlist secret
+            )
+
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "https://jenkins.example.invalid" in logged
+        assert "ci-user" not in logged
+        assert "dummy-jenkins-secret" not in logged
+        assert "dummy-query-secret" not in logged
+
+    @patch("rootcoz.jenkins.jenkins.Jenkins.__init__", return_value=None)
+    def test_get_test_report_redacts_url_credentials_in_warning_log(
+        self, _mock_init, caplog
+    ) -> None:
+        """JenkinsException warning logs must redact embedded URL credentials."""
+        from tests.conftest import capture_main_logs
+
+        client = JenkinsClient(
+            url="https://jenkins.example.invalid",
+            username="user",
+            password="pass",  # pragma: allowlist secret
+        )
+        exc = jenkins.JenkinsException(
+            "Error in request: https://ci-user:dummy-jenkins-secret@jenkins.example.invalid/job/a/1?token=secret-tok"  # pragma: allowlist secret
+        )
+        with (
+            capture_main_logs(caplog, logging.WARNING, "rootcoz.jenkins"),
+            patch.object(client, "get_build_test_report", side_effect=exc),
+            pytest.raises(jenkins.JenkinsException),
+        ):
+            client.get_test_report("a", 1)
+
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "https://jenkins.example.invalid/job/a/1" in logged
+        assert "dummy-jenkins-secret" not in logged
+        assert "secret-tok" not in logged
 
 
 class TestGetWhoamiSecurity:
