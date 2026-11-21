@@ -5,6 +5,7 @@ import copy
 import csv
 import hashlib
 import hmac
+import html
 import io
 import ipaddress
 import itertools
@@ -41,6 +42,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Literal, NoReturn, get_args
 from urllib.parse import quote as _urlquote
@@ -27669,6 +27671,97 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
 
 # -- Admin DB endpoints (used by admin chat tools) --
 
+# Fail-closed SQLite authorizer policy for admin chat DB inspection (#596).
+# Shared with ``admin_db_schema`` so schema discovery matches query access.
+_ADMIN_DB_ALLOWED_ACTIONS: frozenset[int] = frozenset(
+    {
+        sqlite3.SQLITE_SELECT,
+        sqlite3.SQLITE_READ,
+        sqlite3.SQLITE_FUNCTION,
+        *((sqlite3.SQLITE_RECURSIVE,) if hasattr(sqlite3, "SQLITE_RECURSIVE") else ()),
+    }
+)
+_ADMIN_DB_BLOCKED_FUNCTIONS: frozenset[str] = frozenset(
+    {
+        "load_extension",
+        "fts3_tokenizer",
+        "sqlite_offset",
+        "writefile",
+        "readfile",
+        "edit",
+    }
+)
+_ADMIN_DB_BLOCKED_TABLES: frozenset[str] = frozenset(
+    {
+        "server_settings",
+        "server_settings_history",
+    }
+)
+_ADMIN_DB_BLOCKED_COLUMNS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("users", "api_key_hash"),
+        ("server_ai_providers", "api_key_enc"),
+        ("sessions", "token"),
+        ("push_subscriptions", "p256dh_key"),
+        ("push_subscriptions", "auth_key"),
+        ("ai_session_sources", "claim_token"),
+        ("results", "result_json"),
+    }
+)
+
+
+def _is_blocked_admin_db_table(table: str) -> bool:
+    return table.lower() in _ADMIN_DB_BLOCKED_TABLES
+
+
+def _is_blocked_admin_db_column(table: str, column: str) -> bool:
+    t = table.lower()
+    c = column.lower()
+    return (
+        t in _ADMIN_DB_BLOCKED_TABLES
+        or (t, c) in _ADMIN_DB_BLOCKED_COLUMNS
+        or c.endswith("_enc")
+    )
+
+
+def _admin_db_authorizer(
+    action: int,
+    arg1: str | None,
+    arg2: str | None,
+    db_name: str | None,
+    source: str | None,
+) -> int:
+    """Fail-closed SQLite authorizer for ``admin_db_query`` (#596).
+
+    Permits only read-only SELECT/CTE queries, denies write/file/PRAGMA/ATTACH
+    operations (including ``VACUUM INTO``), blocks dangerous functions, and
+    blocks sensitive tables/columns regardless of SQL aliasing or expressions.
+    """
+    if action not in _ADMIN_DB_ALLOWED_ACTIONS:
+        return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_FUNCTION:
+        func_name = (arg2 or "").lower()
+        if not func_name or func_name in _ADMIN_DB_BLOCKED_FUNCTIONS:
+            return sqlite3.SQLITE_DENY
+    elif action == sqlite3.SQLITE_READ:
+        table = (arg1 or "").lower()
+        column = (arg2 or "").lower()
+        if _is_blocked_admin_db_table(table):
+            return sqlite3.SQLITE_DENY
+        if column and _is_blocked_admin_db_column(table, column):
+            return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
+def _sanitize_admin_db_value(value: Any) -> Any:
+    """Recursively apply ``strip_sensitive_from_response`` to decoded row dicts."""
+    if isinstance(value, dict):
+        stripped = strip_sensitive_from_response(value)
+        return {k: _sanitize_admin_db_value(v) for k, v in stripped.items()}
+    if isinstance(value, list):
+        return [_sanitize_admin_db_value(item) for item in value]
+    return value
+
 
 @app.get("/api/admin/db/schema", operation_id="adminDbSchema")
 async def admin_db_schema(request: Request) -> dict[str, Any]:
@@ -27696,6 +27789,8 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
         )
         for row in cursor.fetchall():
             table_name = row["name"]
+            if _is_blocked_admin_db_table(table_name):
+                continue
             cols = conn.execute(f"PRAGMA table_info({table_name})")
             columns = [
                 {
@@ -27705,6 +27800,7 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
                     "notnull": bool(c["notnull"]),
                 }
                 for c in cols.fetchall()
+                if not _is_blocked_admin_db_column(table_name, c["name"])
             ]
             count = conn.execute(
                 f"SELECT COUNT(*) as c FROM [{table_name}]"
@@ -27855,6 +27951,22 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
     sql_hash = hashlib.sha256(sql.encode()).hexdigest()
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    authorizer_denied = False
+
+    def _track_authorizer(
+        action: int,
+        arg1: str | None,
+        arg2: str | None,
+        db_name: str | None,
+        source: str | None,
+    ) -> int:
+        nonlocal authorizer_denied
+        decision = _admin_db_authorizer(action, arg1, arg2, db_name, source)
+        if decision != sqlite3.SQLITE_OK:
+            authorizer_denied = True
+        return decision
+
+    conn.set_authorizer(_track_authorizer)
     try:
         cursor = conn.execute(sql)
         rows = cursor.fetchall()
@@ -27879,36 +27991,52 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
             },
             request=request,
         )
-        # A row can carry a credential column (``github_token``, a key): mask the
-        # sensitive names in every row before the payload leaves the API, and
-        # let the shared response filter redact a ``request_params``-shaped one.
-        # Cell *text* is left verbatim — a row is data, and the URL masker would
-        # cut a value at its first ``?``/``#`` and drop its newlines (#581).
-        # The audit row above keeps the row *count* only, never the rows.
-        return strip_sensitive_from_response(
-            {
-                "columns": columns,
-                "rows": [
-                    mask_sensitive_fields(row, sanitize_text=False) for row in results
-                ],
-                "count": len(results),
-            }
-        )
+        # Scrub nested ``request_params``/``progress_log`` payloads inside any
+        # decoded row dicts first, then mask sensitive-named columns while
+        # leaving plain cell text verbatim (#581, #596).
+        sanitized_rows = [
+            mask_sensitive_fields(_sanitize_admin_db_value(row), sanitize_text=False)
+            for row in results
+        ]
+        return {
+            "columns": columns,
+            "rows": sanitized_rows,
+            "count": len(results),
+        }
     except sqlite3.Error as e:
+        is_auth_denied = (
+            authorizer_denied
+            or getattr(e, "sqlite_errorcode", None) == sqlite3.SQLITE_AUTH
+        )
+        if is_auth_denied:
+            logger.warning(
+                "Admin DB query blocked by SQLite authorizer for %s (sql_hash=%s): %s",
+                username,
+                sql_hash[:12],
+                e,
+            )
         # Any sqlite3 error, not only an operational one: a malformed statement
         # (``SELECT ?`` raises ``ProgrammingError``) is an attempt too, so it
         # leaves a failure row and the same 400 the client expects.
         await record_audit(
             action="admin.db_query",
             actor=username,
-            message=f"Admin '{username}' admin chat DB query failed",
+            message=(
+                f"Admin '{username}' admin chat DB query "
+                + ("denied" if is_auth_denied else "failed")
+            ),
             target_type="database",
-            outcome="failure",
-            details={"sql_hash": sql_hash},
+            outcome="denied" if is_auth_denied else "failure",
+            details=(
+                {"sql_hash": sql_hash, "reason": "not_authorized"}
+                if is_auth_denied
+                else {"sql_hash": sql_hash}
+            ),
             request=request,
         )
         raise HTTPException(status_code=400, detail=f"SQL Error: {e}")
     finally:
+        conn.set_authorizer(None)
         conn.close()
 
 
@@ -28496,6 +28624,156 @@ def _cleanup_admin_artifacts(username: str) -> DeleteResult:
     return reclaimed
 
 
+_ADMIN_ARTIFACT_META_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:;"
+)
+_ADMIN_ARTIFACT_HTTP_CSP = f"{_ADMIN_ARTIFACT_META_CSP} sandbox"
+_ADMIN_ARTIFACT_CSP_META_TAG = (
+    f'<meta http-equiv="Content-Security-Policy" content="{_ADMIN_ARTIFACT_META_CSP}">'
+)
+_HTML_STRIP_WITH_CONTENT_TAGS: frozenset[str] = frozenset(
+    {"script", "iframe", "object", "applet"}
+)
+_HTML_STRIP_VOID_TAGS: frozenset[str] = frozenset({"embed", "base", "link"})
+_HTML_BLOCKED_META_HTTP_EQUIV: frozenset[str] = frozenset(
+    {"refresh", "content-security-policy", "set-cookie"}
+)
+_HTML_URL_ATTRS: frozenset[str] = frozenset(
+    {"href", "src", "action", "formaction", "xlink:href", "poster", "data"}
+)
+_HTML_DANGEROUS_URL_PREFIXES: tuple[str, ...] = (
+    "javascript:",
+    "vbscript:",
+    "data:text/html",
+    "data:application/xhtml+xml",
+)
+_HTML_ASCII_CTRL_WS_RE = re.compile(r"[\x00-\x20]+")
+
+
+def _is_dangerous_html_url(value: str) -> bool:
+    normalized = _HTML_ASCII_CTRL_WS_RE.sub("", value).lower()
+    return normalized.startswith(_HTML_DANGEROUS_URL_PREFIXES)
+
+
+class _AdminReportHTMLSanitizer(HTMLParser):
+    """Strip active HTML constructs and inject a strict CSP meta tag (#606)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self._parts: list[str] = []
+        self._skip_stack: list[str] = []
+        self._csp_injected = False
+        self._doctype_end_idx: int | None = None
+
+    def _is_blocked_meta(self, attrs: list[tuple[str, str | None]]) -> bool:
+        for name, value in attrs:
+            if (
+                name.lower() == "http-equiv"
+                and (value or "").strip().lower() in _HTML_BLOCKED_META_HTTP_EQUIV
+            ):
+                return True
+        return False
+
+    def _filter_attrs(self, attrs: list[tuple[str, str | None]]) -> str:
+        rendered: list[str] = []
+        for raw_name, value in attrs:
+            name = raw_name.lower()
+            if name.startswith("on") or name == "srcdoc":
+                continue
+            if (
+                value is not None
+                and name in _HTML_URL_ATTRS
+                and _is_dangerous_html_url(value)
+            ):
+                continue
+            if value is None:
+                rendered.append(f" {name}")
+            else:
+                rendered.append(f' {name}="{html.escape(value, quote=True)}"')
+        return "".join(rendered)
+
+    def handle_decl(self, decl: str) -> None:
+        if self._skip_stack:
+            return
+        self._parts.append(f"<!{decl}>")
+        if self._doctype_end_idx is None and decl.lstrip().lower().startswith(
+            "doctype"
+        ):
+            self._doctype_end_idx = len(self._parts)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lower = tag.lower()
+        if lower in _HTML_STRIP_WITH_CONTENT_TAGS:
+            self._skip_stack.append(lower)
+            return
+        if self._skip_stack:
+            return
+        if lower in _HTML_STRIP_VOID_TAGS:
+            return
+        if lower == "meta" and self._is_blocked_meta(attrs):
+            return
+        self._parts.append(f"<{lower}{self._filter_attrs(attrs)}>")
+        if lower == "head" and not self._csp_injected:
+            self._parts.append(_ADMIN_ARTIFACT_CSP_META_TAG)
+            self._csp_injected = True
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lower = tag.lower()
+        if self._skip_stack:
+            return
+        if lower in _HTML_STRIP_WITH_CONTENT_TAGS or lower in _HTML_STRIP_VOID_TAGS:
+            return
+        if lower == "meta" and self._is_blocked_meta(attrs):
+            return
+        self._parts.append(f"<{lower}{self._filter_attrs(attrs)} />")
+
+    def handle_endtag(self, tag: str) -> None:
+        lower = tag.lower()
+        if self._skip_stack:
+            if lower in self._skip_stack:
+                while self._skip_stack:
+                    if self._skip_stack.pop() == lower:
+                        break
+            return
+        if lower in _HTML_STRIP_WITH_CONTENT_TAGS or lower in _HTML_STRIP_VOID_TAGS:
+            return
+        self._parts.append(f"</{lower}>")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_stack:
+            return
+        self._parts.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        if self._skip_stack:
+            return
+        self._parts.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if self._skip_stack:
+            return
+        self._parts.append(f"&#{name};")
+
+    def handle_comment(self, data: str) -> None:
+        if self._skip_stack:
+            return
+        self._parts.append(f"<!--{data}-->")
+
+    def render(self) -> str:
+        if not self._csp_injected:
+            insert_at = self._doctype_end_idx or 0
+            self._parts.insert(insert_at, _ADMIN_ARTIFACT_CSP_META_TAG)
+        return "".join(self._parts)
+
+
+def _sanitize_admin_report_html(raw_html: str) -> str:
+    """Sanitize an admin chat HTML report before saving it to disk (#606)."""
+    parser = _AdminReportHTMLSanitizer()
+    parser.feed(raw_html)
+    parser.close()
+    return parser.render()
+
+
 class SaveArtifactRequest(BaseModel):
     html_content: str = Field(..., min_length=1, max_length=5_000_000)
     filename: str = Field(..., min_length=1, max_length=255)
@@ -28520,6 +28798,8 @@ async def save_admin_chat_artifact(
     if not safe_filename.endswith(".html"):
         safe_filename += ".html"
 
+    sanitized_html = _sanitize_admin_report_html(body.html_content)
+
     artifact_id = str(uuid.uuid4())
     artifacts_dir = _get_admin_artifacts_dir(username)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -28528,16 +28808,17 @@ async def save_admin_chat_artifact(
     artifact_path = artifacts_dir / f"{artifact_id}.html"
     try:
         await asyncio.to_thread(
-            artifact_path.write_text, body.html_content, encoding="utf-8"
+            artifact_path.write_text, sanitized_html, encoding="utf-8"
         )
     except OSError as exc:
         logger.exception("Failed to save artifact")
         raise HTTPException(status_code=500, detail="Failed to save artifact") from exc
 
     logger.info(
-        "Admin chat: saved artifact %s (%d chars) for %s",
+        "Admin chat: saved artifact %s (%d chars, sanitized=%d chars) for %s",
         artifact_id,
         len(body.html_content),
+        len(sanitized_html),
         username,
     )
 
@@ -28584,6 +28865,8 @@ async def get_admin_chat_artifact(
         media_type="text/html",
         headers={
             "Content-Disposition": f'attachment; filename="{download_filename}"',
+            "Content-Security-Policy": _ADMIN_ARTIFACT_HTTP_CSP,
+            "X-Content-Type-Options": "nosniff",
         },
     )
 
