@@ -34,6 +34,11 @@ PROW_ARTIFACTS_MAX_SIZE_MB = 50
 PROW_ARTIFACT_MAX_FILE_SIZE_MB = 10
 PROW_ARTIFACTS_MAX_OBJECTS = 5_000
 
+# Upper bound (in MB) for per-artifact Jenkins size cap (``jenkins_artifacts_max_size_mb``).
+# Combined with ``EXTRACT_SIZE_MULTIPLIER`` (10x), this bounds peak extracted artifact
+# storage per build to 20 GiB and prevents unbounded per-request memory/disk overrides.
+JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX = 2048
+
 # Valid values for the explicit ``jira_auth_mode`` setting.
 JIRA_AUTH_MODES = ("oauth", "basic", "pat", "atst")
 
@@ -700,10 +705,11 @@ class Settings(BaseSettings):
     jenkins_artifacts_max_size_mb: int = Field(
         default=500,
         gt=0,
+        le=JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX,
         description=(
-            "Size cap, in MB, for one Jenkins artifact. A larger artifact is "
-            "skipped, not truncated; every artifact is capped on its own, so "
-            "one build can download more than this in total."
+            "Size cap, in MB, for one Jenkins artifact (1–2048). A larger "
+            "artifact is skipped, not truncated; total extracted artifact "
+            "disk usage for a build is cumulatively capped at 10x this limit."
         ),
     )
 

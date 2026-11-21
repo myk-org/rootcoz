@@ -2797,6 +2797,14 @@ def _reconstruct_from_params(
     for field in settings_fields:
         if field in params:
             overrides[field] = params[field]
+    if (
+        "jenkins_artifacts_max_size_mb" in overrides
+        and overrides["jenkins_artifacts_max_size_mb"] is not None
+    ):
+        overrides["jenkins_artifacts_max_size_mb"] = min(
+            int(overrides["jenkins_artifacts_max_size_mb"]),
+            base_settings.jenkins_artifacts_max_size_mb,
+        )
 
     # Tests repo URL — use `is not None` so an explicit empty string
     # (clearing the field) is preserved instead of silently dropped.
@@ -5524,13 +5532,25 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         "ai_call_timeout",
         "max_concurrent_ai_calls",
         "enable_jira",
-        "jenkins_artifacts_max_size_mb",
         "get_job_artifacts",
     ]
     for field in direct_fields:
         value = getattr(body, field, None)
         if value is not None:
             overrides[field] = value
+
+    req_artifacts_max_size = getattr(body, "jenkins_artifacts_max_size_mb", None)
+    if req_artifacts_max_size is not None:
+        if req_artifacts_max_size > settings.jenkins_artifacts_max_size_mb:
+            logger.warning(
+                "Capping request jenkins_artifacts_max_size_mb (%d MB) to "
+                "server limit (%d MB)",
+                req_artifacts_max_size,
+                settings.jenkins_artifacts_max_size_mb,
+            )
+        overrides["jenkins_artifacts_max_size_mb"] = min(
+            req_artifacts_max_size, settings.jenkins_artifacts_max_size_mb
+        )
 
     # peer_analysis_max_rounds has a non-None default in the model;
     # only apply as override when explicitly sent by the caller.

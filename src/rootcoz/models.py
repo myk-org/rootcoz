@@ -25,6 +25,7 @@ from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
 from rootcoz import get_child_logger
 from rootcoz.config import (
+    JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX,
     atlassian_cloud_id_error,
     jira_site_url_error,
     validate_tests_repo_url,
@@ -456,9 +457,15 @@ class _JenkinsParamsMixin(BaseModel):
         default=None,
         description="Jenkins API request timeout in seconds (overrides JENKINS_TIMEOUT env var)",
     )
-    jenkins_artifacts_max_size_mb: Annotated[int, Field(gt=0)] | None = Field(
+    jenkins_artifacts_max_size_mb: (
+        Annotated[int, Field(gt=0, le=JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX)] | None
+    ) = Field(
         default=None,
-        description="Maximum Jenkins artifacts size in MB (overrides JENKINS_ARTIFACTS_MAX_SIZE_MB env var)",
+        description=(
+            "Maximum Jenkins artifacts size in MB "
+            f"(1–{JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX}; capped at the server "
+            "JENKINS_ARTIFACTS_MAX_SIZE_MB limit)"
+        ),
     )
     get_job_artifacts: bool | None = Field(
         default=None,

@@ -808,6 +808,12 @@ class JenkinsSource(CISource):
             if key in params and params[key] not in (None, ""):
                 param_overrides[key] = params[key]
 
+        if settings is not None and "jenkins_artifacts_max_size_mb" in param_overrides:
+            param_overrides["jenkins_artifacts_max_size_mb"] = min(
+                int(param_overrides["jenkins_artifacts_max_size_mb"]),
+                settings.jenkins_artifacts_max_size_mb,
+            )
+
         if settings is not None and settings.jenkins_url:
             effective_settings = (
                 settings.model_copy(update=param_overrides)
