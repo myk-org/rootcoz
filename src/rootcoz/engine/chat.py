@@ -38,7 +38,6 @@ from rootcoz.temp_paths import (
     delete_tree,
     reusable_path_lock,
     sanitize_path_part,
-    unlink_legacy_http_tools_dump,
     workspace_lock,
 )
 from rootcoz.utils import single_line_diagnostic
@@ -1363,8 +1362,6 @@ def cleanup_chat_workspace(
                 if item.is_symlink():
                     total = total.plus(_safe_remove_symlink(item))
             total = total.plus(delete_tree(workspace))
-        for target in targets:
-            unlink_legacy_http_tools_dump(target)
     logger.info(f"Deleted chat workspace for job {job_id}")
     return total
 

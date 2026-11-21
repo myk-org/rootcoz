@@ -296,6 +296,9 @@ _GENERATED_SECRET_KEYS: list[tuple[str, ...]] = [
     ("encryptionKey",),
     ("ai", "geminiApiKey"),
     ("ai", "anthropicApiKey"),
+    # Cleanup-only: scrub legacy pre-#622 Cursor secrets even if setup aborts mid-run.
+    ("ai", "cursor", "apiKey"),
+    ("ai", "cursor", "authJson"),
     ("ai", "vertex", "serviceAccountKey"),
 ]
 

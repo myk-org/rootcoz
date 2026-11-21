@@ -222,40 +222,6 @@ def _unlink_regular_in_dir(dir_fd: int, name: str) -> bool:
     return True
 
 
-def unlink_legacy_http_tools_dump(workspace: Path) -> bool:
-    """Safely unlink a pre-#622 ``.<workspace.name>.rootcoz-http-tools.json`` sibling.
-
-    Opens ``workspace.parent`` with ``O_NOFOLLOW | O_DIRECTORY`` and unlinks the
-    sibling relative to that descriptor only when it is a regular file, ignoring
-    missing parents/files so upgraded hosts purge stale credential dumps safely.
-    """
-    name = f".{workspace.name}{LEGACY_HTTP_TOOLS_DUMP_SUFFIX}"
-    try:
-        dir_fd = os.open(
-            workspace.parent,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-        )
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
-        logger.debug(
-            "cleanup: could not open parent %s for legacy dump %r (%s)",
-            workspace.parent,
-            name,
-            type(exc).__name__,
-        )
-        return False
-    try:
-        removed = _unlink_regular_in_dir(dir_fd, name)
-    finally:
-        os.close(dir_fd)
-    if removed:
-        logger.debug(
-            "cleanup: unlinked legacy HTTP tools dump %s/%s", workspace.parent, name
-        )
-    return removed
-
-
 def purge_legacy_http_tools_dumps(directory: Path) -> int:
     """Safely unlink all regular ``.*.rootcoz-http-tools.json`` files directly under *directory*."""
     try:

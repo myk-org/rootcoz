@@ -804,3 +804,46 @@ def test_resolve_output_paths_creates_dir() -> None:
         assert gen == base / setup._GENERATED_FILENAME
         assert sec == base / setup._SECRETS_FILENAME
         assert stat.S_IMODE(base.stat().st_mode) == 0o700
+
+
+def test_main_scrubs_legacy_cursor_secrets_before_ai_prompts_complete() -> None:
+    """Legacy pre-#622 Cursor secrets in values.generated.yaml are scrubbed even if setup aborts mid-run."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir)
+        gen = out / setup._GENERATED_FILENAME
+        meta = out / setup._SETUP_META_FILENAME
+        setup._write_values(meta, {"release": "r", "namespace": "n"}, secret=False)
+        setup._write_values(
+            gen,
+            {
+                "route": {"enabled": False},
+                "ingress": {"enabled": False, "tls": {"enabled": False}},
+                "ai": {
+                    "provider": "cursor",
+                    "cursor": {
+                        "apiKey": "legacy-cursor-key",  # pragma: allowlist secret
+                        "authJson": {
+                            "accessToken": "legacy-tok"  # pragma: allowlist secret
+                        },
+                    },
+                },
+            },
+            secret=False,
+        )
+        user_inputs = iter(["", "", "clusterip"])
+        with (
+            patch(
+                "sys.argv",
+                ["helm-setup.py", "--skip-helm", "--output-dir", str(out)],
+            ),
+            patch("builtins.input", side_effect=user_inputs),
+            patch.object(setup, "_collect_ai", side_effect=ValueError("aborted")),
+            patch("shutil.which", return_value=None),
+            pytest.raises(SystemExit),
+        ):
+            setup.main()
+
+        loaded = yaml.safe_load(gen.read_text())
+        cursor_cfg = loaded.get("ai", {}).get("cursor", {})
+        assert "apiKey" not in cursor_cfg
+        assert "authJson" not in cursor_cfg
