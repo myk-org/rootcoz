@@ -261,3 +261,50 @@ def test_approval_can_grant_access(client):
         ]
         is True
     )
+
+
+def test_disabled_user_loses_server_provider_grant_and_reenable_restores(client):
+    """Disabling revokes live server-provider grants; re-enabling restores them (#619)."""
+    from rootcoz import ai_client
+
+    admin = {"Authorization": "Bearer grant-bootstrap-key"}
+    # Keep a second active DB admin so set_user_disabled does not hit last_admin guard.
+    assert (
+        client.post(
+            "/api/admin/users/create",
+            headers=admin,
+            json={"username": "backup-admin", "role": "admin"},
+        ).status_code
+        == 200
+    )
+    for username, role, grant in (
+        ("granted-user", "operator", True),
+        ("delegated-admin", "admin", False),
+    ):
+        resp = client.post(
+            "/api/admin/users/create",
+            headers=admin,
+            json={
+                "username": username,
+                "role": role,
+                "can_use_server_providers": grant,
+            },
+        )
+        assert resp.status_code == 200
+        assert asyncio.run(storage.can_user_use_server_providers(username)) is True
+
+        res = asyncio.run(storage.set_user_disabled(username, True))
+        assert res is not None and res["refused"] is None
+        assert asyncio.run(storage.can_user_use_server_providers(username)) is False
+
+        token = ai_client.ai_username.set(username)
+        try:
+            with pytest.raises(ValueError, match="administrator grant"):
+                asyncio.run(ai_client.require_server_provider_grant())
+        finally:
+            ai_client.ai_username.reset(token)
+
+        asyncio.run(storage.set_user_disabled(username, False))
+        assert asyncio.run(storage.can_user_use_server_providers(username)) is True
+
+    assert asyncio.run(storage.can_user_use_server_providers("admin")) is True

@@ -8,7 +8,7 @@ import os
 import socket
 import threading
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -20635,6 +20635,7 @@ class TestLogStream:
 
         request = AsyncMock()
         request.state.is_admin = True
+        request.state.username = "admin"
         request.is_disconnected = AsyncMock(return_value=False)
 
         response = await main_module.stream_logs(request, lines=100, level="")
@@ -22287,3 +22288,651 @@ class TestCoerceStoredAdditionalRepos:
             ]
         )
         assert [(r.name, r.ref, r.token) for r in repos] == [("keep", "main", "tok")]
+
+
+class TestUserLifecycleAndAdminSseRevocation:
+    """Regression tests for #603 (delete cleanup), #619 (disabled admin), #605 (SSE revocation)."""
+
+    @staticmethod
+    def _make_sse_request(
+        *,
+        username: str,
+        is_admin: bool = True,
+        session_token: str = "",
+        bearer_token: str = "",
+    ) -> Any:
+        cookies = {"rootcoz_session": session_token} if session_token else {}
+        headers = {"authorization": f"Bearer {bearer_token}"} if bearer_token else {}
+        state = SimpleNamespace(
+            username=username,
+            is_admin=is_admin,
+            role="admin" if is_admin else "reviewer",
+            auth_session_token=session_token,
+        )
+        return SimpleNamespace(
+            state=state,
+            cookies=cookies,
+            headers=headers,
+            client=None,
+            is_disconnected=AsyncMock(return_value=False),
+        )
+
+    async def test_delete_user_endpoint_cleans_admin_artifacts_and_prevents_reuse_leakage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DELETE /api/admin/users/{username} purges admin artifacts with owner scope id (#603)."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "delete_artifacts.db")
+        monkeypatch.setattr(
+            main_module, "_ADMIN_ARTIFACTS_BASE", tmp_path / "artifacts"
+        )
+        monkeypatch.setattr(main_module, "record_audit", AsyncMock())
+        monkeypatch.setattr(main_module, "_cleanup_revoked_ai_sessions", AsyncMock())
+        await storage.init_db()
+
+        await storage.create_admin_user("alice")
+        user_row = await storage.get_user_by_username("alice")
+        assert user_row is not None
+        owner_id = int(user_row["id"])
+
+        artifact_dir = main_module._get_admin_artifacts_dir("alice", owner_id=owner_id)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_file = artifact_dir / "report.html"
+        artifact_file.write_text("<h1>secret</h1>", encoding="utf-8")
+        await storage.add_chat_message(
+            "job-1", "user", "ALICE_PRIVATE", username="alice"
+        )
+        await storage.create_filter_preset(
+            "alice", "dashboard", "user", "AlicePreset", {"q": "1"}
+        )
+        await storage.create_filter_preset(
+            "alice", "dashboard", "server", "SharedPreset", {"q": "2"}
+        )
+
+        # A separate user named `user-<owner_id>` cannot collide with alice's
+        # `.by-id/<owner_id>` directory when deleted.
+        colliding_name = f"user-{owner_id}"
+        await storage.create_user(colliding_name, role="reviewer")
+        request = SimpleNamespace(
+            state=SimpleNamespace(username="admin", role="admin", is_admin=True)
+        )
+        await main_module.delete_user_endpoint(request, colliding_name)
+        assert artifact_file.exists()
+
+        cleanup_scopes: list[str] = []
+        orig_cleanup = main_module.cleanup_off_loop
+
+        async def _spy_cleanup(what: str, *steps: Any, **kwargs: Any) -> Any:
+            cleanup_scopes.append(what)
+            return await orig_cleanup(what, *steps, **kwargs)
+
+        monkeypatch.setattr(main_module, "cleanup_off_loop", _spy_cleanup)
+
+        # A failed delete must not destroy the user's artifacts prematurely.
+        orig_delete_user = storage.delete_user
+        monkeypatch.setattr(
+            storage,
+            "delete_user",
+            AsyncMock(side_effect=ValueError("cannot delete")),
+        )
+        with pytest.raises(HTTPException) as failed_del:
+            await main_module.delete_user_endpoint(request, "alice")
+        assert failed_del.value.status_code == 400
+        assert artifact_file.exists()
+        monkeypatch.setattr(storage, "delete_user", orig_delete_user)
+
+        result = await main_module.delete_user_endpoint(request, "alice")
+        assert result["deleted"] == "alice"
+        assert not artifact_dir.exists()
+        assert f"owner:{owner_id}" in cleanup_scopes
+
+        # Re-creating alice (even as admin) gets a new owner_id and cannot reach
+        # any surviving old artifact or collide with the prior owner's path.
+        await storage.create_admin_user("alice")
+        new_alice = await storage.get_user_by_username("alice")
+        assert new_alice is not None
+        new_owner_id = int(new_alice["id"])
+        assert new_owner_id != owner_id
+
+        # Simulate a surviving file in the old owner_id directory: new alice
+        # must get 404 when trying to download it.
+        surviving_id = "11111111-1111-4111-8111-111111111111"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / f"{surviving_id}.html").write_text(
+            "<h1>old-secret</h1>", encoding="utf-8"
+        )
+        alice_req = SimpleNamespace(
+            state=SimpleNamespace(username="alice", role="admin", is_admin=True)
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await main_module.get_admin_chat_artifact(surviving_id, alice_req)
+        assert exc_info.value.status_code == 404
+
+        # New alice's saved artifact lands under user-<new_owner_id>, isolated
+        # from any delayed cleanup of the old owner_id.
+        saved = await main_module.save_admin_chat_artifact(
+            main_module.SaveArtifactRequest(
+                html_content="<h1>new-alice</h1>", filename="fresh.html"
+            ),
+            alice_req,
+        )
+        main_module._cleanup_admin_artifacts("alice", owner_id=owner_id)
+        resp = await main_module.get_admin_chat_artifact(
+            saved["artifact_id"], alice_req
+        )
+        assert resp.body == b"<h1>new-alice</h1>"
+
+        assert await storage.get_chat_messages("job-1", username="alice") == []
+        presets = await storage.list_filter_presets("alice", "dashboard")
+        assert [(p["scope"], p["name"]) for p in presets] == [
+            ("server", "SharedPreset")
+        ]
+
+    async def test_ai_admin_role_current_rejects_disabled_and_deleted_db_admin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_ai_admin_role_current returns False for disabled/deleted DB admins, True for bootstrap (#619)."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "admin_role.db")
+        await storage.init_db()
+        await storage.create_admin_user("boss")
+        await storage.create_admin_user("backup-admin")
+
+        assert await main_module._ai_admin_role_current("boss") is True
+        assert await main_module._ai_admin_role_current("admin") is True
+
+        res = await storage.set_user_disabled("boss", True)
+        assert res is not None and res["refused"] is None
+        assert await main_module._ai_admin_role_current("boss") is False
+        assert await main_module._create_ai_auth_header("boss", is_admin=True) == ""
+
+        # _PendingFeed also unregisters a disabled admin immediately.
+        ev = asyncio.Event()
+        main_module._pending_count_listeners.add(ev)
+        feed = main_module._PendingFeed(ev, "boss", "navbar:pending-count")
+        try:
+            assert await feed.step() == "event: navbar:pending-count\ndata: 0\n\n"
+            assert ev not in main_module._pending_count_listeners
+            assert feed.event is None
+        finally:
+            main_module._pending_count_listeners.discard(ev)
+
+        await storage.set_user_disabled("boss", False)
+        assert await main_module._ai_admin_role_current("boss") is True
+
+        await storage.delete_user("boss")
+        assert await main_module._ai_admin_role_current("boss") is False
+        assert await main_module._ai_admin_role_current("admin") is True
+
+    async def test_stream_audit_events_closes_after_disable_without_emitting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """/api/admin/audit/stream stops without emitting post-disable events (#605)."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sse_audit.db")
+        await storage.init_db()
+        await storage.create_admin_user("admin2")
+        await storage.create_admin_user("backup-admin")
+        token = await storage.create_session("admin2", is_admin=True, role="admin")
+        request = self._make_sse_request(username="admin2", session_token=token)
+
+        response = await main_module.stream_audit_events(request)
+        body = response.body_iterator
+        try:
+            assert await asyncio.wait_for(anext(body), timeout=1) == ": connected\n\n"
+            pending = asyncio.create_task(anext(body))
+            await asyncio.sleep(0)
+
+            res = await storage.set_user_disabled("admin2", True)
+            assert res is not None and res["refused"] is None
+            main_module.notify_audit_event(
+                {"action": "secret.after_disable", "actor": "admin"}
+            )
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(pending, timeout=1)
+        finally:
+            await body.aclose()
+
+    async def test_stream_logs_closes_after_demotion_without_emitting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """/api/admin/logs/stream stops without emitting post-demotion log lines (#605)."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sse_logs.db")
+        monkeypatch.setattr(main_module, "_LOG_FILE", "")
+        monkeypatch.setattr(main_module, "record_audit", AsyncMock())
+        await storage.init_db()
+        await storage.create_admin_user("admin3")
+        token = await storage.create_session("admin3", is_admin=True, role="admin")
+        request = self._make_sse_request(username="admin3", session_token=token)
+
+        response = await main_module.stream_logs(request, lines=10, level="")
+        body = response.body_iterator
+        try:
+            assert await asyncio.wait_for(anext(body), timeout=1) == ": connected\n\n"
+            pending = asyncio.create_task(anext(body))
+            await asyncio.sleep(0)
+
+            await storage.change_user_role("admin3", "reviewer")
+            main_module._log_broadcast.publish(
+                "INFO sensitive-internal-log-after-demotion"
+            )
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(pending, timeout=1)
+        finally:
+            await body.aclose()
+
+    async def test_settings_and_token_usage_streams_close_on_delete_and_key_rotation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """settings/stream and token-usage/stream close on delete and API key rotation (#605)."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sse_settings.db")
+        await storage.init_db()
+        _, raw_key = await storage.create_admin_user("admin4")
+        _, raw_key_rot = await storage.create_admin_user("admin5")
+
+        # 1. settings_stream terminated when admin4 is deleted
+        req_settings = self._make_sse_request(username="admin4", bearer_token=raw_key)
+        resp_settings = await main_module.settings_stream(req_settings)
+        body_settings = resp_settings.body_iterator
+        pending = asyncio.create_task(anext(body_settings))
+        try:
+            await asyncio.sleep(0)
+            await storage.delete_user("admin4")
+            main_module._broadcast_settings_change()
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(pending, timeout=1)
+        finally:
+            if not pending.done():
+                pending.cancel()
+                with suppress(BaseException):
+                    await pending
+            await body_settings.aclose()
+
+        # 2. stream_token_usage terminated when admin5 rotates API key
+        req_usage = self._make_sse_request(username="admin5", bearer_token=raw_key_rot)
+        resp_usage = await main_module.stream_token_usage(req_usage)
+        body_usage = resp_usage.body_iterator
+        pending = asyncio.create_task(anext(body_usage))
+        try:
+            await asyncio.sleep(0)
+            await storage.rotate_own_key("admin5")
+            main_module.notify_token_usage_changed()
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(pending, timeout=1)
+        finally:
+            if not pending.done():
+                pending.cancel()
+                with suppress(BaseException):
+                    await pending
+            await body_usage.aclose()
+
+    async def test_admin_chat_and_multiplexed_admin_streams_close_on_revocation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """/api/admin/chat/stream and /api/stream admin topics close on disable/keepalive (#605)."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sse_mux.db")
+        await storage.init_db()
+        await storage.create_admin_user("admin6")
+        await storage.create_admin_user("backup-admin")
+        tok = await storage.create_session("admin6", is_admin=True, role="admin")
+
+        # 1. admin_chat_stream closes before emitting post-disable delta
+        req_chat = self._make_sse_request(username="admin6", session_token=tok)
+        resp_chat = await main_module.admin_chat_stream(req_chat)
+        body_chat = resp_chat.body_iterator
+        try:
+            assert (
+                await asyncio.wait_for(anext(body_chat), timeout=1) == ": connected\n\n"
+            )
+            pending = asyncio.create_task(anext(body_chat))
+            await asyncio.sleep(0)
+            res = await storage.set_user_disabled("admin6", True)
+            assert res is not None and res["refused"] is None
+            main_module.publish_chat_delta(
+                main_module._chat_channel_key(main_module.ADMIN_CHAT_JOB_ID, "admin6"),
+                {"id": 99, "delta": "SECRET_AFTER_DISABLE"},
+            )
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(pending, timeout=1)
+        finally:
+            await body_chat.aclose()
+
+        # 2. stream_multiplexed with admin topics closes without emitting post-disable event
+        await storage.set_user_disabled("admin6", False)
+        tok2 = await storage.create_session("admin6", is_admin=True, role="admin")
+        req_mux = self._make_sse_request(username="admin6", session_token=tok2)
+        resp_mux = await main_module.stream_multiplexed(
+            req_mux, topics="settings,token-usage"
+        )
+        body_mux = resp_mux.body_iterator
+        pending = asyncio.create_task(anext(body_mux))
+        try:
+            await asyncio.sleep(0)
+            res = await storage.set_user_disabled("admin6", True)
+            assert res is not None and res["refused"] is None
+            main_module._broadcast_settings_change()
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(pending, timeout=1)
+        finally:
+            if not pending.done():
+                pending.cancel()
+                with suppress(BaseException):
+                    await pending
+            await body_mux.aclose()
+
+        # 3. Quiet stream closes on heartbeat tick after disable (no keepalive leaked)
+        await storage.set_user_disabled("admin6", False)
+        tok3 = await storage.create_session("admin6", is_admin=True, role="admin")
+        req_quiet = self._make_sse_request(username="admin6", session_token=tok3)
+        with monkeypatch.context() as mp:
+            mp.setattr(main_module, "_SSE_KEEPALIVE_SECONDS", 0.05)
+            resp_quiet = await main_module.settings_stream(req_quiet)
+            body_quiet = resp_quiet.body_iterator
+            pending = asyncio.create_task(anext(body_quiet))
+            try:
+                await asyncio.sleep(0)
+                res = await storage.set_user_disabled("admin6", True)
+                assert res is not None and res["refused"] is None
+                # Under heavy parallel test load a pre-disable keepalive tick can
+                # finish while set_user_disabled is awaiting SQLite; at most that
+                # one pre-disable keepalive may arrive before the stream closes.
+                try:
+                    first_chunk = await asyncio.wait_for(pending, timeout=1)
+                except StopAsyncIteration:
+                    pass
+                else:
+                    assert first_chunk == ": keepalive\n\n"
+                    with pytest.raises(StopAsyncIteration):
+                        await asyncio.wait_for(anext(body_quiet), timeout=1)
+            finally:
+                if not pending.done():
+                    pending.cancel()
+                    with suppress(BaseException):
+                        await pending
+                await body_quiet.aclose()
+
+        # 4. Bootstrap admin stays valid and continues receiving events
+        monkeypatch.setenv("ADMIN_KEY", "bootstrap-sse-test-key")
+        from rootcoz.config import clear_settings_cache
+
+        clear_settings_cache()
+        try:
+            req_boot = self._make_sse_request(
+                username="admin", bearer_token="bootstrap-sse-test-key"
+            )
+            resp_boot = await main_module.settings_stream(req_boot)
+            body_boot = resp_boot.body_iterator
+            pending = asyncio.create_task(anext(body_boot))
+            try:
+                await asyncio.sleep(0)
+                main_module._broadcast_settings_change()
+                chunk = await asyncio.wait_for(pending, timeout=1)
+                assert chunk == "event: settings-changed\ndata: refresh\n\n"
+            finally:
+                if not pending.done():
+                    pending.cancel()
+                    with suppress(BaseException):
+                        await pending
+                await body_boot.aclose()
+        finally:
+            clear_settings_cache()
+
+    async def test_bearer_admin_with_starlette_state_ignores_stale_session_cookie(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Starlette State stores attributes in _state; Bearer admin must not fail against stale cookie."""
+        from starlette.datastructures import State
+
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "starlette_state.db")
+        await storage.init_db()
+        _, raw_key = await storage.create_admin_user("bearer-adm")
+
+        state = State()
+        state.username = "bearer-adm"
+        state.is_admin = True
+        state.role = "admin"
+        state.auth_session_token = ""
+        req = SimpleNamespace(
+            state=state,
+            cookies={"rootcoz_session": "expired-or-non-admin-cookie"},
+            headers={"authorization": f"Bearer {raw_key}"},
+            client=None,
+            is_disconnected=AsyncMock(return_value=False),
+        )
+        assert await main_module._is_admin_sse_authorized(req) is True
+
+    async def test_multiplexed_admin_stream_and_log_tail_block_revoked_initial_chunks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Revoked admins receive zero initial navbar counts and zero remaining log tail lines."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sse_initial.db")
+        monkeypatch.setattr(main_module, "record_audit", AsyncMock())
+        await storage.init_db()
+        await storage.create_admin_user("adm-init")
+        await storage.create_admin_user("backup-admin")
+        tok = await storage.create_session("adm-init", is_admin=True, role="admin")
+
+        # 1. Multiplexed navbar+settings stream revoked before first chunk yields nothing.
+        req_mux = self._make_sse_request(username="adm-init", session_token=tok)
+        resp_mux = await main_module.stream_multiplexed(
+            req_mux, topics="navbar,settings"
+        )
+        body_mux = resp_mux.body_iterator
+        try:
+            res = await storage.set_user_disabled("adm-init", True)
+            assert res is not None and res["refused"] is None
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(anext(body_mux), timeout=1)
+        finally:
+            await body_mux.aclose()
+
+        # 2. Log tail re-checks per line so mid-tail disable stops remaining tail lines.
+        await storage.set_user_disabled("adm-init", False)
+        tok2 = await storage.create_session("adm-init", is_admin=True, role="admin")
+        log_file = tmp_path / "server.log"
+        log_file.write_text(
+            "INFO line-1\nINFO line-2-secret\nINFO line-3-secret\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(main_module, "_LOG_FILE", str(log_file))
+        req_log = self._make_sse_request(username="adm-init", session_token=tok2)
+        resp_log = await main_module.stream_logs(req_log, lines=10, level="")
+        body_log = resp_log.body_iterator
+        try:
+            first = await asyncio.wait_for(anext(body_log), timeout=1)
+            assert "line-1" in first
+            res = await storage.set_user_disabled("adm-init", True)
+            assert res is not None and res["refused"] is None
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(anext(body_log), timeout=1)
+        finally:
+            await body_log.aclose()
+
+    async def test_admin_sse_auth_check_caches_burst_and_invalidates_on_revocation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bursts reuse cached auth result until revocation version bumps or TTL elapses."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sse_burst.db")
+        await storage.init_db()
+        await storage.create_admin_user("burst-adm")
+        await storage.create_admin_user("backup-admin")
+        tok = await storage.create_session("burst-adm", is_admin=True, role="admin")
+        req = self._make_sse_request(username="burst-adm", session_token=tok)
+
+        calls = 0
+        orig_check = main_module._is_admin_sse_authorized
+
+        async def _counting_check(r: Any) -> bool:
+            nonlocal calls
+            calls += 1
+            return await orig_check(r)
+
+        monkeypatch.setattr(main_module, "_is_admin_sse_authorized", _counting_check)
+
+        guard = main_module._make_admin_sse_auth_check(req, recheck_interval=60.0)
+        for _ in range(10):
+            assert await guard() is True
+        assert calls == 1
+
+        # Disabling bumps revocation version -> immediate re-check returns False.
+        res = await storage.set_user_disabled("burst-adm", True)
+        assert res is not None and res["refused"] is None
+        assert await guard() is False
+        assert calls == 2
+
+    async def test_migrate_legacy_admin_artifacts_preserves_active_and_purges_orphans(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Startup migration moves active DB admin reports into .by-id/<id> and drops orphans."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "migrate_artifacts.db")
+        monkeypatch.setattr(
+            main_module, "_ADMIN_ARTIFACTS_BASE", tmp_path / "artifacts"
+        )
+        await storage.init_db()
+        await storage.create_admin_user("existing-adm")
+        await storage.create_user("demoted-adm", role="reviewer")
+        await storage.create_admin_user("symlink-adm")
+        await storage.create_admin_user("a..b")
+        await storage.create_user("a_b", role="reviewer")
+        row = await storage.get_user_by_username("existing-adm")
+        assert row is not None
+
+        legacy_id = "22222222-2222-4222-8222-222222222222"
+        demoted_id = "33333333-3333-4333-8333-333333333333"
+        colliding_id = "44444444-4444-4444-8444-444444444444"
+        active_legacy = main_module._ADMIN_ARTIFACTS_BASE / "existing-adm"
+        active_legacy.mkdir(parents=True, exist_ok=True)
+        (active_legacy / f"{legacy_id}.html").write_text(
+            "<h1>migrated</h1>", encoding="utf-8"
+        )
+        demoted_legacy = main_module._ADMIN_ARTIFACTS_BASE / "demoted-adm"
+        demoted_legacy.mkdir(parents=True, exist_ok=True)
+        (demoted_legacy / f"{demoted_id}.html").write_text(
+            "<h1>demoted-report</h1>", encoding="utf-8"
+        )
+        orphan_legacy = main_module._ADMIN_ARTIFACTS_BASE / "deleted-adm"
+        orphan_legacy.mkdir(parents=True, exist_ok=True)
+        (orphan_legacy / "old.html").write_text("<h1>orphan</h1>", encoding="utf-8")
+        colliding_legacy = main_module._ADMIN_ARTIFACTS_BASE / "a_b"
+        colliding_legacy.mkdir(parents=True, exist_ok=True)
+        (colliding_legacy / f"{colliding_id}.html").write_text(
+            "<h1>ambiguous</h1>", encoding="utf-8"
+        )
+
+        outside_dir = tmp_path / "outside-secret"
+        outside_dir.mkdir()
+        outside_file = outside_dir / "keep.html"
+        outside_file.write_text("<h1>outside</h1>", encoding="utf-8")
+        symlink_legacy = main_module._ADMIN_ARTIFACTS_BASE / "symlink-adm"
+        symlink_legacy.symlink_to(outside_dir)
+
+        await main_module._migrate_legacy_admin_artifacts()
+
+        assert not active_legacy.exists()
+        assert not demoted_legacy.exists()
+        assert not orphan_legacy.exists()
+        assert not colliding_legacy.exists()
+        # Symlink target must never be moved or touched.
+        assert outside_file.exists()
+
+        # Ambiguous sanitized dir (`a..b` vs `a_b`) must never be assigned to a_b.
+        await storage.change_user_role("a_b", "admin")
+        ab_req = SimpleNamespace(
+            state=SimpleNamespace(username="a_b", role="admin", is_admin=True)
+        )
+        with pytest.raises(HTTPException) as ab_exc:
+            await main_module.get_admin_chat_artifact(colliding_id, ab_req)
+        assert ab_exc.value.status_code == 404
+
+        adm_req = SimpleNamespace(
+            state=SimpleNamespace(username="existing-adm", role="admin", is_admin=True)
+        )
+        resp = await main_module.get_admin_chat_artifact(legacy_id, adm_req)
+        assert resp.body == b"<h1>migrated</h1>"
+
+        # Demoted admin keeps migrated report when promoted back to admin.
+        await storage.change_user_role("demoted-adm", "admin")
+        demoted_req = SimpleNamespace(
+            state=SimpleNamespace(username="demoted-adm", role="admin", is_admin=True)
+        )
+        demoted_resp = await main_module.get_admin_chat_artifact(
+            demoted_id, demoted_req
+        )
+        assert demoted_resp.body == b"<h1>demoted-report</h1>"
+
+    async def test_navbar_only_admin_stream_clears_pending_count_on_logout_and_key_rotation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """navbar-only SSE clears pending-count on session logout and API key rotation (#605)."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "navbar_revoke.db")
+        await storage.init_db()
+        _, raw_key = await storage.create_admin_user("nav-adm")
+        await storage.create_user("pending-u1", status="pending", role="reviewer")
+        tok = await storage.create_session("nav-adm", is_admin=True, role="admin")
+
+        # 1. Multiplexed navbar-only stream clears pending count after session logout.
+        req_mux = self._make_sse_request(username="nav-adm", session_token=tok)
+        resp_mux = await main_module.stream_multiplexed(req_mux, topics="navbar")
+        body_mux = resp_mux.body_iterator
+        try:
+            initial = [
+                await asyncio.wait_for(anext(body_mux), timeout=1) for _ in range(3)
+            ]
+            assert initial[2] == "event: navbar:pending-count\ndata: 1\n\n"
+            pending = asyncio.create_task(anext(body_mux))
+            await asyncio.sleep(0)
+            await storage.delete_session(tok)
+            await storage.create_user("pending-u2", status="pending", role="reviewer")
+            main_module.notify_pending_count_changed()
+            cleared = await asyncio.wait_for(pending, timeout=1)
+            assert cleared == "event: navbar:pending-count\ndata: 0\n\n"
+        finally:
+            await body_mux.aclose()
+
+        # 2. Standalone navbar stream clears pending count after Bearer API key rotation.
+        req_nav = self._make_sse_request(username="nav-adm", bearer_token=raw_key)
+        resp_nav = await main_module.stream_navbar_counts(req_nav)
+        body_nav = resp_nav.body_iterator
+        try:
+            initial = [
+                await asyncio.wait_for(anext(body_nav), timeout=1) for _ in range(3)
+            ]
+            assert initial[2] == "event: pending-count\ndata: 2\n\n"
+            pending = asyncio.create_task(anext(body_nav))
+            await asyncio.sleep(0)
+            await storage.rotate_own_key("nav-adm")
+            await storage.create_user("pending-u3", status="pending", role="reviewer")
+            main_module.notify_pending_count_changed()
+            cleared = await asyncio.wait_for(pending, timeout=1)
+            assert cleared == "event: pending-count\ndata: 0\n\n"
+        finally:
+            await body_nav.aclose()
