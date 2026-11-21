@@ -2488,6 +2488,7 @@ async def _create_sidecar_session_raw(
     agent_dir: Any = None,
     custom_tools: Any = None,
     tools: Any = None,
+    extra_allowed_dirs: Sequence[Path] | None = None,
 ) -> str:
     """Create one sidecar session; a keyed one never goes through the library.
 
@@ -2495,6 +2496,19 @@ async def _create_sidecar_session_raw(
     error bodies on an HTTP failure, so every keyed session — user or server —
     POSTs ``/sessions`` itself and maps refusals in ``_create_with_refusal_mapping``.
     """
+    from rootcoz.engine.workspace_guard import (
+        install_workspace_path_guard,
+        needs_workspace_path_guard,
+    )
+
+    if needs_workspace_path_guard(tools):
+        if not cwd:
+            raise ValueError(
+                "Dedicated workspace cwd is required when filesystem or subagent tools are enabled"
+            )
+        install_workspace_path_guard(
+            Path(cwd), extra_allowed_dirs=extra_allowed_dirs or ()
+        )
     session_body: dict[str, Any] = {
         "provider": provider,
         "model": model,
@@ -2549,6 +2563,7 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
         "agent_dir": kwargs.get("agent_dir"),
         "custom_tools": kwargs.get("custom_tools"),
         "tools": kwargs.get("tools"),
+        "extra_allowed_dirs": kwargs.get("extra_allowed_dirs"),
     }
     from rootcoz.storage import (
         create_ai_session_with_source,
@@ -3041,10 +3056,11 @@ async def _call_user_session(
             provider=ai_provider,
             model=ai_model,
             system_prompt=kwargs.get("system_prompt") or "You are a helpful assistant.",
-            cwd=kwargs.get("cwd") or tempfile.gettempdir(),
+            cwd=kwargs.get("cwd"),
             agent_dir=kwargs.get("agent_dir"),
             custom_tools=kwargs.get("custom_tools"),
             tools=kwargs.get("tools"),
+            extra_allowed_dirs=kwargs.get("extra_allowed_dirs"),
             api_key=api_key,
         )
 
@@ -3085,11 +3101,12 @@ async def _call_ai(
             provider=ai_provider,
             model=ai_model,
             system_prompt=kwargs.get("system_prompt") or "You are a helpful assistant.",
-            cwd=kwargs.get("cwd") or tempfile.gettempdir(),
+            cwd=kwargs.get("cwd"),
             api_key=kwargs.get("api_key"),
             agent_dir=kwargs.get("agent_dir"),
             custom_tools=kwargs.get("custom_tools"),
             tools=kwargs.get("tools"),
+            extra_allowed_dirs=kwargs.get("extra_allowed_dirs"),
         )
 
     return await _run_session_prompt(

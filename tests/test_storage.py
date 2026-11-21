@@ -4653,3 +4653,16 @@ class TestPendingSurvivesShutdown:
             live = await storage.get_result("live")
             assert live["status"] == "failed"
             assert live["error"] == storage.RESTART_ERROR_MSG
+
+
+class TestUsernameValidationIssue607:
+    """Reject consecutive dots in usernames while keeping normal punctuation valid (#607)."""
+
+    @pytest.mark.parametrize("username", ["alice_1", "alice.1", "alice-1", "ALICE.1"])
+    def test_valid_usernames_accepted(self, username: str) -> None:
+        storage._validate_username(username)
+
+    @pytest.mark.parametrize("username", ["alice..1", "a..b", "alice...1", "ALICE..1"])
+    def test_consecutive_dots_rejected(self, username: str) -> None:
+        with pytest.raises(ValueError, match="Consecutive dots"):
+            storage._validate_username(username)

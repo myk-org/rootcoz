@@ -179,6 +179,16 @@ def sanitize_path_part(part: str) -> str:
     return part.replace("/", "_").replace("..", "_").replace("\\", "_")
 
 
+def user_dir_key(username: str) -> str:
+    """Collision-free, traversal-safe directory name for a username.
+
+    Canonicalizes with ``strip().lower()`` to match :func:`_normalize_username`
+    and hashes with SHA-256 so distinct accounts (e.g. ``alice_1`` and legacy
+    ``alice..1``) can never map to the same per-user directory.
+    """
+    return hashlib.sha256(username.strip().lower().encode("utf-8")).hexdigest()
+
+
 def delete_marker(path: Path) -> Path:
     """Marker written beside ``path`` while a delete of it is in flight.
 

@@ -1031,6 +1031,7 @@ def _bind_internal_call_ai(monkeypatch: pytest.MonkeyPatch, client: Any) -> Any:
 
 async def _internal_call(client, monkeypatch, prompt="hello", **kwargs):
     real_internal_call_ai = _bind_internal_call_ai(monkeypatch, client)
+    kwargs.setdefault("tools", [])
     return await real_internal_call_ai(
         prompt, ai_provider="openai", ai_model="model", **kwargs
     )
@@ -1629,6 +1630,7 @@ async def test_create_session_safely_binds_the_callers_key_generation(
                 provider="openai",
                 model="model",
                 system_prompt="sys",
+                tools=[],
                 server_api_key=old_key,
                 server_generation=old_generation,
             )
@@ -1733,7 +1735,7 @@ async def test_unreadable_credential_store_does_not_fail_the_turn(
                 bypass_duplicate_filter=True,
             ):
                 result = await call_ai_under_test(
-                    "prompt", ai_provider="openai", ai_model="model"
+                    "prompt", ai_provider="openai", ai_model="model", tools=[]
                 )
         finally:
             ai_client.ai_username.reset(token)
@@ -1849,7 +1851,7 @@ async def test_server_key_never_logged_when_sessions_creation_echoes_base64(
             caplog, logging.DEBUG, logger=("rootcoz.ai_client", "pi_sidecar_client")
         ):
             result = await real_call_ai_once(
-                "prompt", ai_provider="openai", ai_model="model"
+                "prompt", ai_provider="openai", ai_model="model", tools=[]
             )
         captured = caplog.text + capsys.readouterr().err
     finally:
@@ -1875,3 +1877,411 @@ def test_encoded_key_renderings_are_redacted() -> None:
         assert cleaned is not None
         assert rendering not in cleaned
         assert key not in cleaned
+
+
+# ---------------------------------------------------------------------------
+# Issue #612 — Workspace path guard for AI builtin fs & subagent tools
+# ---------------------------------------------------------------------------
+
+
+def _find_pi_coding_agent_entry() -> Path | None:
+    """Locate sidecar-helper's installed pi-coding-agent entrypoint (worktree-aware)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates = [
+        repo_root
+        / "sidecar-helper"
+        / "node_modules"
+        / "@earendil-works"
+        / "pi-coding-agent"
+        / "dist"
+        / "index.js",
+    ]
+    # Worktrees under <main>/.worktrees/<name> share the main checkout's node_modules.
+    if repo_root.parent.name == ".worktrees":
+        candidates.append(
+            repo_root.parent.parent
+            / "sidecar-helper"
+            / "node_modules"
+            / "@earendil-works"
+            / "pi-coding-agent"
+            / "dist"
+            / "index.js"
+        )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+class TestWorkspacePathGuardIssue612:
+    """Verify workspace confinement guard installation and fail-closed checks (#612)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tools",
+        [
+            list(ai_client.ANALYSIS_BUILTIN_TOOLS),
+            list(ai_client.CHAT_BUILTIN_TOOLS),
+            ["read"],
+            None,
+        ],
+    )
+    async def test_installs_guard_on_filesystem_enabled_sessions(
+        self, tmp_path: Path, tools
+    ) -> None:
+        from rootcoz.engine.workspace_guard import GUARD_FILENAME
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        client = AsyncMock()
+        client.create_session.return_value = "sid-guard"
+
+        sid = await ai_client._create_sidecar_session_raw(
+            client,
+            provider="openai",
+            model="m",
+            system_prompt="sys",
+            cwd=str(workspace),
+            tools=tools,
+        )
+        assert sid == "sid-guard"
+        guard_file = workspace / ".pi" / "extensions" / GUARD_FILENAME
+        assert guard_file.is_file()
+        assert not guard_file.is_symlink()
+        assert "rootcozPathGuard" in guard_file.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_overwrites_preexisting_guard_file(self, tmp_path: Path) -> None:
+        from rootcoz.engine.workspace_guard import GUARD_FILENAME
+
+        workspace = tmp_path / "ws"
+        ext_dir = workspace / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        guard_file = ext_dir / GUARD_FILENAME
+        guard_file.write_text("export default function evil() {}", encoding="utf-8")
+
+        client = AsyncMock()
+        client.create_session.return_value = "sid-overwrite"
+        await ai_client._create_sidecar_session_raw(
+            client,
+            provider="openai",
+            model="m",
+            system_prompt="sys",
+            cwd=str(workspace),
+            tools=["read"],
+        )
+        content = guard_file.read_text(encoding="utf-8")
+        assert "evil" not in content
+        assert "rootcozPathGuard" in content
+
+    @pytest.mark.asyncio
+    async def test_skips_guard_when_tools_empty(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        client = AsyncMock()
+        client.create_session.return_value = "sid-notools"
+
+        await ai_client._create_sidecar_session_raw(
+            client,
+            provider="openai",
+            model="m",
+            system_prompt="sys",
+            cwd=str(workspace),
+            tools=[],
+        )
+        assert not (workspace / ".pi").exists()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_cwd", [None, "", "/tmp"])
+    async def test_fails_closed_on_missing_or_bare_temp_cwd(
+        self, bad_cwd: str | None
+    ) -> None:
+        client = AsyncMock()
+        with pytest.raises(ValueError):
+            await ai_client._create_sidecar_session_raw(
+                client,
+                provider="openai",
+                model="m",
+                system_prompt="sys",
+                cwd=bad_cwd,
+                tools=["read"],
+            )
+        client.create_session.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fails_closed_on_tempfile_gettempdir(self) -> None:
+        import tempfile
+
+        from rootcoz.temp_paths import rootcoz_temp_base
+
+        client = AsyncMock()
+        for forbidden in (tempfile.gettempdir(), str(rootcoz_temp_base())):
+            with pytest.raises(ValueError):
+                await ai_client._create_sidecar_session_raw(
+                    client,
+                    provider="openai",
+                    model="m",
+                    system_prompt="sys",
+                    cwd=forbidden,
+                    tools=list(ai_client.CHAT_BUILTIN_TOOLS),
+                )
+        client.create_session.assert_not_awaited()
+
+    def test_refuses_symlinks_on_workspace_pi_extensions_and_guard(
+        self, tmp_path: Path
+    ) -> None:
+        from rootcoz.engine.workspace_guard import (
+            GUARD_FILENAME,
+            install_workspace_path_guard,
+        )
+
+        target = tmp_path / "outside"
+        target.mkdir()
+
+        # 1. Symlinked workspace
+        ws_link = tmp_path / "ws-link"
+        ws_link.symlink_to(target)
+        with pytest.raises(ValueError, match="symlink"):
+            install_workspace_path_guard(ws_link)
+
+        # 2. Symlinked .pi
+        ws_pi = tmp_path / "ws-pi"
+        ws_pi.mkdir()
+        (ws_pi / ".pi").symlink_to(target)
+        with pytest.raises(ValueError, match="symlink"):
+            install_workspace_path_guard(ws_pi)
+
+        # 3. Symlinked .pi/extensions
+        ws_ext = tmp_path / "ws-ext"
+        (ws_ext / ".pi").mkdir(parents=True)
+        (ws_ext / ".pi" / "extensions").symlink_to(target)
+        with pytest.raises(ValueError, match="symlink"):
+            install_workspace_path_guard(ws_ext)
+
+        # 4. Symlinked _rootcoz_path_guard.js
+        ws_file = tmp_path / "ws-file"
+        (ws_file / ".pi" / "extensions").mkdir(parents=True)
+        outside_file = target / "victim.js"
+        outside_file.write_text("original", encoding="utf-8")
+        (ws_file / ".pi" / "extensions" / GUARD_FILENAME).symlink_to(outside_file)
+        with pytest.raises(ValueError, match="symlink"):
+            install_workspace_path_guard(ws_file)
+        assert outside_file.read_text(encoding="utf-8") == "original"
+
+        # 5. Directory at _rootcoz_path_guard.js
+        ws_dir = tmp_path / "ws-dir"
+        (ws_dir / ".pi" / "extensions" / GUARD_FILENAME).mkdir(parents=True)
+        with pytest.raises(ValueError, match="directory"):
+            install_workspace_path_guard(ws_dir)
+
+    def test_node_default_resource_loader_enforces_workspace_confinement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Load the real generated guard via Pi DefaultResourceLoader + ExtensionRunner."""
+        import os
+        import shutil
+        import subprocess
+
+        pi_entry = _find_pi_coding_agent_entry()
+        if pi_entry is None or shutil.which("node") is None:
+            pytest.skip("sidecar-helper node_modules or node binary not available")
+
+        from rootcoz.engine.core import QUERY_MD_PATH
+        from rootcoz.engine.workspace_guard import install_workspace_path_guard
+
+        # Isolate temp root so trusted build-artifacts target lives inside tmp_path.
+        fake_tmp = tmp_path / "tmp"
+        fake_tmp.mkdir()
+        monkeypatch.setenv("TMPDIR", str(fake_tmp))
+        monkeypatch.setattr("tempfile.tempdir", str(fake_tmp))
+
+        workspace = fake_tmp / "workspace-main"
+        workspace.mkdir()
+        (workspace / "inside.txt").write_text("ok", encoding="utf-8")
+        subdir = workspace / "sub"
+        subdir.mkdir()
+        (subdir / "nested.txt").write_text("nested", encoding="utf-8")
+
+        # Sibling directory with matching prefix (prefix-confusion test)
+        sibling = fake_tmp / "workspace-main-sibling"
+        sibling.mkdir()
+        (sibling / "secret.txt").write_text("secret", encoding="utf-8")
+
+        # Trusted build-artifacts symlink + an evil symlink inside it
+        trusted_artifacts = fake_tmp / "prow-artifacts-abc123"
+        trusted_artifacts.mkdir()
+        (trusted_artifacts / "app.log").write_text("log line", encoding="utf-8")
+        (trusted_artifacts / "escape-from-artifacts").symlink_to("/etc/passwd")
+        (workspace / "build-artifacts").symlink_to(trusted_artifacts)
+
+        # Symlink escapes inside workspace
+        (workspace / "link-etc").symlink_to("/etc/passwd")
+        (workspace / "link-dir").symlink_to(sibling)
+        (workspace / "dangling-link").symlink_to(sibling / "does-not-exist")
+
+        install_workspace_path_guard(workspace)
+
+        script = r"""
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+const {
+  DefaultResourceLoader,
+  ExtensionRunner,
+  SessionManager,
+  SettingsManager,
+} = await import(pathToFileURL(process.env.PI_ENTRY).href);
+
+const workspace = process.env.WORKSPACE;
+const subdir = process.env.SUBDIR;
+const sibling = process.env.SIBLING;
+const queryMd = process.env.QUERY_MD;
+const agentDir = process.env.AGENT_DIR;
+
+const settingsManager = SettingsManager.inMemory();
+const loader = new DefaultResourceLoader({
+  cwd: workspace,
+  agentDir,
+  settingsManager,
+});
+await loader.reload();
+const extResult = loader.getExtensions();
+if (extResult.errors.length > 0) {
+  throw new Error(`Extension load errors: ${JSON.stringify(extResult.errors)}`);
+}
+const loadedGuard = extResult.extensions.some((e) =>
+  e.path.endsWith("_rootcoz_path_guard.js")
+);
+if (!loadedGuard) {
+  throw new Error("Guard extension was not discovered by DefaultResourceLoader");
+}
+
+const sessionManager = SessionManager.inMemory();
+const runner = new ExtensionRunner(
+  extResult.extensions,
+  extResult.runtime,
+  workspace,
+  sessionManager,
+  undefined,
+);
+
+let seq = 0;
+async function check(toolName, input) {
+  const res = await runner.emitToolCall({
+    type: "tool_call",
+    toolCallId: `tc-${++seq}`,
+    toolName,
+    input,
+  });
+  return Boolean(res && res.block);
+}
+
+const allowedCases = [
+  ["read", { path: "inside.txt" }],
+  ["read", { path: "./sub/nested.txt" }],
+  ["read", { path: "@inside.txt" }],
+  ["read", { path: path.join(workspace, "inside.txt") }],
+  ["read", { path: "build-artifacts/app.log" }],
+  ["read", { path: queryMd }],
+  ["ls", {}],
+  ["ls", { path: "." }],
+  ["ls", { path: "sub" }],
+  ["ls", { path: "build-artifacts" }],
+  ["grep", { pattern: "ok" }],
+  ["grep", { pattern: "nested", path: "sub" }],
+  ["find", { pattern: "*.txt" }],
+  ["find", { pattern: "*.txt", path: "sub" }],
+  ["subagent", { agent: "a", task: "t" }],
+  ["subagent", { agent: "a", task: "t", cwd: workspace }],
+];
+
+const blockedCases = [
+  // Subdir without .pi/extensions/_rootcoz_path_guard.js would drop the guard on spawned pi.
+  ["subagent", { agent: "a", task: "t", cwd: subdir }],
+  ["read", { path: "../workspace-main-sibling/secret.txt" }],
+  ["read", { path: path.join(sibling, "secret.txt") }],
+  ["read", { path: "/etc/passwd" }],
+  ["read", { path: "@/etc/passwd" }],
+  ["read", { path: "/data/rootcoz.db" }],
+  ["read", { path: "~/secret" }],
+  ["read", { path: "@~/secret" }],
+  ["read", { path: "~" }],
+  ["read", { path: "~root/x" }],
+  ["read", { path: "file:///etc/passwd" }],
+  ["read", { path: "link-etc" }],
+  ["read", { path: "link-dir/secret.txt" }],
+  ["read", { path: "link-dir/nonexistent.txt" }],
+  ["read", { path: "dangling-link" }],
+  ["read", { path: "build-artifacts/escape-from-artifacts" }],
+  ["read", { path: 123 }],
+  ["read", { path: null }],
+  ["read", { path: "" }],
+  ["ls", { path: ".." }],
+  ["ls", { path: "/etc" }],
+  ["ls", { path: "~/secret" }],
+  ["ls", { path: "~root" }],
+  ["ls", { path: "link-dir" }],
+  ["ls", { path: path.dirname(queryMd) }],
+  ["ls", { path: 42 }],
+  ["grep", { pattern: "root", path: "/etc/passwd" }],
+  ["grep", { pattern: "x", path: "../workspace-main-sibling" }],
+  ["grep", { pattern: "x", path: "link-dir" }],
+  ["grep", { pattern: "x", path: {} }],
+  ["find", { pattern: "*", path: "/tmp" }],
+  ["find", { pattern: "*", path: ".." }],
+  ["find", { pattern: "*", path: "link-dir" }],
+  ["find", { pattern: "*", path: ["."] }],
+  ["subagent", { agent: "a", task: "t", cwd: "/etc" }],
+  ["subagent", { agent: "a", task: "t", cwd: "../workspace-main-sibling" }],
+  ["subagent", { agent: "a", task: "t", cwd: sibling }],
+  ["subagent", { agent: "a", task: "t", cwd: "~/secret" }],
+  ["subagent", { agent: "a", task: "t", cwd: "link-dir" }],
+  ["subagent", { agent: "a", task: "t", cwd: 123 }],
+  ["subagent", { agent: "a", task: "t", cwd: "" }],
+  ["subagent", { tasks: [{ agent: "a", task: "t", cwd: "/etc" }] }],
+  ["subagent", { tasks: [{ agent: "a", task: "t", cwd: 99 }] }],
+  ["subagent", { chain: [{ agent: "a", task: "t", cwd: "/tmp" }] }],
+  ["subagent", { chain: [{ agent: "a", task: "t", cwd: null }] }],
+];
+
+const failures = [];
+for (const [tool, input] of allowedCases) {
+  if (await check(tool, input)) {
+    failures.push(`Expected ALLOWED but blocked: ${tool} ${JSON.stringify(input)}`);
+  }
+}
+for (const [tool, input] of blockedCases) {
+  if (!(await check(tool, input))) {
+    failures.push(`Expected BLOCKED but allowed: ${tool} ${JSON.stringify(input)}`);
+  }
+}
+if (failures.length > 0) {
+  console.error(failures.join("\n"));
+  process.exit(1);
+}
+console.log(`OK: ${allowedCases.length} allowed, ${blockedCases.length} blocked`);
+"""
+
+        agent_dir = tmp_path / "empty-agent-dir"
+        agent_dir.mkdir()
+        env = {
+            **os.environ,
+            "PI_ENTRY": str(pi_entry),
+            "WORKSPACE": str(workspace),
+            "SUBDIR": str(subdir),
+            "SIBLING": str(sibling),
+            "QUERY_MD": str(QUERY_MD_PATH.resolve()),
+            "AGENT_DIR": str(agent_dir),
+        }
+        proc = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert proc.returncode == 0, (
+            f"Node guard test failed (rc={proc.returncode}):\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+        assert proc.stdout.strip().startswith("OK:")

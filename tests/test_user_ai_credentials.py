@@ -591,7 +591,7 @@ async def test_real_sidecar_http_error_never_logs_user_key(
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             result = await real_call_ai(
-                "prompt", ai_provider="p", ai_model="m", session_id=session_id
+                "prompt", ai_provider="p", ai_model="m", session_id=session_id, tools=[]
             )
             assert not result.success
             logging.getLogger(__name__).error("AI failed: %s", result.text)
@@ -661,7 +661,7 @@ async def test_real_sidecar_http_error_never_logs_server_key(
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             result = await real_call_ai_once(
-                "prompt", ai_provider="p", ai_model="m", session_id=session_id
+                "prompt", ai_provider="p", ai_model="m", session_id=session_id, tools=[]
             )
             logging.getLogger(__name__).error(
                 "AI failure: %s / %s", result.text, result.error
@@ -855,7 +855,7 @@ async def test_keyed_prompt_empty_text_usage_never_logs_encoded_key(
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             result = await real_call_ai(
-                "prompt", ai_provider="p", ai_model="m", session_id=session_id
+                "prompt", ai_provider="p", ai_model="m", session_id=session_id, tools=[]
             )
             # Positive control: the capture does see these loggers.
             ai_client.logger.warning("capture control reached caplog")
@@ -950,7 +950,9 @@ async def test_real_sidecar_creation_encoded_error_never_logs_user_key(
     )
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
-            result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
+            result = await real_call_ai_once(
+                "prompt", ai_provider="p", ai_model="m", tools=[]
+            )
             # Positive control: the capture does see these loggers.
             ai_client.logger.warning("capture control reached caplog")
         assert not result.success
@@ -985,7 +987,9 @@ async def test_real_sidecar_creation_error_never_logs_user_key(
     )
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
-            result = await real_call_ai("prompt", ai_provider="p", ai_model="m")
+            result = await real_call_ai(
+                "prompt", ai_provider="p", ai_model="m", tools=[]
+            )
             logging.getLogger(__name__).error(
                 "AI failed: %s / %s", result.text, result.error
             )
@@ -1033,7 +1037,9 @@ async def test_real_sidecar_keyed_once_preserves_usage_and_cleans_up(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
     try:
-        result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
+        result = await real_call_ai_once(
+            "prompt", ai_provider="p", ai_model="m", tools=[]
+        )
         assert (result.success, result.text, result.session_id) == (True, "reply", None)
         assert result.usage.input_tokens == 7
         assert [r.method for r in requests] == ["POST", "POST", "DELETE"]
@@ -1266,7 +1272,9 @@ async def test_real_sidecar_success_echo_is_not_logged_or_persisted(
     )
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
-            result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
+            result = await real_call_ai_once(
+                "prompt", ai_provider="p", ai_model="m", tools=[]
+            )
             logging.getLogger(__name__).info("Analysis: %s", result.text)
         stored = tmp_path / "analysis.txt"
         stored.write_text(result.text)
@@ -1283,7 +1291,7 @@ async def test_real_sidecar_success_echo_is_not_logged_or_persisted(
 
 @pytest.mark.asyncio
 async def test_real_sidecar_failed_new_chat_prompt_deletes_session(
-    monkeypatch, caplog, mock_selected_key_generation
+    tmp_path, monkeypatch, caplog, mock_selected_key_generation
 ):
     secret = "user-test-key"  # pragma: allowlist secret
     requests = []
@@ -1315,6 +1323,7 @@ async def test_real_sidecar_failed_new_chat_prompt_deletes_session(
                 ai_provider="p",
                 ai_model="m",
                 build_prompt_fn=lambda: "system",
+                repo_path=tmp_path,
             )
             # Positive control: the capture does see these loggers.
             chat.logger.warning("capture control reached caplog")
@@ -1353,7 +1362,9 @@ async def test_failed_prompt_cleanup_error_keeps_session_without_logging(
     )
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
-            result = await real_call_ai("prompt", ai_provider="p", ai_model="m")
+            result = await real_call_ai(
+                "prompt", ai_provider="p", ai_model="m", tools=[]
+            )
             # Positive control: the capture does see these loggers.
             ai_client.logger.warning("capture control reached caplog")
         assert not result.success
@@ -1520,7 +1531,10 @@ async def test_chat_session_creation_and_resumed_turn(
     ai_client._selected_credential_source.set("user")
     assert (
         await chat._create_chat_session(
-            system_prompt="system", ai_provider="p", ai_model="m"
+            system_prompt="system",
+            ai_provider="p",
+            ai_model="m",
+            repo_path=tmp_path,
         )
         == "sid"
     )

@@ -1979,6 +1979,7 @@ async def test_create_session_safely_keeps_server_source_for_server_key(
                 provider="openai",
                 model="m",
                 system_prompt="test",
+                tools=[],
                 server_api_key=SECRET,
             )
             == "server-keyed-sid"

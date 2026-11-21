@@ -28469,9 +28469,9 @@ _ADMIN_ARTIFACTS_BASE = Path("/tmp/rootcoz-admin-artifacts")
 
 def _get_admin_artifacts_dir(username: str) -> Path:
     """Get the artifacts directory for an admin user."""
-    from rootcoz.temp_paths import sanitize_path_part
+    from rootcoz.temp_paths import user_dir_key
 
-    return _ADMIN_ARTIFACTS_BASE / sanitize_path_part(username)
+    return _ADMIN_ARTIFACTS_BASE / user_dir_key(username)
 
 
 def _cleanup_admin_artifacts(username: str) -> DeleteResult:

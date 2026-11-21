@@ -1785,3 +1785,27 @@ def _wait_for_analysis(client, job_id, cookies, timeout=10):
                 return
         time.sleep(0.2)
     raise TimeoutError(f"Analysis {job_id} did not complete within {timeout}s")
+
+
+class TestUsernameConsecutiveDotsRejected:
+    """Issue #607: reject usernames with '..' across registration and admin user creation."""
+
+    def test_register_rejects_consecutive_dots(self, client):
+        resp = client.post("/api/auth/register", json={"username": "alice..1"})
+        assert resp.status_code == 400
+        assert "consecutive dots" in resp.json()["detail"].lower()
+
+    def test_register_accepts_normal_punctuation(self, client):
+        for username in ("alice_1", "alice.1", "alice-1"):
+            resp = client.post("/api/auth/register", json={"username": username})
+            assert resp.status_code == 200, f"failed for {username}: {resp.text}"
+
+    def test_admin_create_user_rejects_consecutive_dots(self, client):
+        cookies = _admin_login(client)
+        resp = client.post(
+            "/api/admin/users/create",
+            json={"username": "alice..1", "role": "reviewer"},
+            cookies=cookies,
+        )
+        assert resp.status_code == 400
+        assert "consecutive dots" in resp.json()["detail"].lower()
