@@ -51,7 +51,7 @@ from rootcoz.sources.base import (
     write_console_output_file,
 )
 from rootcoz.token_tracking import child_usage_scope
-from rootcoz.url_utils import redact_urls_in_text
+from rootcoz.url_utils import redact_urls_in_text, strip_url_userinfo
 from rootcoz.utils import (
     JENKINS_CONNECTIVITY_EXCEPTIONS,
     is_jenkins_connectivity_error,
@@ -83,7 +83,8 @@ def build_jenkins_url(base_url: str, job_name: str, build_number: int) -> str:
     segments = job_name.split("/")
     encoded_segments = [_urlquote(segment, safe="") for segment in segments]
     job_path = "/job/".join(encoded_segments)
-    return f"{base_url.rstrip('/')}/job/{job_path}/{build_number}/"
+    clean_base = strip_url_userinfo(base_url).rstrip("/")
+    return f"{clean_base}/job/{job_path}/{build_number}/"
 
 
 def _extract_build_params(build_info: dict[str, Any]) -> list[dict[str, Any]]:
@@ -490,7 +491,8 @@ class JenkinsSource(CISource):
     def build_url(self) -> str:
         """Construct the Jenkins build URL."""
         job_path = "/job/".join(self.job_name.split("/"))
-        return f"{self.settings.jenkins_url.rstrip('/')}/job/{job_path}/{self.build_number}/"
+        clean_base = strip_url_userinfo(self.settings.jenkins_url).rstrip("/")
+        return f"{clean_base}/job/{job_path}/{self.build_number}/"
 
     async def fetch(self) -> CISourceResult:
         """Fetch build data from Jenkins and return normalized result.

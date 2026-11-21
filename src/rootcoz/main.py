@@ -405,6 +405,7 @@ from rootcoz.url_utils import (
     mask_url_credentials_in_text,
     mask_url_value,
     redact_urls_in_text,
+    sanitize_http_href,
     strip_nonprintable,
     strip_url_credentials,
     strip_url_userinfo,
@@ -15352,7 +15353,7 @@ async def _build_export_context(
     Raises:
         ValueError: Invalid child job parameters.
     """
-    base_url = _extract_base_url()
+    base_url = sanitize_http_href(_extract_base_url()).rstrip("/")
     report_url = f"{base_url}/results/{job_id}" if base_url else ""
     # The top-level job name, read before scoping replaces result_data with
     # the child subtree: it is the fallback key for the job metadata.
@@ -15364,7 +15365,7 @@ async def _build_export_context(
     result_data, scope_job, scope_build = _resolve_push_scope(
         result_data, child_job_name, child_build_number
     )
-    if scope_job:
+    if scope_job and report_url:
         anchor = f"child-{_urlquote(scope_job, safe='')}-{scope_build}"
         report_url = f"{report_url}#{anchor}"
 
@@ -15468,7 +15469,9 @@ async def _build_export_context(
         job_id=job_id,
         job_name=result_data.get("job_name", ""),
         build_number=str(resolve_display_build_id(result_data)),
-        jenkins_url=result_data.get("jenkins_url", ""),
+        jenkins_url=sanitize_http_href(
+            str(result_data.get("build_url") or result_data.get("jenkins_url") or "")
+        ),
         failures=failures_data,
         report_url=report_url,
         child_job_name=child_job_name,

@@ -1357,3 +1357,210 @@ class TestExtractBtsFields:
         )
         assert project == "org/repo"
         assert ticket == "42"
+
+
+class TestReportPortalUrlCredentialStripping:
+    """Regression tests for #600: never send URL userinfo to Report Portal."""
+
+    def test_find_launch_strips_userinfo_from_child_jenkins_url(self):
+        client = ReportPortalClient(
+            url="http://rp.example.com", token="tok", project="proj"
+        )
+        mock_session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "content": [{"id": 77}],
+            "page": {"totalPages": 1},
+        }
+        mock_session.get.return_value = mock_resp
+        mock_rp = MagicMock()
+        mock_rp.base_url_v1 = "http://rp.example.com/api/v1/proj"
+        client._rp_client = mock_rp
+        client._session = mock_session
+
+        launch_id = client.find_launch(
+            "child-suite",
+            "https://ci_user:ci_secret_pw@jenkins.example.com/job/child-suite/5/",  # pragma: allowlist secret
+        )
+        assert launch_id == 77
+        params = mock_session.get.call_args.kwargs["params"]
+        assert (
+            params["filter.cnt.description"]
+            == "https://jenkins.example.com/job/child-suite/5/"
+        )
+        assert "ci_secret_pw" not in str(params)
+
+    def test_find_launch_ambiguous_error_omits_userinfo(self):
+        from rootcoz.exporters.reportportal import AmbiguousLaunchError
+
+        client = ReportPortalClient(
+            url="http://rp.example.com", token="tok", project="proj"
+        )
+        mock_session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "content": [{"id": 1}, {"id": 2}],
+            "page": {"totalPages": 1},
+        }
+        mock_session.get.return_value = mock_resp
+        mock_rp = MagicMock()
+        mock_rp.base_url_v1 = "http://rp.example.com/api/v1/proj"
+        client._rp_client = mock_rp
+        client._session = mock_session
+
+        with pytest.raises(AmbiguousLaunchError) as exc_info:
+            client.find_launch(
+                "child-suite",
+                "https://ci_user:ci_secret_pw@jenkins.example.com/job/child-suite/5/",  # pragma: allowlist secret
+            )
+        assert (
+            exc_info.value.jenkins_url
+            == "https://jenkins.example.com/job/child-suite/5/"
+        )
+        assert "ci_secret_pw" not in str(exc_info.value)
+
+    def test_push_classifications_strips_userinfo_from_all_urls(self):
+        from rootcoz.models import (
+            AnalysisDetail,
+            FailureAnalysis,
+            JiraMatch,
+            ProductBugReport,
+        )
+
+        client = ReportPortalClient(
+            url="http://rp.example.com", token="tok", project="proj"
+        )
+        client.get_defect_type_locators = MagicMock(
+            return_value={
+                "PRODUCT_BUG": "pb001",
+                "AUTOMATION_BUG": "ab001",
+                "SYSTEM_ISSUE": "si001",
+                "TO_INVESTIGATE": "ti001",
+            }
+        )
+        mock_session = MagicMock()
+        mock_put = MagicMock()
+        mock_put.raise_for_status = MagicMock()
+        mock_put.content = b"{}"
+        mock_session.put.return_value = mock_put
+        mock_rp = MagicMock()
+        mock_rp.base_url_v1 = "http://rp.example.com/api/v1/proj"
+        client._rp_client = mock_rp
+        client._session = mock_session
+
+        failure = FailureAnalysis(
+            test_name="test_child_fail",
+            error="boom",
+            analysis=AnalysisDetail(
+                classification="PRODUCT BUG",
+                details="broken",
+                product_bug_report=ProductBugReport(
+                    jira_matches=[
+                        JiraMatch(
+                            key="PROJ-10",
+                            summary="bug",
+                            status="Open",
+                            url="https://ai_user:ai_secret@jira.example.com/browse/PROJ-10",  # pragma: allowlist secret
+                        )
+                    ]
+                ),
+            ),
+        )
+        matched = [({"id": 500, "name": "test_child_fail", "launchId": 77}, failure)]
+        result = client.push_classifications(
+            matched,
+            "https://rc_user:rc_secret@rootcoz.example.com/results/job-1",  # pragma: allowlist secret
+            tracked_in_links={
+                "test_child_fail": [
+                    {
+                        "tracked_in_url": "https://jira_user:jira_secret@jira.example.com/browse/PROJ-1",  # pragma: allowlist secret
+                        "tracked_in_type": "jira",
+                    }
+                ]
+            },
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert payload is not None
+        issue = payload["issue"]
+        assert "https://rootcoz.example.com/results/job-1" in issue["comment"]
+        ext_urls = [ei["url"] for ei in issue["externalSystemIssues"]]
+        assert ext_urls == [
+            "https://jira.example.com/browse/PROJ-10",
+            "https://jira.example.com/browse/PROJ-1",
+        ]
+        for secret in ("rc_secret", "ai_secret", "jira_secret"):
+            assert secret not in str(payload)
+
+    async def test_push_strips_userinfo_end_to_end(self):
+        from rootcoz.exporters.base import ExportContext
+
+        client = ReportPortalClient(
+            url="http://rp.example.com", token="tok", project="proj"
+        )
+        mock_session = MagicMock()
+
+        def _fake_get(url, params=None, **kwargs):
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            if url.endswith("/launch"):
+                resp.json.return_value = {
+                    "content": [{"id": 77}],
+                    "page": {"totalPages": 1},
+                }
+            elif url.endswith("/item"):
+                resp.json.return_value = {
+                    "content": [{"id": 500, "name": "test_child_fail", "launchId": 77}],
+                    "page": {"totalPages": 1},
+                }
+            else:
+                resp.json.return_value = {
+                    "subTypes": {"PRODUCT_BUG": [{"locator": "pb001"}]}
+                }
+            return resp
+
+        mock_put = MagicMock()
+        mock_put.raise_for_status = MagicMock()
+        mock_put.content = b"{}"
+        mock_session.get.side_effect = _fake_get
+        mock_session.put.return_value = mock_put
+        mock_rp = MagicMock()
+        mock_rp.base_url_v1 = "http://rp.example.com/api/v1/proj"
+        client._rp_client = mock_rp
+        client._session = mock_session
+
+        ctx = ExportContext(
+            job_id="job-rp-600",
+            job_name="child-suite",
+            build_number="5",
+            jenkins_url="https://ci_user:ci_secret_pw@jenkins.example.com/job/child-suite/5/",  # pragma: allowlist secret
+            failures=[
+                {
+                    "test_name": "test_child_fail",
+                    "error": "boom",
+                    "analysis": {"classification": "PRODUCT BUG", "details": "broken"},
+                }
+            ],
+            report_url="https://rc_user:rc_secret@rootcoz.example.com/results/job-rp-600",  # pragma: allowlist secret
+            tracked_in_links={
+                "test_child_fail": [
+                    {
+                        "tracked_in_url": "https://jira_user:jira_secret@jira.example.com/browse/PROJ-1",  # pragma: allowlist secret
+                        "tracked_in_type": "jira",
+                    }
+                ]
+            },
+        )
+        res = await client.push(ctx)
+        assert res.success is True
+        launch_call = mock_session.get.call_args_list[0]
+        assert (
+            launch_call.kwargs["params"]["filter.cnt.description"]
+            == "https://jenkins.example.com/job/child-suite/5/"
+        )
+        put_payload = mock_session.put.call_args.kwargs["json"]
+        for secret in ("ci_secret_pw", "rc_secret", "jira_secret"):
+            assert secret not in str(put_payload)
+            assert secret not in str(launch_call)

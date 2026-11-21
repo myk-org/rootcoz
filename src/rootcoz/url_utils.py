@@ -197,7 +197,8 @@ def strip_url_credentials(url: str) -> str:
 
 # git:// is a supported clone scheme (RepositoryManager.clone_into
 # allowlist: https/git only) — its URLs carry userinfo too (#361 Qodo r2).
-_URL_IN_TEXT = re.compile(r"(?:https?|git)://[^\s\"'<>`]+")
+# RFC 3986 §3.1 schemes are case-insensitive (HTTPS://, HTTP://, GIT://).
+_URL_IN_TEXT = re.compile(r"(?:https?|git)://[^\s\"'<>`]+", re.IGNORECASE)
 
 
 def strip_url_userinfo_in_text(text: str) -> str:
