@@ -292,6 +292,50 @@ class TestSearchGithubDuplicates:
         )
         assert results == []
 
+    async def test_strips_credentials_and_sanitizes_title_query(self):
+        """search_github_duplicates strips repo URL credentials and sanitizes qualifiers (#602, #608)."""
+        from rootcoz.bug_creation import search_github_duplicates
+
+        mock_response = httpx.Response(200, json={"total_count": 0, "items": []})
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_client
+
+            await search_github_duplicates(
+                title="OR repo:private-org/secret-repo status:500 login",
+                repo_url="https://user:gh-secret@github.com/org/repo?token=query-secret",  # pragma: allowlist secret
+                github_token=_TEST_GITHUB_TOKEN,
+            )
+
+        query = mock_client.get.call_args.kwargs["params"]["q"]
+        assert query == '"status:500" login repo:org/repo is:issue'
+        assert "gh-secret" not in query
+        assert "query-secret" not in query
+        assert "private-org" not in query
+
+    async def test_masks_credentials_in_warning_on_bad_url(self, caplog):
+        """Unparseable credentialed URLs are masked in search_github_duplicates warning (#602)."""
+        import logging
+
+        from rootcoz.bug_creation import search_github_duplicates
+        from tests.conftest import capture_main_logs
+
+        with capture_main_logs(caplog, logging.WARNING, "rootcoz.bug_creation"):
+            results = await search_github_duplicates(
+                title="Login fails",
+                repo_url="https://user:gh-secret@gitlab.com/org/repo?token=query-secret",  # pragma: allowlist secret
+                github_token=_TEST_GITHUB_TOKEN,
+            )
+
+        assert results == []
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "***" in logged
+        assert "gh-secret" not in logged
+        assert "query-secret" not in logged
+
 
 def _mock_request() -> httpx.Request:
     """Create a dummy httpx.Request for use in mock responses."""

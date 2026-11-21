@@ -26,6 +26,7 @@ from rootcoz.models import (
     FailureAnalysis,
     ProductBugReport,
 )
+from rootcoz.url_utils import mask_stored_url, strip_url_credentials
 
 logger = get_child_logger(__name__)
 
@@ -570,10 +571,13 @@ def parse_github_repo_url(repo_url: str) -> tuple[str, str]:
     Raises ValueError if the URL cannot be parsed.
     """
     match = re.match(
-        r"(?:https?|git)://(?i:github\.com)/([^/]+)/([^/]+?)(?:\.git)?/?$", repo_url
+        r"(?:https?|git)://(?i:github\.com)/([^/?#]+)/([^/?#]+?)(?:\.git)?/?$",
+        repo_url,
     )
     if not match:
-        raise ValueError(f"Cannot parse GitHub repo URL: {repo_url}")
+        raise ValueError(
+            f"Cannot parse GitHub repo URL: {mask_stored_url(str(repo_url).strip())}"
+        )
     return match.group(1), match.group(2)
 
 
@@ -588,27 +592,30 @@ async def search_github_duplicates(
     Swallows all errors and returns [].
     """
     try:
-        owner, repo = parse_github_repo_url(repo_url)
+        owner, repo = parse_github_repo_url(strip_url_credentials(repo_url))
     except ValueError:
         logger.warning(
-            "Could not parse GitHub repo URL for duplicate search: %s", repo_url
+            "Could not parse GitHub repo URL for duplicate search: %s",
+            mask_stored_url(str(repo_url).strip()),
         )
+        return []
+
+    from rootcoz.github_issues import build_github_search_query
+
+    search_query = build_github_search_query([title], owner, repo)
+    if not search_query:
         return []
 
     headers: dict[str, str] = {"Accept": "application/vnd.github.v3+json"}
     if github_token:
         headers["Authorization"] = f"Bearer {github_token}"
 
-    # Use meaningful words from title as search query
-    query_words = title.split()
-    query = " ".join(query_words)
-
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
                 "https://api.github.com/search/issues",
                 params={
-                    "q": f"{query} repo:{owner}/{repo} is:issue",
+                    "q": search_query,
                     "per_page": 5,
                 },
                 headers=headers,
@@ -693,7 +700,7 @@ async def create_github_issue(
 
     Raises httpx.HTTPStatusError on failure.
     """
-    owner, repo = parse_github_repo_url(repo_url)
+    owner, repo = parse_github_repo_url(strip_url_credentials(repo_url))
 
     body = apply_ai_attribution(body, attribution or AiProvenance(ai_used=False))
 

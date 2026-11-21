@@ -316,6 +316,144 @@ class TestSearchGitHubIssues:
             headers = call_kwargs.kwargs.get("headers", {})
             assert headers["Authorization"] == f"Bearer {_TEST_GITHUB_TOKEN}"
 
+    async def test_strips_url_credentials_from_repo_url_before_search(self) -> None:
+        """Userinfo and query tokens in repo_url are stripped before searching (#602)."""
+        mock_response = httpx.Response(
+            200,
+            json={"items": []},
+            request=httpx.Request("GET", "https://api.github.com/search/issues"),
+        )
+
+        with patch("rootcoz.github_issues.httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            await search_github_issues(
+                ["timeout"],
+                "https://user:dummy-gh-secret@github.com/org/repo?token=dummy-query-secret",  # pragma: allowlist secret
+                _TEST_GITHUB_TOKEN,
+            )
+
+        query = mock_client.get.call_args.kwargs["params"]["q"]
+        assert "repo:org/repo" in query
+        assert "is:issue" in query
+        assert "dummy-gh-secret" not in query
+        assert "dummy-query-secret" not in query
+
+    async def test_unparseable_repo_url_masks_credentials_in_warning(
+        self, caplog
+    ) -> None:
+        """Unparseable credentialed repo URLs are masked in WARNING logs (#602)."""
+        from tests.conftest import capture_main_logs
+
+        with capture_main_logs(caplog, logging.WARNING, "rootcoz.github_issues"):
+            result = await search_github_issues(
+                ["timeout"],
+                "https://user:dummy-gh-secret@gitlab.com/org/repo?token=dummy-query-secret",  # pragma: allowlist secret
+            )
+
+        assert result == []
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "***" in logged
+        assert "dummy-gh-secret" not in logged
+        assert "dummy-query-secret" not in logged
+
+    async def test_neutralizes_qualifiers_boolean_operators_and_url_credentials(
+        self,
+    ) -> None:
+        """Injected GitHub qualifiers, boolean operators, and URL secrets are neutralized (#602, #608)."""
+        mock_response = httpx.Response(
+            200,
+            json={"items": []},
+            request=httpx.Request("GET", "https://api.github.com/search/issues"),
+        )
+
+        with patch("rootcoz.github_issues.httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            await search_github_issues(
+                [
+                    "OR",
+                    "AND",
+                    "NOT",
+                    "repo:private-org/secret-repo",
+                    "-repo:private-org/other-repo",
+                    'repo:"private-org/quoted-secret"',
+                    "org:other-org",
+                    "is:pr",
+                    "user:alice",
+                    "author:bob",
+                    'timeout" OR repo:private-org/breakout "',
+                    "https://user:kw-secret@example.com/api?token=kw-query-secret",  # pragma: allowlist secret
+                ],
+                "https://github.com/org/allowed-repo",
+                _TEST_GITHUB_TOKEN,
+            )
+
+        query = mock_client.get.call_args.kwargs["params"]["q"]
+        assert query.endswith("repo:org/allowed-repo is:issue")
+        prefix = query.removesuffix("repo:org/allowed-repo is:issue").strip()
+        assert "timeout" in prefix
+        assert '"https://example.com/api"' in prefix
+        assert "OR" not in prefix.split()
+        assert "AND" not in prefix.split()
+        assert "NOT" not in prefix.split()
+        assert "private-org" not in prefix
+        assert "other-org" not in prefix
+        assert "is:pr" not in prefix
+        assert "user:alice" not in prefix
+        assert "author:bob" not in prefix
+        assert "kw-secret" not in query
+        assert "kw-query-secret" not in query
+
+    async def test_preserves_benign_colon_tokens_and_normal_keywords(self) -> None:
+        """Benign error strings like status:500 and error:timeout stay searchable as quoted literals (#608)."""
+        mock_response = httpx.Response(
+            200,
+            json={"items": []},
+            request=httpx.Request("GET", "https://api.github.com/search/issues"),
+        )
+
+        with patch("rootcoz.github_issues.httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            await search_github_issues(
+                ["status:500", "error:timeout", "element not found login"],
+                "https://github.com/org/repo",
+                _TEST_GITHUB_TOKEN,
+            )
+
+        query = mock_client.get.call_args.kwargs["params"]["q"]
+        assert (
+            query
+            == '"status:500" "error:timeout" element not found login repo:org/repo is:issue'
+        )
+
+    async def test_returns_empty_without_http_call_when_all_keywords_sanitized_away(
+        self,
+    ) -> None:
+        """If every keyword was an injected operator/qualifier, skip the API request (#608)."""
+        with patch("rootcoz.github_issues.httpx.AsyncClient") as mock_cls:
+            result = await search_github_issues(
+                ["OR", "repo:private-org/secret-repo", "org:other-org", "is:pr"],
+                "https://github.com/org/repo",
+                _TEST_GITHUB_TOKEN,
+            )
+
+        assert result == []
+        mock_cls.assert_not_called()
+
 
 class TestCollectCodeFixReports:
     """Tests for _collect_code_fix_reports."""
@@ -583,6 +721,58 @@ class TestEnrichWithTestsRepoMatches:
         assert len(failure2.analysis.code_fix.tests_repo_matches) == 1
         assert failure1.analysis.code_fix.tests_repo_matches[0].number == 5
         assert failure2.analysis.code_fix.tests_repo_matches[0].number == 5
+
+    async def test_sanitizes_injected_keywords_and_credentialed_repo_url(self) -> None:
+        """End-to-end: enrich_with_tests_repo_matches strips URL creds and sanitizes qualifiers (#602, #608)."""
+        env = {
+            **_BASE_ENV,
+            "TESTS_REPO_URL": "https://user:repo-secret@github.com/org/test-repo?token=query-secret",  # pragma: allowlist secret
+            "GITHUB_TOKEN": _TEST_GITHUB_TOKEN,
+        }
+        failure = FailureAnalysis(
+            test_name="test_selector",
+            error="AssertionError",
+            analysis=AnalysisDetail(
+                classification="CODE ISSUE",
+                details="Outdated selector",
+                code_fix=CodeFix(
+                    file="tests/test_ui.py",
+                    line="10",
+                    change="Update selector",
+                    tests_repo_search_keywords=[
+                        "org:private-org",
+                        "OR",
+                        "repo:private-org/secret-repo",
+                        "status:500",
+                        "selector",
+                    ],
+                ),
+            ),
+        )
+        mock_response = httpx.Response(
+            200,
+            json={"items": []},
+            request=httpx.Request("GET", "https://api.github.com/search/issues"),
+        )
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("rootcoz.github_issues.httpx.AsyncClient") as mock_cls,
+        ):
+            settings = Settings(_env_file=None)
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            await enrich_with_tests_repo_matches([failure], settings)
+
+        query = mock_client.get.call_args.kwargs["params"]["q"]
+        assert query == 'selector "status:500" repo:org/test-repo is:issue'
+        assert "repo-secret" not in query
+        assert "query-secret" not in query
+        assert "private-org" not in query
 
 
 class TestCodeIssueClassifications:
@@ -1278,3 +1468,58 @@ class TestEnrichWithGithubDuplicateMatches:
         assert other.analysis.product_bug_report.github_matches == []
         assert "not run: prompt too large" in record["reason"]
         assert "filter call(s) failed" not in record["reason"]
+
+    async def test_sanitizes_injected_keywords_end_to_end(
+        self, settings_with_tests_repo
+    ) -> None:
+        """End-to-end: enrich_with_github_duplicate_matches neutralizes qualifiers and redacts URLs (#602, #608)."""
+        failure = FailureAnalysis(
+            test_name="test_api",
+            error="HTTP 500",
+            analysis=AnalysisDetail(
+                classification="PRODUCT BUG",
+                details="API broken",
+                product_bug_report=ProductBugReport(
+                    title="API fails",
+                    description="Timeout on login",
+                    jira_search_keywords=[
+                        "OR",
+                        "repo:private-org/secret-repo",
+                        "is:pr",
+                        "error:timeout",
+                        "https://user:kw-secret@example.com/login?token=tok",  # pragma: allowlist secret
+                    ],
+                ),
+            ),
+        )
+        mock_response = httpx.Response(
+            200,
+            json={"items": []},
+            request=httpx.Request("GET", "https://api.github.com/search/issues"),
+        )
+
+        with patch("rootcoz.github_issues.httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            record = await enrich_with_github_duplicate_matches(
+                [failure],
+                settings_with_tests_repo,
+                _TEST_GITHUB_TOKEN,
+                repo_urls=[
+                    "https://user:repo-secret@github.com/org/allowed-repo?token=tok"  # pragma: allowlist secret
+                ],
+            )
+
+        query = mock_client.get.call_args.kwargs["params"]["q"]
+        assert (
+            query
+            == '"error:timeout" "https://example.com/login" repo:org/allowed-repo is:issue'
+        )
+        assert "private-org" not in query
+        assert "kw-secret" not in query
+        assert "repo-secret" not in query
+        assert record["scope"] == ["https://github.com/org/allowed-repo"]
