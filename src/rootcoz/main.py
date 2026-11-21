@@ -4604,6 +4604,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS":
             request.state.username = ""
             request.state.is_admin = False
+            request.state.is_ai_session = False
             request.state.role = "reviewer"
             request.state.can_view_reports = False
             request.state.can_use_server_providers = False
@@ -4629,6 +4630,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Set defaults
         request.state.username = ""
         request.state.is_admin = False
+        request.state.is_ai_session = False
         request.state.role = "reviewer"
         request.state.can_view_reports = False
         request.state.can_use_server_providers = False
@@ -4674,6 +4676,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         is_admin = False
+        is_ai_session = False
         username = ""
         resolved_role = get_settings().default_user_role  # default role until resolved
         authenticated_admin = False
@@ -4687,6 +4690,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             session = await storage.get_session(session_token)
             if session:
                 is_admin = bool(session["is_admin"])
+                is_ai_session = bool(session.get("is_ai_session", False))
                 username = str(session["username"])
                 authenticated_admin = is_admin
                 has_valid_session = True
@@ -4728,6 +4732,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     token, settings.admin_key
                 ):
                     is_admin = True
+                    is_ai_session = False
                     username = "admin"
                     resolved_role = "admin"
                     authenticated_admin = True
@@ -4736,6 +4741,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     user = await storage.get_user_by_key(token)
                     if user:
                         fetched_user = user
+                        is_ai_session = False
                         username = str(user["username"])
                         resolved_role = str(user.get("role", "reviewer"))
                         has_valid_session = True
@@ -4748,6 +4754,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         session = await storage.get_session(token)
                         if session:
                             is_admin = bool(session["is_admin"])
+                            is_ai_session = bool(session.get("is_ai_session", False))
                             username = str(session["username"])
                             resolved_role = str(session.get("role", "reviewer"))
                             if is_admin:
@@ -4757,6 +4764,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # 3. Check X-Forwarded-User header (SSO via trusted proxy)
         if not username and proxy_username and proxy_username.lower() != "admin":
+            is_ai_session = False
             username = proxy_username
             has_valid_session = True
             # Resolve the user's actual role from DB
@@ -4808,6 +4816,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             request.state.username = username
             request.state.is_admin = is_admin
+            request.state.is_ai_session = is_ai_session
             request.state.role = resolved_role
             # can_view_reports: admins effective True; non-admins reload stored flag
             # from users table each request (no session invalidation needed).
@@ -6201,11 +6210,19 @@ async def _ai_admin_role_current(username: str) -> bool:
 
 
 async def _create_ai_auth_header(
-    username: str, is_admin: bool = False, *, refuse_storage_fault: bool = False
+    username: str,
+    is_admin: bool = False,
+    *,
+    refuse_storage_fault: bool = False,
+    is_ai_session: bool = False,
 ) -> str:
     """Create a short-lived session token for AI internal API calls.
 
     Returns a Bearer auth header string, or empty string on failure/no user.
+
+    ``is_ai_session`` marks tokens minted for server-initiated analysis runs
+    that legitimately invoke ``POST /history/classify`` as ``rootcoz-ai``.
+    Job chat and admin chat callers must leave it False.
 
     ``refuse_storage_fault`` is for a caller that cannot serve a useful result
     without the token (the two chat Starts): a non-transient storage fault is
@@ -6226,6 +6243,7 @@ async def _create_ai_auth_header(
             username,
             is_admin=is_admin,
             ttl_hours=_AI_SESSION_TTL_HOURS,
+            is_ai_session=is_ai_session,
         )
         if is_admin and not await _ai_admin_role_current(username):
             await storage.delete_session(session_token)
@@ -7634,7 +7652,7 @@ async def _process_ci_source_analysis(
         ):
             return
 
-        auth_header = await _create_ai_auth_header(username)
+        auth_header = await _create_ai_auth_header(username, is_ai_session=True)
 
         # Group failures by error signature
         groups: dict[str, list[Any]] = defaultdict(list)
@@ -9427,7 +9445,7 @@ async def _reanalyze_failure_background(
             )
             return
 
-        auth_header = await _create_ai_auth_header(username)
+        auth_header = await _create_ai_auth_header(username, is_ai_session=True)
 
         # Clone repos if configured (no artifact linking here — done after refetch)
         repo_manager = RepositoryManager()
@@ -17321,7 +17339,8 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict[str
     _check_allow_list(request)
     _require_reviewer(request)
     logger.debug(
-        f"POST /history/classify: test_name={body.test_name!r}, classification={body.classification!r}"
+        f"POST /history/classify: test_name={body.test_name!r}, classification={body.classification!r}, "
+        f"is_ai_session={bool(getattr(request.state, 'is_ai_session', False))}"
     )
     test_name = body.test_name.strip()
     classification = body.classification
@@ -17345,10 +17364,21 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict[str
                 detail="KNOWN_BUG requires non-empty references (e.g., Jira tickets or historical bug URLs).",
             )
 
-        # Detect AI caller: the AI prompt includes source="ai" in the request body.
+        # Detect AI caller: require BOTH a server-minted AI analysis session
+        # (verified in AuthMiddleware) AND source="ai" in the request body.
         # AI_SYSTEM_USERNAME is a reserved system identity (blocked from registration)
         # used consistently for all AI-originated actions (auto-review, classification).
-        is_ai_caller = body.source == "ai"
+        is_ai_caller = (
+            bool(getattr(request.state, "is_ai_session", False)) and body.source == "ai"
+        )
+        if body.source == "ai" and not is_ai_caller:
+            logger.warning(
+                "POST /history/classify: ignoring source='ai' from non-AI session "
+                "(user=%s, job_id=%r, test_name=%r)",
+                request.state.username,
+                classify_job_id,
+                test_name,
+            )
 
         # Force created_by: AI callers are always attributed to AI_SYSTEM_USERNAME,
         # regardless of the authenticated session username.

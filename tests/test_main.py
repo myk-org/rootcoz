@@ -9085,8 +9085,12 @@ class TestClassifyEndpoint:
         )
         assert override.status_code == 200
 
+        ai_token = await storage.create_session(
+            "admin", is_admin=True, is_ai_session=True
+        )
         response = test_client.post(
             "/history/classify",
+            headers={"Authorization": f"Bearer {ai_token}"},
             json={
                 "test_name": test_name,
                 "classification": "FLAKY",
@@ -21140,9 +21144,9 @@ class TestAnalysisReaperIsOneCopy:
         # repo_manager:` copy would at best drift again, at worst skip the reaper.
         assert kwargs["repo_manager"] is manager.return_value
         assert kwargs["repo_path"] == tmp_path / "workspace"
-        # A re-analysis run keeps the graceful default (#534): the refusal is for
-        # the job-chat preparation only, never for a background run.
-        assert mint.await_args.kwargs == {}
+        # A re-analysis run keeps the graceful default (#534) — no
+        # refuse_storage_fault=True — while scoping the session to AI (#618).
+        assert mint.await_args.kwargs == {"is_ai_session": True}
 
 
 def test_the_entrypoint_outlives_the_app_shutdown() -> None:
