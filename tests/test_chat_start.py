@@ -470,6 +470,7 @@ async def test_refusal_exception_carries_no_body_and_no_context(
                 provider="openai",
                 model="undeclared",
                 system_prompt="hi",
+                tools=[],
                 server_api_key=refusal_secret_key,
             )
         # The refusal path logs nothing on purpose, so the control has to be

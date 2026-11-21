@@ -60,7 +60,7 @@ class TestChatSessionTools:
 
     @pytest.mark.asyncio
     async def test_create_chat_session_passes_tools(
-        self, _mock_sidecar_calls, initialized_db
+        self, _mock_sidecar_calls, initialized_db, tmp_path
     ):
         from rootcoz import ai_client
         from rootcoz.engine.chat import _create_chat_session
@@ -78,6 +78,7 @@ class TestChatSessionTools:
                 system_prompt="test",
                 ai_provider="gemini",
                 ai_model="pro",
+                repo_path=tmp_path,
                 restrict_tools=True,
             )
 
@@ -91,7 +92,7 @@ class TestChatSessionTools:
 
     @pytest.mark.asyncio
     async def test_create_chat_session_no_restrict(
-        self, _mock_sidecar_calls, initialized_db
+        self, _mock_sidecar_calls, initialized_db, tmp_path
     ):
         from rootcoz import ai_client
         from rootcoz.engine.chat import _create_chat_session
@@ -109,6 +110,7 @@ class TestChatSessionTools:
                 system_prompt="test",
                 ai_provider="gemini",
                 ai_model="pro",
+                repo_path=tmp_path,
                 restrict_tools=False,
             )
 

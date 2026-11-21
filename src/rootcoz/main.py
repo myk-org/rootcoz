@@ -28880,13 +28880,14 @@ def _get_admin_artifacts_dir(username: str, *, owner_id: int | None = None) -> P
     from every valid username) so recreating the same username never reaches
     surviving artifacts from a prior account nor races with an in-flight
     deletion of the old account (#603). Bootstrap ``admin`` (which has no
-    users row) uses ``admin``.
+    users row) and any non-DB caller use ``user_dir_key(username)`` so distinct
+    usernames (e.g. ``alice_1`` vs ``alice..1``) never collide (#607).
     """
-    from rootcoz.temp_paths import sanitize_path_part
+    from rootcoz.temp_paths import user_dir_key
 
     if owner_id is not None:
         return _ADMIN_ARTIFACTS_BASE / _ADMIN_ARTIFACTS_BY_ID_DIR / str(owner_id)
-    return _ADMIN_ARTIFACTS_BASE / sanitize_path_part(username)
+    return _ADMIN_ARTIFACTS_BASE / user_dir_key(username)
 
 
 async def _migrate_legacy_admin_artifacts() -> None:
@@ -28921,7 +28922,7 @@ async def _migrate_legacy_admin_artifacts() -> None:
         )
         return
 
-    from rootcoz.temp_paths import sanitize_path_part
+    from rootcoz.temp_paths import sanitize_path_part, user_dir_key
 
     users = await storage.list_users()
     sanitized_to_users: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -28930,10 +28931,11 @@ async def _migrate_legacy_admin_artifacts() -> None:
         if uname:
             sanitized_to_users[sanitize_path_part(uname)].append(user)
 
+    bootstrap_admin_key = user_dir_key("admin")
     for entry in entries:
         name = entry.name
         if (
-            name == "admin"
+            name in ("admin", bootstrap_admin_key)
             or name.startswith(".")
             or entry.is_symlink()
             or not entry.is_dir()

@@ -110,7 +110,7 @@ async def test_direct_session_source_and_cross_user_rejection(tmp_path, monkeypa
     try:
         assert (
             await ai_client.create_session_safely(
-                client, provider="openai", model="m", system_prompt="test"
+                client, provider="openai", model="m", system_prompt="test", tools=[]
             )
             == "direct-sid"
         )
@@ -148,7 +148,9 @@ async def test_keyed_session_creation_survives_key_rotation(tmp_path, monkeypatc
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     token = ai_client.ai_username.set("alice")
     try:
-        first = await real_call_ai("first", ai_provider="openai", ai_model="m")
+        first = await real_call_ai(
+            "first", ai_provider="openai", ai_model="m", tools=[]
+        )
         assert first.credential_source == "user"
         await storage.update_user_ai_credential("alice", "openai", "new-key")
         resumed = await real_call_ai(
@@ -312,7 +314,7 @@ async def test_new_sidecar_create_waits_for_old_delete(tmp_path, monkeypatch):
     try:
         with pytest.raises(ValueError, match="already active"):
             await ai_client.create_session_safely(
-                client, provider="openai", model="m", system_prompt="test"
+                client, provider="openai", model="m", system_prompt="test", tools=[]
             )
         client.create_session.assert_awaited_once()
     finally:

@@ -22824,7 +22824,14 @@ class TestUserLifecycleAndAdminSseRevocation:
         await storage.create_admin_user("existing-adm")
         await storage.create_user("demoted-adm", role="reviewer")
         await storage.create_admin_user("symlink-adm")
-        await storage.create_admin_user("a..b")
+        # Seed a legacy pre-#607 user with consecutive dots directly in SQLite:
+        # new creation rejects '..', but upgraded DBs may still contain one.
+        async with storage._connect_db() as db:
+            await db.execute(
+                "INSERT INTO users (username, role) VALUES (?, ?)",
+                ("a..b", "admin"),
+            )
+            await db.commit()
         await storage.create_user("a_b", role="reviewer")
         row = await storage.get_user_by_username("existing-adm")
         assert row is not None

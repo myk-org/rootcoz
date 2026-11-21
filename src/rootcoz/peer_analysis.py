@@ -787,6 +787,10 @@ async def analyze_failure_group_with_peers(
                 }
                 if not session:
                     peer_kwargs["tools"] = list(ANALYSIS_BUILTIN_TOOLS)
+                    if additional_repos:
+                        peer_kwargs["extra_allowed_dirs"] = tuple(
+                            additional_repos.values()
+                        )
                     if peer_custom_tools:
                         peer_kwargs["custom_tools"] = peer_custom_tools
                 ai_result = await call_ai(
@@ -1043,6 +1047,10 @@ async def analyze_failure_group_with_peers(
                         "tools": list(ANALYSIS_BUILTIN_TOOLS),
                         "system_prompt": system_prompt,
                     }
+                    if additional_repos:
+                        rev_kwargs["extra_allowed_dirs"] = tuple(
+                            additional_repos.values()
+                        )
                     if peer_custom_tools:
                         rev_kwargs["custom_tools"] = peer_custom_tools
                     rev_result = await call_ai_once(

@@ -551,6 +551,11 @@ def _validate_username(username: str) -> None:
     if username in _SYSTEM_TAGS:
         msg = f"Username '{username}' conflicts with a reserved system tag"
         raise ValueError(msg)
+    if ".." in username:
+        msg = (
+            f"Invalid username: '{username}'. Consecutive dots ('..') are not allowed."
+        )
+        raise ValueError(msg)
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,49}$", username):
         msg = f"Invalid username: '{username}'. Must be 2-50 alphanumeric characters, dots, hyphens, underscores."
         raise ValueError(msg)
@@ -9951,12 +9956,10 @@ async def track_user(username: str) -> None:
     New users are assigned the DEFAULT_USER_ROLE from settings.
     """
     username = _normalize_username(username)
-    if username == "admin":
-        return
-    if username in _SYSTEM_TAGS:
-        return
-    # Skip invalid usernames (e.g. from malformed cookies)
-    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,49}$", username):
+    # Skip reserved or invalid usernames (e.g. 'admin', system tags, malformed cookies)
+    try:
+        _validate_username(username)
+    except ValueError:
         return
 
     from rootcoz.config import get_settings

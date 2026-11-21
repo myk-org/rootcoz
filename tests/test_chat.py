@@ -6321,6 +6321,7 @@ async def _chat_turn(monkeypatch, tmp_path, handler, session_id=None):
             ai_provider="openai",
             ai_model="m",
             build_prompt_fn=lambda: "prompt",
+            repo_path=tmp_path,
             session_id=session_id,
             on_warning=warnings.append,
         )
@@ -6452,3 +6453,36 @@ async def test_chat_lost_session_still_rebuilds(monkeypatch, tmp_path):
     assert session_id == "s-rebuilt"
     # The rebuilt session was created after the lost one.
     assert [r.url.path for r in requests if r.url.path == "/sessions"]
+
+
+class TestUserDirectoryIsolationIssue607:
+    """Issue #607: per-user chat workspace and admin artifacts dirs cannot collide."""
+
+    def test_chat_workspace_collision_free_and_case_normalized(self):
+        from rootcoz.engine.chat import get_chat_workspace
+        from rootcoz.temp_paths import user_dir_key
+
+        job_id = "22222222-2222-4222-8222-222222222222"
+        ws_underscore = get_chat_workspace(job_id, "alice_1")
+        ws_dots = get_chat_workspace(job_id, "alice..1")
+        ws_upper = get_chat_workspace(job_id, "ALICE_1")
+        ws_job_level = get_chat_workspace(job_id)
+
+        assert ws_underscore != ws_dots
+        assert ws_underscore == ws_upper
+        assert ws_underscore.name == user_dir_key("alice_1")
+        assert ws_underscore.parent == ws_job_level
+        assert ws_job_level.name.endswith(job_id)
+
+    def test_admin_artifacts_dir_collision_free_and_case_normalized(self):
+        from rootcoz import main as main_mod
+        from rootcoz.temp_paths import user_dir_key
+
+        dir_underscore = main_mod._get_admin_artifacts_dir("alice_1")
+        dir_dots = main_mod._get_admin_artifacts_dir("alice..1")
+        dir_upper = main_mod._get_admin_artifacts_dir("ALICE_1")
+
+        assert dir_underscore != dir_dots
+        assert dir_underscore == dir_upper
+        assert dir_underscore.name == user_dir_key("alice_1")
+        assert dir_underscore.parent == main_mod._ADMIN_ARTIFACTS_BASE

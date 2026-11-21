@@ -49,7 +49,12 @@ async def test_key_rotated_before_session_persistence_is_rejected(
         await storage.update_user_ai_credential("alice", "openai", "new-key-value")
         task = asyncio.create_task(
             ai_client.create_session_safely(
-                client, provider="openai", model="m", system_prompt="test", api_key=key
+                client,
+                provider="openai",
+                model="m",
+                system_prompt="test",
+                tools=[],
+                api_key=key,
             )
         )
         await asyncio.wait_for(entered.wait(), 5)

@@ -37,6 +37,7 @@ from rootcoz.ai_client import (
 from rootcoz.config import Settings, get_settings, parse_additional_repos
 from rootcoz.engine.chat import analysis_http_tools
 from rootcoz.engine.session_tools import build_session_tools
+from rootcoz.engine.workspace_guard import GUARD_FILENAME
 from rootcoz.feedback import scrub_sensitive_data
 from rootcoz.models import (
     ANALYSIS_PLACEHOLDER,
@@ -1017,6 +1018,18 @@ def _copy_contained_tree(
         for entry in sorted(entries, key=lambda e: e.name):
             src_child = src_dir / entry.name
             dst_child = dst_dir / entry.name
+            if (
+                subdir == "extensions"
+                and dst_dir == dest_root
+                and entry.name == GUARD_FILENAME
+            ):
+                logger.warning(
+                    "Skipping reserved path guard entry during .rootcoz/%s copy from '%s': %s",
+                    subdir,
+                    repo_name,
+                    src_child,
+                )
+                continue
             if entry.is_symlink():
                 logger.warning(
                     "Skipping symlink during .rootcoz/%s copy from '%s': %s",
@@ -2527,6 +2540,8 @@ async def _call_ai_with_retry(
         "ai_call_timeout": ai_call_timeout,
         "tools": list(ANALYSIS_BUILTIN_TOOLS),
     }
+    if repos:
+        call_kwargs["extra_allowed_dirs"] = tuple(repos.values())
     if system_prompt:
         call_kwargs["system_prompt"] = system_prompt
     if custom_tools:

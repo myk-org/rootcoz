@@ -38,6 +38,7 @@ from rootcoz.temp_paths import (
     delete_tree,
     reusable_path_lock,
     sanitize_path_part,
+    user_dir_key,
     workspace_lock,
 )
 from rootcoz.utils import single_line_diagnostic
@@ -68,7 +69,7 @@ def chat_workspace_name(job_id: str) -> str:
 
 def get_chat_workspace(job_id: str, username: str = "") -> Path:
     """Get the chat workspace path for a job and user."""
-    safe_user = sanitize_path_part(username) if username else ""
+    safe_user = user_dir_key(username) if username else ""
     tmp = _tmp_root()
     if safe_user:
         workspace = tmp / chat_workspace_name(job_id) / safe_user
@@ -1896,7 +1897,7 @@ async def _create_chat_session(
             "provider": sidecar_provider,
             "model": sidecar_model,
             "system_prompt": system_prompt,
-            "cwd": str(repo_path) if repo_path else "/tmp",
+            "cwd": str(repo_path) if repo_path else None,
         }
         if custom_tools:
             create_kwargs["custom_tools"] = custom_tools
@@ -2005,6 +2006,7 @@ async def init_admin_chat_session(
         repo_path=repo_path,
         log_prefix="Admin chat",
         custom_tools=custom_tools,
+        restrict_tools=True,
     )
 
 
