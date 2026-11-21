@@ -242,7 +242,12 @@ def load_rootcoz_repo_settings(tests_repo_path: Path) -> RootcozRepoSettings | N
         RootcozSettingsError: File exists but is invalid JSON or fails schema,
             or the path is a symlink / escapes the repo tree.
     """
-    path = tests_repo_path / ".rootcoz" / ROOTCOZ_SETTINGS_FILENAME
+    rootcoz_dir = tests_repo_path / ".rootcoz"
+    if rootcoz_dir.is_symlink():
+        raise RootcozSettingsError(
+            ".rootcoz must be a regular directory (symlinks are not allowed)"
+        )
+    path = rootcoz_dir / ROOTCOZ_SETTINGS_FILENAME
     # Untrusted clone: reject symlinks before exists() so dangling links fail
     # loudly instead of being treated as "file absent".
     if path.is_symlink():
