@@ -28638,31 +28638,124 @@ _HTML_STRIP_VOID_TAGS: frozenset[str] = frozenset({"embed", "base", "link"})
 _HTML_BLOCKED_META_HTTP_EQUIV: frozenset[str] = frozenset(
     {"refresh", "content-security-policy", "set-cookie"}
 )
-_HTML_URL_ATTRS: frozenset[str] = frozenset(
-    {"href", "src", "action", "formaction", "xlink:href", "poster", "data"}
+_HTML_RESOURCE_URL_ATTRS: frozenset[str] = frozenset(
+    {
+        "src",
+        "srcset",
+        "poster",
+        "data",
+        "action",
+        "formaction",
+        "background",
+        "ping",
+        "codebase",
+        "cite",
+        "longdesc",
+        "archive",
+        "classid",
+        "usemap",
+        "dynsrc",
+        "lowsrc",
+    }
 )
-_HTML_DANGEROUS_URL_PREFIXES: tuple[str, ...] = (
-    "javascript:",
-    "vbscript:",
-    "data:text/html",
-    "data:application/xhtml+xml",
+_HTML_HREF_ATTRS: frozenset[str] = frozenset({"href", "xlink:href"})
+_HTML_SAFE_DATA_IMAGE_PREFIXES: tuple[str, ...] = (
+    "data:image/png",
+    "data:image/jpeg",
+    "data:image/jpg",
+    "data:image/gif",
+    "data:image/webp",
+    "data:image/avif",
+    "data:image/bmp",
+    "data:image/x-icon",
+)
+_HTML_SAFE_CSS_DATA_PREFIXES: tuple[str, ...] = (
+    *_HTML_SAFE_DATA_IMAGE_PREFIXES,
+    "data:font/",
+)
+_HTML_SAFE_LINK_PREFIXES: tuple[str, ...] = (
+    "https://",
+    "http://",
+    "mailto:",
+    "#",
 )
 _HTML_ASCII_CTRL_WS_RE = re.compile(r"[\x00-\x20]+")
+_CSS_COMMENT_RE = re.compile(r"/\*.*?(?:\*/|$)", re.DOTALL)
+_CSS_HEX_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?")
+_CSS_CHAR_ESCAPE_RE = re.compile(r"\\([a-zA-Z@(-])")
+_CSS_IMPORT_RE = re.compile(r"@\s*import\b[^;]*(?:;|$)", re.IGNORECASE)
+_CSS_URL_RE = re.compile(r"url\s*\(([^)]*)\)", re.IGNORECASE)
+_CSS_IMAGE_SET_RE = re.compile(
+    r"(?:-[a-z]+-)?image-set\s*\((?:[^()]*|\([^)]*\))*\)", re.IGNORECASE
+)
+_CSS_EXPRESSION_RE = re.compile(r"expression\s*\(", re.IGNORECASE)
 
 
-def _is_dangerous_html_url(value: str) -> bool:
-    normalized = _HTML_ASCII_CTRL_WS_RE.sub("", value).lower()
-    return normalized.startswith(_HTML_DANGEROUS_URL_PREFIXES)
+def _normalize_html_url(value: str) -> str:
+    return _HTML_ASCII_CTRL_WS_RE.sub("", value).lower()
+
+
+def _decode_css_hex_escape(match: re.Match[str]) -> str:
+    codepoint = int(match.group(1), 16)
+    if codepoint == 0 or codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+        return "\ufffd"
+    ch = chr(codepoint)
+    if ch in ("'", '"', "\\"):
+        return match.group(0)
+    return ch
+
+
+def _is_allowed_html_url(tag: str, attr: str, value: str) -> bool:
+    normalized = _normalize_html_url(value)
+    if attr in _HTML_RESOURCE_URL_ATTRS:
+        # Only inline raster data: URIs on <img src> are allowed; strip all
+        # external resource loads and form submission endpoints.
+        return (
+            tag == "img"
+            and attr == "src"
+            and normalized.startswith(_HTML_SAFE_DATA_IMAGE_PREFIXES)
+        )
+    if attr in _HTML_HREF_ATTRS:
+        if tag == "a" and attr == "href":
+            return normalized.startswith(_HTML_SAFE_LINK_PREFIXES)
+        # Non-anchor href / xlink:href (e.g. SVG <use>, <image>) may only target
+        # in-document fragments, never external resources or scriptable schemes.
+        return normalized.startswith("#")
+    return True
+
+
+def _sanitize_inline_css(css: str) -> str:
+    """Strip CSS @import rules, legacy expression(), and external url()/image-set() loads."""
+    cleaned = _CSS_COMMENT_RE.sub("", css)
+    cleaned = _CSS_HEX_ESCAPE_RE.sub(_decode_css_hex_escape, cleaned)
+    cleaned = _CSS_CHAR_ESCAPE_RE.sub(r"\1", cleaned)
+    cleaned = _CSS_IMPORT_RE.sub("", cleaned)
+    cleaned = _CSS_EXPRESSION_RE.sub("blocked(", cleaned)
+
+    def _replace_url(match: re.Match[str]) -> str:
+        raw_target = match.group(1).strip().strip("\"'")
+        normalized = _normalize_html_url(raw_target)
+        if normalized.startswith("#") or normalized.startswith(
+            _HTML_SAFE_CSS_DATA_PREFIXES
+        ):
+            return match.group(0)
+        return "url()"
+
+    cleaned = _CSS_URL_RE.sub(_replace_url, cleaned)
+    return _CSS_IMAGE_SET_RE.sub("none", cleaned)
 
 
 class _AdminReportHTMLSanitizer(HTMLParser):
-    """Strip active HTML constructs and inject a strict CSP meta tag (#606)."""
+    """Strip active HTML/external resources and inject a strict CSP meta tag (#606)."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=False)
         self._parts: list[str] = []
         self._skip_stack: list[str] = []
         self._csp_injected = False
+        self._before_head_eligible = True
+        self._seen_html_tag = False
+        self._in_style = False
         self._doctype_end_idx: int | None = None
 
     def _is_blocked_meta(self, attrs: list[tuple[str, str | None]]) -> bool:
@@ -28674,18 +28767,18 @@ class _AdminReportHTMLSanitizer(HTMLParser):
                 return True
         return False
 
-    def _filter_attrs(self, attrs: list[tuple[str, str | None]]) -> str:
+    def _filter_attrs(self, tag: str, attrs: list[tuple[str, str | None]]) -> str:
         rendered: list[str] = []
         for raw_name, value in attrs:
             name = raw_name.lower()
             if name.startswith("on") or name == "srcdoc":
                 continue
-            if (
-                value is not None
-                and name in _HTML_URL_ATTRS
-                and _is_dangerous_html_url(value)
+            if (name in _HTML_RESOURCE_URL_ATTRS or name in _HTML_HREF_ATTRS) and (
+                value is None or not _is_allowed_html_url(tag, name, value)
             ):
                 continue
+            if name == "style" and value is not None:
+                value = _sanitize_inline_css(value)
             if value is None:
                 rendered.append(f" {name}")
             else:
@@ -28696,8 +28789,11 @@ class _AdminReportHTMLSanitizer(HTMLParser):
         if self._skip_stack:
             return
         self._parts.append(f"<!{decl}>")
-        if self._doctype_end_idx is None and decl.lstrip().lower().startswith(
-            "doctype"
+        if (
+            self._doctype_end_idx is None
+            and self._before_head_eligible
+            and not self._seen_html_tag
+            and decl.lstrip().lower().startswith("doctype")
         ):
             self._doctype_end_idx = len(self._parts)
 
@@ -28712,46 +28808,69 @@ class _AdminReportHTMLSanitizer(HTMLParser):
             return
         if lower == "meta" and self._is_blocked_meta(attrs):
             return
-        self._parts.append(f"<{lower}{self._filter_attrs(attrs)}>")
-        if lower == "head" and not self._csp_injected:
+        self._parts.append(f"<{lower}{self._filter_attrs(lower, attrs)}>")
+        if lower == "html":
+            self._seen_html_tag = True
+        elif lower == "head" and self._before_head_eligible and not self._csp_injected:
             self._parts.append(_ADMIN_ARTIFACT_CSP_META_TAG)
             self._csp_injected = True
+            self._before_head_eligible = False
+        else:
+            self._before_head_eligible = False
+        if lower == "style":
+            self._in_style = True
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lower = tag.lower()
         if self._skip_stack:
             return
-        if lower in _HTML_STRIP_WITH_CONTENT_TAGS or lower in _HTML_STRIP_VOID_TAGS:
+        if (
+            lower in _HTML_STRIP_WITH_CONTENT_TAGS
+            or lower in _HTML_STRIP_VOID_TAGS
+            or lower == "style"
+        ):
             return
         if lower == "meta" and self._is_blocked_meta(attrs):
             return
-        self._parts.append(f"<{lower}{self._filter_attrs(attrs)} />")
+        self._parts.append(f"<{lower}{self._filter_attrs(lower, attrs)} />")
+        if lower == "html":
+            self._seen_html_tag = True
+        else:
+            self._before_head_eligible = False
 
     def handle_endtag(self, tag: str) -> None:
         lower = tag.lower()
         if self._skip_stack:
-            if lower in self._skip_stack:
+            if lower in _HTML_STRIP_WITH_CONTENT_TAGS and lower in self._skip_stack:
                 while self._skip_stack:
                     if self._skip_stack.pop() == lower:
                         break
             return
         if lower in _HTML_STRIP_WITH_CONTENT_TAGS or lower in _HTML_STRIP_VOID_TAGS:
             return
+        if lower == "style":
+            self._in_style = False
         self._parts.append(f"</{lower}>")
 
     def handle_data(self, data: str) -> None:
         if self._skip_stack:
             return
+        if data.strip():
+            self._before_head_eligible = False
+        if self._in_style:
+            data = _sanitize_inline_css(data)
         self._parts.append(data)
 
     def handle_entityref(self, name: str) -> None:
         if self._skip_stack:
             return
+        self._before_head_eligible = False
         self._parts.append(f"&{name};")
 
     def handle_charref(self, name: str) -> None:
         if self._skip_stack:
             return
+        self._before_head_eligible = False
         self._parts.append(f"&#{name};")
 
     def handle_comment(self, data: str) -> None:

