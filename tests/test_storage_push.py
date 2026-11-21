@@ -10,9 +10,11 @@ from rootcoz import storage
 
 @pytest.fixture
 async def setup_test_db(temp_db_path: Path):
-    """Set up a test database with the path patched."""
+    """Set up a test database with the path patched and active test users seeded."""
     with patch.object(storage, "DB_PATH", temp_db_path):
         await storage.init_db()
+        for username in ("alice", "bob", "carol"):
+            await storage.track_user(username)
         yield temp_db_path
 
 
@@ -180,6 +182,39 @@ class TestGetPushSubscriptionsForUsers:
         with patch.object(storage, "DB_PATH", setup_test_db):
             subs = await storage.get_push_subscriptions_for_users(["nobody"])
             assert subs == []
+
+    async def test_excludes_deleted_disabled_pending_and_rejected_users(
+        self, setup_test_db: Path
+    ) -> None:
+        """Deleted, disabled, pending, and rejected users never receive push (#603)."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.create_user("disabled-u", role="reviewer", status="active")
+            await storage.set_user_disabled("disabled-u", True)
+            await storage.create_user("pending-u", role="reviewer", status="pending")
+            await storage.create_user("rejected-u", role="reviewer", status="rejected")
+            for name in (
+                "alice",
+                "admin",
+                "deleted-ghost",
+                "disabled-u",
+                "pending-u",
+                "rejected-u",
+            ):
+                await storage.save_push_subscription(
+                    name, f"https://push.example.com/{name}", "k", "a"
+                )
+
+            subs = await storage.get_push_subscriptions_for_users(
+                [
+                    "alice",
+                    "admin",
+                    "deleted-ghost",
+                    "disabled-u",
+                    "pending-u",
+                    "rejected-u",
+                ]
+            )
+            assert {s["username"] for s in subs} == {"alice", "admin"}
 
 
 class TestDeleteStalePushSubscriptions:

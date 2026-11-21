@@ -729,3 +729,241 @@ class TestGetJobStats:
         with patch.object(storage, "DB_PATH", setup_test_db):
             result = await storage.get_job_stats("nonexistent-job")
             assert result["total_builds_analyzed"] == 0
+
+
+class TestClassifySourceSpoofing:
+    """Regression tests for POST /history/classify source='ai' spoofing (#618)."""
+
+    @pytest.fixture
+    def classify_client(self, temp_db_path: Path):
+        import asyncio
+        import os
+
+        from starlette.testclient import TestClient
+
+        from rootcoz.config import clear_settings_cache
+        from rootcoz.main import app
+
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch.dict(
+                os.environ,
+                {
+                    "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+                    "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+                    "SECURE_COOKIES": "false",
+                    "DB_PATH": str(temp_db_path),
+                    "REQUIRE_APPROVAL": "false",
+                },
+            ),
+        ):
+            clear_settings_cache()
+            asyncio.run(storage.init_db())
+            with TestClient(app) as client:
+                yield client
+            clear_settings_cache()
+
+    @staticmethod
+    async def _fetch_classification_and_audits(
+        db_path: Path, classification_id: int, job_id: str
+    ) -> tuple[dict, list[dict]]:
+        import aiosqlite
+
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            row_cur = await db.execute(
+                "SELECT id, test_name, pattern, created_by, visible"
+                " FROM test_classifications WHERE id = ?",
+                (classification_id,),
+            )
+            row = await row_cur.fetchone()
+            assert row is not None
+            audit_cur = await db.execute(
+                "SELECT actor, action, outcome, target_id, details"
+                " FROM audit_events"
+                " WHERE action = 'classification.override' AND target_id = ?"
+                " ORDER BY id",
+                (job_id,),
+            )
+            audits = [dict(r) for r in await audit_cur.fetchall()]
+        return dict(row), audits
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("role", ["reviewer", "operator", "admin"])
+    async def test_human_roles_cannot_spoof_ai_source(
+        self, classify_client, temp_db_path: Path, role: str
+    ):
+        """Human reviewer/operator/admin sending source='ai' is attributed to self, visible=1, and audited."""
+        username = f"human_{role}"
+        _, api_key = await storage.create_user(username, role=role)
+        login_resp = classify_client.post(
+            "/api/auth/login",
+            json={"username": username, "api_key": api_key},
+        )
+        assert login_resp.status_code == 200
+        job_id = f"job-spoof-{role}"
+
+        resp = classify_client.post(
+            "/history/classify",
+            cookies=dict(login_resp.cookies),
+            json={
+                "test_name": "test_spoofed_ai",
+                "classification": "FLAKY",
+                "reason": "attempting spoof",
+                "job_id": job_id,
+                "source": "ai",
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        row, audits = await self._fetch_classification_and_audits(
+            temp_db_path, resp.json()["id"], job_id
+        )
+        assert row["created_by"] == username
+        assert row["created_by"] != storage.AI_SYSTEM_USERNAME
+        assert row["visible"] == 1
+        assert len(audits) == 1
+        assert audits[0]["actor"] == username
+        assert audits[0]["outcome"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_admin_and_api_key_cannot_spoof_ai_source(
+        self, classify_client, temp_db_path: Path
+    ):
+        """Bootstrap admin key and user API key sending source='ai' use human attribution and audit."""
+        _, reviewer_key = await storage.create_user("api_alice", role="reviewer")
+        cases = [
+            (
+                "Bearer test-admin-key-16chars",  # pragma: allowlist secret
+                "admin",
+                "job-spoof-bootstrap-admin",
+            ),
+            (f"Bearer {reviewer_key}", "api_alice", "job-spoof-api-key"),
+        ]
+        for auth_value, expected_actor, job_id in cases:
+            resp = classify_client.post(
+                "/history/classify",
+                headers={"Authorization": auth_value},
+                json={
+                    "test_name": "test_spoofed_key",
+                    "classification": "FLAKY",
+                    "job_id": job_id,
+                    "source": "ai",
+                },
+            )
+            assert resp.status_code == 201, resp.text
+            row, audits = await self._fetch_classification_and_audits(
+                temp_db_path, resp.json()["id"], job_id
+            )
+            assert row["created_by"] == expected_actor
+            assert row["visible"] == 1
+            assert len(audits) == 1
+            assert audits[0]["actor"] == expected_actor
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_admin", [False, True])
+    async def test_chat_minted_session_cannot_spoof_ai_source(
+        self, classify_client, temp_db_path: Path, is_admin: bool
+    ):
+        """Chat-minted sessions (is_ai_session=False) cannot forge rootcoz-ai attribution."""
+        from rootcoz import main
+
+        username = "chat_admin" if is_admin else "chat_reviewer"
+        role = "admin" if is_admin else "reviewer"
+        await storage.create_user(username, role=role)
+        chat_auth_header = await main._create_ai_auth_header(
+            username, is_admin=is_admin
+        )
+        assert chat_auth_header.startswith("Bearer ")
+        job_id = f"job-chat-spoof-{role}"
+
+        resp = classify_client.post(
+            "/history/classify",
+            headers={"Authorization": chat_auth_header},
+            json={
+                "test_name": "test_chat_spoof",
+                "classification": "FLAKY",
+                "job_id": job_id,
+                "source": "ai",
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        row, audits = await self._fetch_classification_and_audits(
+            temp_db_path, resp.json()["id"], job_id
+        )
+        assert row["created_by"] == username
+        assert row["created_by"] != storage.AI_SYSTEM_USERNAME
+        assert row["visible"] == 1
+        assert len(audits) == 1
+        assert audits[0]["actor"] == username
+
+    @pytest.mark.asyncio
+    async def test_analysis_ai_session_legitimate_and_human_source_paths(
+        self, classify_client, temp_db_path: Path
+    ):
+        """Server-minted analysis session (is_ai_session=True) respects source='ai' vs source=''."""
+        from rootcoz import main
+
+        await storage.create_user("op_user", role="operator")
+        ai_auth_header = await main._create_ai_auth_header(
+            "op_user", is_ai_session=True
+        )
+        assert ai_auth_header.startswith("Bearer ")
+
+        # 1. With source="ai": attributed to rootcoz-ai, hidden until revealed, no override audit.
+        ai_job_id = "job-legit-ai"
+        resp_ai = classify_client.post(
+            "/history/classify",
+            headers={"Authorization": ai_auth_header},
+            json={
+                "test_name": "test_legit_ai",
+                "classification": "FLAKY",
+                "reason": "Intermittent across recent builds",
+                "job_id": ai_job_id,
+                "source": "ai",
+            },
+        )
+        assert resp_ai.status_code == 201, resp_ai.text
+        row_ai, audits_ai = await self._fetch_classification_and_audits(
+            temp_db_path, resp_ai.json()["id"], ai_job_id
+        )
+        assert row_ai["created_by"] == storage.AI_SYSTEM_USERNAME
+        assert row_ai["visible"] == 0
+        assert audits_ai == []
+        assert (
+            await storage.get_history_classification(ai_job_id, "test_legit_ai") == ""
+        )
+
+        await storage.make_classifications_visible(ai_job_id)
+        assert (
+            await storage.get_history_classification(ai_job_id, "test_legit_ai")
+            == "FLAKY"
+        )
+
+        # 2. Same AI-scoped session with source="": uses human attribution, visible=1, audited.
+        human_job_id = "job-ai-session-empty-source"
+        resp_human = classify_client.post(
+            "/history/classify",
+            headers={"Authorization": ai_auth_header},
+            json={
+                "test_name": "test_empty_source",
+                "classification": "REGRESSION",
+                "job_id": human_job_id,
+                "source": "",
+            },
+        )
+        assert resp_human.status_code == 201, resp_human.text
+        row_human, audits_human = await self._fetch_classification_and_audits(
+            temp_db_path, resp_human.json()["id"], human_job_id
+        )
+        assert row_human["created_by"] == "op_user"
+        assert row_human["visible"] == 1
+        assert len(audits_human) == 1
+        assert audits_human[0]["actor"] == "op_user"
+
+    def test_only_analysis_callers_mint_ai_sessions(self):
+        """Guard: only the two analysis pipeline callers pass is_ai_session=True."""
+        import inspect
+
+        from rootcoz import main
+
+        assert inspect.getsource(main).count("is_ai_session=True") == 2

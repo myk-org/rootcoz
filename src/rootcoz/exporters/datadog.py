@@ -88,6 +88,7 @@ from rootcoz.storage import (
     PATTERN_CLASSIFICATIONS,
     PRIMARY_CLASSIFICATIONS,
 )
+from rootcoz.url_utils import sanitize_http_href, strip_url_userinfo_in_text
 
 logger = get_child_logger(__name__)
 
@@ -206,6 +207,40 @@ _SCOPE_CONSOLE = "console"
 # minus. Every other character (spaces, most punctuation) is replaced
 # with an underscore.
 _TAG_INVALID_CHARS = re.compile(r"[^A-Za-z0-9_.:-]")
+
+# Markdown control syntax that can inject links, autolinks, code spans, or
+# bypass escaping in Datadog ``%%%`` Markdown event blocks.
+_MD_ESCAPE_RE = re.compile(r"([\\\[\]()<>`])")
+_MD_BLOCK_DELIM_RE = re.compile(r"%{3,}")
+
+
+def _md_link_url(url: str) -> str:
+    """Sanitize an http(s) URL and percent-encode Markdown link delimiters."""
+    safe = sanitize_http_href(url)
+    if not safe:
+        return ""
+    encoded = (
+        safe.replace("(", "%28")
+        .replace(")", "%29")
+        .replace("[", "%5B")
+        .replace("]", "%5D")
+        .replace("<", "%3C")
+        .replace(">", "%3E")
+    )
+    return _MD_BLOCK_DELIM_RE.sub(lambda m: "%25" * len(m.group(0)), encoded)
+
+
+def _escape_md_text(text: str) -> str:
+    """Escape Markdown link/code/autolink syntax and Datadog ``%%%`` delimiters."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    escaped = _MD_ESCAPE_RE.sub(r"\\\1", normalized)
+    return _MD_BLOCK_DELIM_RE.sub(lambda m: r"\%" * len(m.group(0)), escaped)
+
+
+def _escape_md_inline(text: str) -> str:
+    """Escape inline Markdown text and collapse line breaks to spaces."""
+    return re.sub(r"[\r\n]+", " ", _escape_md_text(text))
+
 
 #: Datadog API keys: exactly 32 hex characters.
 _API_KEY_RE = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -890,7 +925,7 @@ class DatadogExporter(Exporter):
             heading = "### Build failure"
         else:
             subject = test_name
-            heading = f"### {test_name}"
+            heading = f"### {_escape_md_inline(test_name)}"
         build = f"Build #{context.build_number}"
         if classification:
             title = f"[{classification}] {subject} ({build})"
@@ -902,38 +937,52 @@ class DatadogExporter(Exporter):
             "",
         ]
         if classification:
-            lines.append(f"- **Classification:** {classification}")
+            lines.append(f"- **Classification:** {_escape_md_inline(classification)}")
         history_classification = context.history_classifications.get(test_name, "")
         if history_classification:
             # Parity with Report Portal: the previous classification for
             # this test name, when history has one. Not toggle-gated.
-            lines.append(f"- **Failure pattern:** {history_classification}")
-        lines.append(f"- **Job:** {context.job_name} (#{context.build_number})")
+            lines.append(
+                f"- **Failure pattern:** {_escape_md_inline(history_classification)}"
+            )
+        safe_build_number = _escape_md_inline(context.build_number)
+        lines.append(
+            f"- **Job:** {_escape_md_inline(context.job_name)} (#{safe_build_number})"
+        )
         if self._push_rootcoz_url and context.report_url:
-            lines.append(
-                f"- **RootCoz report:** [analysis {context.job_id}]({context.report_url})"
-            )
+            safe_report_url = _md_link_url(context.report_url)
+            if safe_report_url:
+                lines.append(
+                    f"- **RootCoz report:** [analysis {_escape_md_inline(context.job_id)}]({safe_report_url})"
+                )
         if context.jenkins_url:
-            lines.append(
-                f"- **CI build:** [build #{context.build_number}]({context.jenkins_url})"
-            )
+            safe_jenkins_url = _md_link_url(context.jenkins_url)
+            if safe_jenkins_url:
+                lines.append(
+                    f"- **CI build:** [build #{safe_build_number}]({safe_jenkins_url})"
+                )
         if self._push_tracker_links:
+            seen_urls: set[str] = set()
             for link in context.tracked_in_links.get(test_name, []):
-                url = str(link.get("tracked_in_url", "") or "")
-                if not url:
+                safe_url = _md_link_url(str(link.get("tracked_in_url", "") or ""))
+                if not safe_url or safe_url in seen_urls:
                     continue
+                seen_urls.add(safe_url)
                 label = {
                     "jira": "Jira",
                     "github": "GitHub",
                 }.get(str(link.get("tracked_in_type", "") or ""), "issue")
-                lines.append(f"- **Tracked in:** [{label}]({url})")
+                lines.append(
+                    f"- **Tracked in:** [{_escape_md_inline(label)}]({safe_url})"
+                )
         reviewer = context.reviewed_by.get(test_name, "")
         if reviewer:
             # Parity with Report Portal: reviewer attribution, when the
             # test was human-reviewed. Not toggle-gated.
-            lines.append(f"- **Reviewed by:** {reviewer}")
+            lines.append(f"- **Reviewed by:** {_escape_md_inline(reviewer)}")
         if details:
-            lines += ["", "**AI diagnosis:**", "", details]
+            safe_details = _escape_md_text(strip_url_userinfo_in_text(details))
+            lines += ["", "**AI diagnosis:**", "", safe_details]
         message = "\n".join(lines)
         # Wrap, then cap the body: truncating the wrapped string could cut the
         # closing marker and turn the whole event back into plain text.

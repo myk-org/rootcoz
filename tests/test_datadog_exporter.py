@@ -2409,3 +2409,203 @@ class TestAutoPushAnalysisTimestamp:
             )
 
         assert mock_build_context.call_args.kwargs["analysis_timestamp"] is None
+
+
+class TestMarkdownAndUrlHardening:
+    """Regression tests for #600 (URL userinfo) and #604 (Markdown injection)."""
+
+    def test_strips_userinfo_from_child_jenkins_report_and_tracker_urls(self):
+        jenkins_cred_url = (
+            "https://ci_user:ci_secret_pw@jenkins.example.com"  # pragma: allowlist secret
+            "/job/child-suite/5/"
+        )
+        report_cred_url = (
+            "https://rc_user:rc_secret@rootcoz.example.com"  # pragma: allowlist secret
+            "/results/job-123"
+        )
+        jira_cred_url = (
+            "https://jira_user:jira_secret@jira.example.com"  # pragma: allowlist secret
+            "/browse/PROJ-1"
+        )
+        context = _context(
+            child_job_name="child-suite",
+            child_build_number=5,
+            jenkins_url=jenkins_cred_url,
+            report_url=report_cred_url,
+            tracked_in_links={
+                "test_login_flow": [
+                    {"tracked_in_url": jira_cred_url, "tracked_in_type": "jira"}
+                ]
+            },
+        )
+        # Also test defensive stripping if attributes are mutated after __post_init__
+        context.jenkins_url = jenkins_cred_url
+        context.report_url = report_cred_url
+        context.tracked_in_links["test_login_flow"] = [
+            {"tracked_in_url": jira_cred_url, "tracked_in_type": "jira"},
+            {"tracked_in_url": "javascript:alert(1)", "tracked_in_type": "jira"},
+        ]
+
+        message = _message(_exporter()._build_event(context, _failure()))
+        assert "https://jenkins.example.com/job/child-suite/5/" in message
+        assert "https://rootcoz.example.com/results/job-123" in message
+        assert "https://jira.example.com/browse/PROJ-1" in message
+        for forbidden in (
+            "ci_user",
+            "ci_secret_pw",
+            "rc_user",
+            "rc_secret",
+            "jira_user",
+            "jira_secret",
+            "javascript:",
+        ):
+            assert forbidden not in message
+
+    def test_tracked_in_url_markdown_link_injection_encoded(self):
+        crafted = (
+            "https://jira.example.com/browse/PROJ-1)"
+            "[Verify%20Account](https://evil.example/phish"
+        )
+        crafted_delim = "https://jira.example.com/browse/PROJ-2/%%%/break"
+        context = _context(
+            tracked_in_links={
+                "test_login_flow": [
+                    {"tracked_in_url": crafted, "tracked_in_type": "jira"},
+                    {"tracked_in_url": crafted_delim, "tracked_in_type": "jira"},
+                ]
+            }
+        )
+        message = _message(_exporter()._build_event(context, _failure()))
+        inner = message.removeprefix("%%%\n").removesuffix("\n%%%")
+        assert "[Verify%20Account](https://evil.example/phish" not in inner
+        assert "%%%" not in inner
+        assert (
+            "- **Tracked in:** [Jira]("
+            "https://jira.example.com/browse/PROJ-1%29"
+            "%5BVerify%20Account%5D%28https://evil.example/phish)" in inner
+        )
+        assert (
+            "- **Tracked in:** [Jira]("
+            "https://jira.example.com/browse/PROJ-2/%25%25%25/break)" in inner
+        )
+
+    def test_test_name_and_job_name_markdown_link_injection_escaped(self):
+        crafted_test = "tests/test_a.py::test_fail [Phish](https://evil.example/test)"
+        crafted_job = "suite [Click](https://evil.example/job)\n%%%\nbreakout"
+        context = _context(
+            job_name=crafted_job,
+            build_number="42](https://evil.example/b)[x",
+            job_id="job-1](https://evil.example/j)[x",
+            reviewed_by={crafted_test: "rev [Click](https://evil.example/r)"},
+        )
+        event = _exporter()._build_event(context, _failure(test_name=crafted_test))
+        message = _message(event)
+        inner = message.removeprefix("%%%\n").removesuffix("\n%%%")
+
+        assert "[Phish](https://evil.example/test)" not in inner
+        assert r"\[Phish\]\(https://evil.example/test\)" in inner
+        assert "[Click](https://evil.example/job)" not in inner
+        assert "[Click](https://evil.example/r)" not in inner
+        assert "%%%" not in inner
+        # Custom attribute still preserves the verbatim test name for search/facets.
+        assert _custom(event)["test"]["name"] == crafted_test
+
+    def test_details_markdown_block_delimiter_and_link_injection_neutralized(self):
+        crafted_details = (
+            "Failure root cause:\n"
+            "%%%\n"
+            "Injected outside\n"
+            "%%%%%\n"
+            "See [Phish](https://evil.example/1) and "
+            r"\[Bypass](https://evil.example/2) and "
+            "<https://evil.example/3> and `inline` and "
+            "https://user:secret@jenkins.example.com/job/leak/1/"  # pragma: allowlist secret
+        )
+        message = _message(
+            _exporter()._build_event(_context(), _failure(details=crafted_details))
+        )
+        assert message.startswith("%%%\n")
+        assert message.endswith("\n%%%")
+        inner = message.removeprefix("%%%\n").removesuffix("\n%%%")
+
+        assert "%%%" not in inner
+        assert "[Phish](https://evil.example/1)" not in inner
+        assert r"\[Phish\]\(https://evil.example/1\)" in inner
+        # Backslash escape attempt must not unescape the bracket
+        assert r"\\\[Bypass\]\(https://evil.example/2\)" in inner
+        assert "<https://evil.example/3>" not in inner
+        assert r"\<https://evil.example/3\>" in inner
+        assert r"\`inline\`" in inner
+        assert "secret" not in inner
+        assert "https://jenkins.example.com/job/leak/1/" in inner
+
+    def test_legitimate_markdown_and_urls_remain_readable(self):
+        context = _context(
+            reviewed_by={"test_login_flow": "Bob Smith!"},
+            tracked_in_links={
+                "test_login_flow": [
+                    {
+                        "tracked_in_url": "https://jira.example.com/browse/PROJ-123",
+                        "tracked_in_type": "jira",
+                    }
+                ]
+            },
+        )
+        failure = _failure(
+            details="100% of retries timed out.\nCheck pod logs for OOMKill."
+        )
+        message = _message(_exporter()._build_event(context, failure))
+        assert "### test_login_flow" in message
+        assert "- **Job:** e2e-suite (#42)" in message
+        assert (
+            "- **RootCoz report:** [analysis job-123]"
+            "(https://rootcoz.example.com/results/job-123)" in message
+        )
+        assert (
+            "- **CI build:** [build #42]"
+            "(https://jenkins.example.com/job/e2e-suite/42/)" in message
+        )
+        assert (
+            "- **Tracked in:** [Jira](https://jira.example.com/browse/PROJ-123)"
+            in message
+        )
+        assert "- **Reviewed by:** Bob Smith!" in message
+        assert "100% of retries timed out.\nCheck pod logs for OOMKill." in message
+
+    def test_details_uppercase_scheme_urls_strip_credentials(self):
+        details = (
+            "Check HTTPS://user:upper_secret@example.com/path and "  # pragma: allowlist secret
+            "HTTP://u:lower_secret@ci.example.com/1 and "  # pragma: allowlist secret
+            "GIT://tok_secret@git.example.com/org/repo.git"  # pragma: allowlist secret
+        )
+        message = _message(
+            _exporter()._build_event(_context(), _failure(details=details))
+        )
+        for secret in ("upper_secret", "lower_secret", "tok_secret"):
+            assert secret not in message
+        assert "https://example.com/path" in message
+        assert "http://ci.example.com/1" in message
+        assert "git://git.example.com/org/repo.git" in message
+
+    def test_duplicate_sanitized_tracked_in_links_deduplicated(self):
+        context = _context(
+            tracked_in_links={
+                "test_login_flow": [
+                    {
+                        "tracked_in_url": "https://u1:pw1@jira.example.com/browse/PROJ-1",  # pragma: allowlist secret
+                        "tracked_in_type": "jira",
+                    },
+                    {
+                        "tracked_in_url": "https://jira.example.com/browse/PROJ-1",
+                        "tracked_in_type": "jira",
+                    },
+                ]
+            }
+        )
+        message = _message(_exporter()._build_event(context, _failure()))
+        assert (
+            message.count(
+                "- **Tracked in:** [Jira](https://jira.example.com/browse/PROJ-1)"
+            )
+            == 1
+        )

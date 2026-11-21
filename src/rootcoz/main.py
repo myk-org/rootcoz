@@ -5,6 +5,7 @@ import copy
 import csv
 import hashlib
 import hmac
+import html
 import io
 import ipaddress
 import itertools
@@ -41,6 +42,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Literal, NoReturn, get_args
 from urllib.parse import quote as _urlquote
@@ -405,6 +407,7 @@ from rootcoz.url_utils import (
     mask_url_credentials_in_text,
     mask_url_value,
     redact_urls_in_text,
+    sanitize_http_href,
     strip_nonprintable,
     strip_url_credentials,
     strip_url_userinfo,
@@ -1105,21 +1108,32 @@ class _PendingFeed:
     deadline so the navbar and multiplexed streams share one implementation.
     """
 
-    def __init__(self, event: asyncio.Event | None, username: str, name: str):
+    def __init__(
+        self,
+        event: asyncio.Event | None,
+        username: str,
+        name: str,
+        auth_check: Callable[[], Awaitable[bool]] | None = None,
+    ):
         self.event = event
         self.username = username
         self.name = name
+        self._auth_check = auth_check
         # ``None`` = no count delivered to this stream yet.
         self.last: int | None = None
         # ``None`` = nothing to retry; otherwise the monotonic retry deadline.
         self.retry_at: float | None = None
 
     async def step(self) -> str | None:
-        """Re-verify the admin role and recount; return the chunk to emit."""
+        """Re-verify the admin role/credential and recount; return the chunk to emit."""
         if self.event is None:
             return None
         try:
-            still_admin = await _ai_admin_role_current(self.username)
+            still_admin = (
+                await self._auth_check()
+                if self._auth_check is not None
+                else await _ai_admin_role_current(self.username)
+            )
         except aiosqlite.Error, OSError, TypeError, ValueError:
             # Unverifiable is not revoked: send nothing, but stay registered and
             # retry, so a transient database error does not freeze the badge.
@@ -1448,6 +1462,7 @@ async def _queue_sse_events(
     subscription: _PayloadSubscription,
     render: Callable[[Any], str | None],
     gap_event: str = "",
+    auth_check: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[str]:
     """Yield rendered SSE chunks from a subscription's queue until the client leaves.
 
@@ -1470,6 +1485,8 @@ async def _queue_sse_events(
             )
         except TimeoutError:
             timed_out = True
+        if auth_check is not None and not await auth_check():
+            break
         if gap_event and (dropped := subscription.take_dropped()):
             yield f"event: {gap_event}\ndata: {json.dumps({'dropped': dropped})}\n\n"
         if timed_out:
@@ -1504,6 +1521,8 @@ def _make_sse_stream(
     event_name: str,
     per_key_listeners: dict[str, set[asyncio.Event]] | None = None,
     listener_key: str = "",
+    *,
+    auth_check: Callable[[], Awaitable[bool]] | None = None,
 ) -> StreamingResponse:
     """Create a generic SSE stream that sends a named event when signaled.
 
@@ -1513,6 +1532,7 @@ def _make_sse_stream(
         event_name: SSE event name to send (e.g. 'dashboard-changed').
         per_key_listeners: Optional per-key listener dict (e.g. per job_id).
         listener_key: Key into per_key_listeners (e.g. the job_id).
+        auth_check: Optional async re-authorization check run on each wake/keepalive.
     """
 
     async def event_generator() -> AsyncIterator[str]:
@@ -1541,6 +1561,9 @@ def _make_sse_stream(
                         task.cancel()
                     wait_task = None
                 except asyncio.CancelledError:
+                    break
+
+                if auth_check is not None and not await auth_check():
                     break
 
                 if not done:
@@ -4162,6 +4185,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _derive_sidecar_url_from_port()
 
     await init_db()
+    await _migrate_legacy_admin_artifacts()
     await storage.cleanup_expired_sessions()
     await _cleanup_revoked_ai_sessions()
 
@@ -4604,6 +4628,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS":
             request.state.username = ""
             request.state.is_admin = False
+            request.state.is_ai_session = False
             request.state.role = "reviewer"
             request.state.can_view_reports = False
             request.state.can_use_server_providers = False
@@ -4629,9 +4654,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Set defaults
         request.state.username = ""
         request.state.is_admin = False
+        request.state.is_ai_session = False
         request.state.role = "reviewer"
         request.state.can_view_reports = False
         request.state.can_use_server_providers = False
+        request.state.auth_session_token = ""
 
         # Public paths and static assets — pass through
         # (but /login may need SSO redirect, handled below;
@@ -4674,10 +4701,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         is_admin = False
+        is_ai_session = False
         username = ""
         resolved_role = get_settings().default_user_role  # default role until resolved
         authenticated_admin = False
         has_valid_session = False
+        auth_session_token = ""
         # User row already loaded via Bearer key or SSO (reuse for can_view_reports).
         fetched_user: dict[str, Any] | None = None
 
@@ -4687,9 +4716,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
             session = await storage.get_session(session_token)
             if session:
                 is_admin = bool(session["is_admin"])
+                is_ai_session = bool(session.get("is_ai_session", False))
                 username = str(session["username"])
                 authenticated_admin = is_admin
                 has_valid_session = True
+                auth_session_token = session_token
                 if is_admin:
                     resolved_role = "admin"
                 else:
@@ -4728,17 +4759,21 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     token, settings.admin_key
                 ):
                     is_admin = True
+                    is_ai_session = False
                     username = "admin"
                     resolved_role = "admin"
                     authenticated_admin = True
                     has_valid_session = True
+                    auth_session_token = ""
                 else:
                     user = await storage.get_user_by_key(token)
                     if user:
                         fetched_user = user
+                        is_ai_session = False
                         username = str(user["username"])
                         resolved_role = str(user.get("role", "reviewer"))
                         has_valid_session = True
+                        auth_session_token = ""
                         if resolved_role == "admin":
                             is_admin = True
                             authenticated_admin = True
@@ -4748,15 +4783,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         session = await storage.get_session(token)
                         if session:
                             is_admin = bool(session["is_admin"])
+                            is_ai_session = bool(session.get("is_ai_session", False))
                             username = str(session["username"])
                             resolved_role = str(session.get("role", "reviewer"))
                             if is_admin:
                                 resolved_role = "admin"
                             authenticated_admin = is_admin
                             has_valid_session = True
+                            auth_session_token = token
 
         # 3. Check X-Forwarded-User header (SSO via trusted proxy)
         if not username and proxy_username and proxy_username.lower() != "admin":
+            is_ai_session = False
             username = proxy_username
             has_valid_session = True
             # Resolve the user's actual role from DB
@@ -4808,7 +4846,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             request.state.username = username
             request.state.is_admin = is_admin
+            request.state.is_ai_session = is_ai_session
             request.state.role = resolved_role
+            request.state.auth_session_token = auth_session_token
             # can_view_reports: admins effective True; non-admins reload stored flag
             # from users table each request (no session invalidation needed).
             # Reuse a user row already loaded via Bearer/SSO when available.
@@ -6193,19 +6233,161 @@ async def _auto_assign_metadata(
 
 
 async def _ai_admin_role_current(username: str) -> bool:
-    """Check the live role, not a role captured when chat was queued."""
+    """Check the live role and enabled state, not a role captured when chat was queued."""
     if username == "admin":  # Bootstrap admin has no users row.
         return True
     user = await storage.get_user_by_username(username)
-    return bool(user and user["role"] == "admin")
+    return bool(user and not user.get("disabled") and user["role"] == "admin")
+
+
+_ADMIN_MULTIPLEX_TOPICS = frozenset({"token-usage", "settings", "admin-chat"})
+_ADMIN_SSE_RECHECK_INTERVAL_SECONDS = 1.0
+
+
+async def _is_admin_sse_authorized(
+    request: Request, *, raise_on_error: bool = False
+) -> bool:
+    """Re-verify that a long-lived admin SSE caller is still an active admin.
+
+    Checks both the live account state (not deleted, not disabled, still admin)
+    and, when the connection authenticated via a session token or DB API key,
+    that the credential itself has not been revoked or rotated.
+    """
+    username = getattr(request.state, "username", "")
+    if not isinstance(username, str) or not username:
+        return False
+
+    try:
+        # Read via getattr so Starlette's State (which stores keys in _state,
+        # not __dict__) honors auth_session_token="" set by AuthMiddleware when
+        # a Bearer admin overrides an unrelated or expired session cookie.
+        raw_state_token = getattr(request.state, "auth_session_token", None)
+        if isinstance(raw_state_token, str):
+            session_token = raw_state_token
+        elif isinstance(getattr(request, "cookies", None), Mapping):
+            raw_cookie = _read_cookie(request, "rootcoz_session")
+            session_token = raw_cookie if isinstance(raw_cookie, str) else ""
+        else:
+            session_token = ""
+
+        if session_token:
+            session = await storage.get_session(session_token)
+            if (
+                not session
+                or not session.get("is_admin")
+                or str(session.get("username", "")) != username
+            ):
+                logger.info(
+                    "Admin SSE closed for '%s': session revoked or no longer admin",
+                    username,
+                )
+                return False
+        else:
+            headers = getattr(request, "headers", None)
+            auth_header = (
+                headers.get("authorization", "") if isinstance(headers, Mapping) else ""
+            )
+            if isinstance(auth_header, str) and auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+                settings = get_settings()
+                if not (
+                    username == "admin"
+                    and settings.admin_key
+                    and hmac.compare_digest(token, settings.admin_key)
+                ):
+                    user = await storage.get_user_by_key(token)
+                    if user is not None:
+                        if (
+                            str(user.get("username", "")) != username
+                            or user.get("disabled")
+                            or user.get("role") != "admin"
+                        ):
+                            logger.info(
+                                "Admin SSE closed for '%s': API key no longer active admin",
+                                username,
+                            )
+                            return False
+                        return True
+                    session = await storage.get_session(token)
+                    if (
+                        not session
+                        or not session.get("is_admin")
+                        or str(session.get("username", "")) != username
+                    ):
+                        logger.info(
+                            "Admin SSE closed for '%s': Bearer credential revoked",
+                            username,
+                        )
+                        return False
+
+        still_admin = await _ai_admin_role_current(username)
+        if not still_admin:
+            logger.info(
+                "Admin SSE closed for '%s': account deleted, disabled, or demoted",
+                username,
+            )
+        return still_admin
+    except Exception:
+        if raise_on_error:
+            raise
+        logger.warning(
+            "Admin SSE authorization re-check failed for '%s'; closing stream",
+            username,
+            exc_info=True,
+        )
+        return False
+
+
+def _make_admin_sse_auth_check(
+    request: Request,
+    *,
+    recheck_interval: float = _ADMIN_SSE_RECHECK_INTERVAL_SECONDS,
+) -> Callable[[], Awaitable[bool]]:
+    """Build a per-stream admin auth check that avoids per-item DB storms.
+
+    Always verifies against SQLite on the first call, immediately whenever
+    ``storage.get_auth_revocation_version()`` advances (any disable, demotion,
+    deletion, logout, or key rotation), and periodically every
+    ``recheck_interval`` seconds (catching natural session expiry).
+    """
+    last_checked: float | None = None
+    last_version = -1
+
+    async def _check() -> bool:
+        nonlocal last_checked, last_version
+        now = _time.monotonic()
+        version = storage.get_auth_revocation_version()
+        if (
+            last_checked is not None
+            and version == last_version
+            and (now - last_checked) < recheck_interval
+        ):
+            return True
+        authorized = await _is_admin_sse_authorized(request)
+        if authorized:
+            last_checked = now
+            last_version = version
+            return True
+        last_checked = None
+        return False
+
+    return _check
 
 
 async def _create_ai_auth_header(
-    username: str, is_admin: bool = False, *, refuse_storage_fault: bool = False
+    username: str,
+    is_admin: bool = False,
+    *,
+    refuse_storage_fault: bool = False,
+    is_ai_session: bool = False,
 ) -> str:
     """Create a short-lived session token for AI internal API calls.
 
     Returns a Bearer auth header string, or empty string on failure/no user.
+
+    ``is_ai_session`` marks tokens minted for server-initiated analysis runs
+    that legitimately invoke ``POST /history/classify`` as ``rootcoz-ai``.
+    Job chat and admin chat callers must leave it False.
 
     ``refuse_storage_fault`` is for a caller that cannot serve a useful result
     without the token (the two chat Starts): a non-transient storage fault is
@@ -6226,6 +6408,7 @@ async def _create_ai_auth_header(
             username,
             is_admin=is_admin,
             ttl_hours=_AI_SESSION_TTL_HOURS,
+            is_ai_session=is_ai_session,
         )
         if is_admin and not await _ai_admin_role_current(username):
             await storage.delete_session(session_token)
@@ -7634,7 +7817,7 @@ async def _process_ci_source_analysis(
         ):
             return
 
-        auth_header = await _create_ai_auth_header(username)
+        auth_header = await _create_ai_auth_header(username, is_ai_session=True)
 
         # Group failures by error signature
         groups: dict[str, list[Any]] = defaultdict(list)
@@ -9427,7 +9610,7 @@ async def _reanalyze_failure_background(
             )
             return
 
-        auth_header = await _create_ai_auth_header(username)
+        auth_header = await _create_ai_auth_header(username, is_ai_session=True)
 
         # Clone repos if configured (no artifact linking here — done after refetch)
         repo_manager = RepositoryManager()
@@ -15352,7 +15535,7 @@ async def _build_export_context(
     Raises:
         ValueError: Invalid child job parameters.
     """
-    base_url = _extract_base_url()
+    base_url = sanitize_http_href(_extract_base_url()).rstrip("/")
     report_url = f"{base_url}/results/{job_id}" if base_url else ""
     # The top-level job name, read before scoping replaces result_data with
     # the child subtree: it is the fallback key for the job metadata.
@@ -15364,7 +15547,7 @@ async def _build_export_context(
     result_data, scope_job, scope_build = _resolve_push_scope(
         result_data, child_job_name, child_build_number
     )
-    if scope_job:
+    if scope_job and report_url:
         anchor = f"child-{_urlquote(scope_job, safe='')}-{scope_build}"
         report_url = f"{report_url}#{anchor}"
 
@@ -15468,7 +15651,9 @@ async def _build_export_context(
         job_id=job_id,
         job_name=result_data.get("job_name", ""),
         build_number=str(resolve_display_build_id(result_data)),
-        jenkins_url=result_data.get("jenkins_url", ""),
+        jenkins_url=sanitize_http_href(
+            str(result_data.get("build_url") or result_data.get("jenkins_url") or "")
+        ),
         failures=failures_data,
         report_url=report_url,
         child_job_name=child_job_name,
@@ -16367,7 +16552,12 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
             _mention_listeners.setdefault(username, set()).add(mention_event)
         if pending_event is not None:
             _pending_count_listeners.add(pending_event)
-        pending_feed = _PendingFeed(pending_event, username, "pending-count")
+        pending_feed = _PendingFeed(
+            pending_event,
+            username,
+            "pending-count",
+            auth_check=partial(_is_admin_sse_authorized, request, raise_on_error=True),
+        )
 
         try:
             # Send both counts immediately on connect
@@ -16417,6 +16607,11 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     break
 
                 if not done and not pending_feed.retry_due():
+                    if pending_feed.event is not None and (
+                        chunk := await pending_feed.step()
+                    ):
+                        yield chunk
+                        continue
                     yield ": keepalive\n\n"
                     continue
 
@@ -16517,7 +16712,12 @@ async def stream_comments(job_id: str, request: Request) -> StreamingResponse:
 async def stream_token_usage(request: Request) -> StreamingResponse:
     """SSE stream that notifies when token usage data changes."""
     _require_admin(request)
-    return _make_sse_stream(request, _token_usage_listeners, "usage-changed")
+    return _make_sse_stream(
+        request,
+        _token_usage_listeners,
+        "usage-changed",
+        auth_check=_make_admin_sse_auth_check(request),
+    )
 
 
 @app.get("/api/stream", operation_id="streamMultiplexed")
@@ -16623,6 +16823,10 @@ async def stream_multiplexed(
     if not registrations and not navbar_requested:
         raise HTTPException(status_code=400, detail="No valid topics specified")
 
+    has_admin_topics = any(
+        prefix in _ADMIN_MULTIPLEX_TOPICS for prefix, *_ in registrations
+    )
+
     async def event_generator() -> AsyncIterator[str]:
         global _sse_connections
         # Register all events in their listener sets
@@ -16648,12 +16852,23 @@ async def stream_multiplexed(
             if is_admin:
                 pending_event = asyncio.Event()
                 _pending_count_listeners.add(pending_event)
-        pending_feed = _PendingFeed(pending_event, username, "navbar:pending-count")
+        pending_feed = _PendingFeed(
+            pending_event,
+            username,
+            "navbar:pending-count",
+            auth_check=partial(_is_admin_sse_authorized, request, raise_on_error=True),
+        )
 
         wait_tasks: list[asyncio.Task[Any]] = []
         _sse_connections += 1
+        admin_auth_check = (
+            _make_admin_sse_auth_check(request) if has_admin_topics else None
+        )
 
         try:
+            if admin_auth_check is not None and not await admin_auth_check():
+                return
+
             # Send initial navbar data on connect
             if navbar_requested:
                 try:
@@ -16705,10 +16920,20 @@ async def stream_multiplexed(
                     break
 
                 if not done and not pending_feed.retry_due():
+                    if admin_auth_check is not None and not await admin_auth_check():
+                        break
+                    if pending_feed.event is not None and (
+                        chunk := await pending_feed.step()
+                    ):
+                        yield chunk
+                        continue
                     yield ": keepalive\n\n"
                     continue
 
                 if await request.is_disconnected():
+                    break
+
+                if admin_auth_check is not None and not await admin_auth_check():
                     break
 
                 # Emit events for all fired topics, plus a due pending retry
@@ -17321,7 +17546,8 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict[str
     _check_allow_list(request)
     _require_reviewer(request)
     logger.debug(
-        f"POST /history/classify: test_name={body.test_name!r}, classification={body.classification!r}"
+        f"POST /history/classify: test_name={body.test_name!r}, classification={body.classification!r}, "
+        f"is_ai_session={bool(getattr(request.state, 'is_ai_session', False))}"
     )
     test_name = body.test_name.strip()
     classification = body.classification
@@ -17345,10 +17571,21 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict[str
                 detail="KNOWN_BUG requires non-empty references (e.g., Jira tickets or historical bug URLs).",
             )
 
-        # Detect AI caller: the AI prompt includes source="ai" in the request body.
+        # Detect AI caller: require BOTH a server-minted AI analysis session
+        # (verified in AuthMiddleware) AND source="ai" in the request body.
         # AI_SYSTEM_USERNAME is a reserved system identity (blocked from registration)
         # used consistently for all AI-originated actions (auto-review, classification).
-        is_ai_caller = body.source == "ai"
+        is_ai_caller = (
+            bool(getattr(request.state, "is_ai_session", False)) and body.source == "ai"
+        )
+        if body.source == "ai" and not is_ai_caller:
+            logger.warning(
+                "POST /history/classify: ignoring source='ai' from non-AI session "
+                "(user=%s, job_id=%r, test_name=%r)",
+                request.state.username,
+                classify_job_id,
+                test_name,
+            )
 
         # Force created_by: AI callers are always attributed to AI_SYSTEM_USERNAME,
         # regardless of the authenticated session username.
@@ -19532,6 +19769,7 @@ async def stream_logs(
         return f"event: log\ndata: {line.replace(chr(10), '  ')}\n\n"
 
     async def event_generator() -> AsyncIterator[str]:
+        admin_auth_check = _make_admin_sse_auth_check(request)
         # Subscribe before reading the tail: a line logged while the tail is
         # being read then lands in the queue instead of falling into the gap
         # between the two sources.
@@ -19550,10 +19788,14 @@ async def stream_logs(
                         tail_lines = await asyncio.to_thread(
                             _read_log_tail, log_path, lines
                         )
+                        if not await admin_auth_check():
+                            return
                         for line in tail_lines:
                             clean = _ANSI_RE.sub("", line)
                             tail_seen[clean] += 1
                             if _matches_level(clean):
+                                if not await admin_auth_check():
+                                    return
                                 yield _log_chunk(clean)
                     except OSError:
                         pass
@@ -19565,7 +19807,12 @@ async def stream_logs(
                     return None
                 return _log_chunk(line) if _matches_level(line) else None
 
-            async for chunk in _queue_sse_events(request, subscription, _render):
+            async for chunk in _queue_sse_events(
+                request,
+                subscription,
+                _render,
+                auth_check=admin_auth_check,
+            ):
                 yield chunk
 
     logger.info(
@@ -19985,7 +20232,11 @@ async def stream_audit_events(request: Request) -> StreamingResponse:
     async def event_generator() -> AsyncIterator[str]:
         async with _audit_broadcast.subscribe() as subscription:
             async for chunk in _queue_sse_events(
-                request, subscription, _render, gap_event="audit-gap"
+                request,
+                subscription,
+                _render,
+                gap_event="audit-gap",
+                auth_check=_make_admin_sse_auth_check(request),
             ):
                 yield chunk
 
@@ -20307,6 +20558,7 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
     if user_row is None:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
     owner_id = int(user_row["id"])
+    stored_username = str(user_row["username"])
 
     async with _hold_attachment_scope_locks(f"owner:{owner_id}"):
         # Read the account before it is gone: the row has to say what that account
@@ -20327,11 +20579,21 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
         if not deleted:
             if not await storage.user_id_exists(owner_id):
                 await _cleanup_deleted_owner_attachments(owner_id)
+                await cleanup_off_loop(
+                    f"owner:{owner_id}",
+                    partial(
+                        _cleanup_admin_artifacts, stored_username, owner_id=owner_id
+                    ),
+                )
             elif marker_written:
                 await issue_attachments.remove_owner_delete_marker(owner_id)
             raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
         await _cleanup_deleted_owner_attachments(owner_id)
+        await cleanup_off_loop(
+            f"owner:{owner_id}",
+            partial(_cleanup_admin_artifacts, stored_username, owner_id=owner_id),
+        )
 
     notify_pending_count_changed()
     await _cleanup_revoked_ai_sessions()
@@ -22503,7 +22765,12 @@ def _broadcast_settings_change() -> None:
 async def settings_stream(request: Request) -> StreamingResponse:
     """SSE stream for server settings changes."""
     _require_admin(request)
-    return _make_sse_stream(request, _settings_listeners, "settings-changed")
+    return _make_sse_stream(
+        request,
+        _settings_listeners,
+        "settings-changed",
+        auth_check=_make_admin_sse_auth_check(request),
+    )
 
 
 @app.get("/api/admin/settings", operation_id="getAdminSettings")
@@ -27079,7 +27346,11 @@ def _resolve_chat_ai_config(
 
 
 def _chat_sse_response(
-    request: Request, username: str, job_id: str
+    request: Request,
+    username: str,
+    job_id: str,
+    *,
+    auth_check: Callable[[], Awaitable[bool]] | None = None,
 ) -> StreamingResponse:
     """The one chat stream: claimed, subscribed, rendered and released in one place.
 
@@ -27107,6 +27378,7 @@ def _chat_sse_response(
                     subscription,
                     _render_chat_frame,
                     gap_event="chat-changed",
+                    auth_check=auth_check,
                 ):
                     yield chunk
         finally:
@@ -27669,6 +27941,97 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
 
 # -- Admin DB endpoints (used by admin chat tools) --
 
+# Fail-closed SQLite authorizer policy for admin chat DB inspection (#596).
+# Shared with ``admin_db_schema`` so schema discovery matches query access.
+_ADMIN_DB_ALLOWED_ACTIONS: frozenset[int] = frozenset(
+    {
+        sqlite3.SQLITE_SELECT,
+        sqlite3.SQLITE_READ,
+        sqlite3.SQLITE_FUNCTION,
+        *((sqlite3.SQLITE_RECURSIVE,) if hasattr(sqlite3, "SQLITE_RECURSIVE") else ()),
+    }
+)
+_ADMIN_DB_BLOCKED_FUNCTIONS: frozenset[str] = frozenset(
+    {
+        "load_extension",
+        "fts3_tokenizer",
+        "sqlite_offset",
+        "writefile",
+        "readfile",
+        "edit",
+    }
+)
+_ADMIN_DB_BLOCKED_TABLES: frozenset[str] = frozenset(
+    {
+        "server_settings",
+        "server_settings_history",
+    }
+)
+_ADMIN_DB_BLOCKED_COLUMNS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("users", "api_key_hash"),
+        ("server_ai_providers", "api_key_enc"),
+        ("sessions", "token"),
+        ("push_subscriptions", "p256dh_key"),
+        ("push_subscriptions", "auth_key"),
+        ("ai_session_sources", "claim_token"),
+        ("results", "result_json"),
+    }
+)
+
+
+def _is_blocked_admin_db_table(table: str) -> bool:
+    return table.lower() in _ADMIN_DB_BLOCKED_TABLES
+
+
+def _is_blocked_admin_db_column(table: str, column: str) -> bool:
+    t = table.lower()
+    c = column.lower()
+    return (
+        t in _ADMIN_DB_BLOCKED_TABLES
+        or (t, c) in _ADMIN_DB_BLOCKED_COLUMNS
+        or c.endswith("_enc")
+    )
+
+
+def _admin_db_authorizer(
+    action: int,
+    arg1: str | None,
+    arg2: str | None,
+    db_name: str | None,
+    source: str | None,
+) -> int:
+    """Fail-closed SQLite authorizer for ``admin_db_query`` (#596).
+
+    Permits only read-only SELECT/CTE queries, denies write/file/PRAGMA/ATTACH
+    operations (including ``VACUUM INTO``), blocks dangerous functions, and
+    blocks sensitive tables/columns regardless of SQL aliasing or expressions.
+    """
+    if action not in _ADMIN_DB_ALLOWED_ACTIONS:
+        return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_FUNCTION:
+        func_name = (arg2 or "").lower()
+        if not func_name or func_name in _ADMIN_DB_BLOCKED_FUNCTIONS:
+            return sqlite3.SQLITE_DENY
+    elif action == sqlite3.SQLITE_READ:
+        table = (arg1 or "").lower()
+        column = (arg2 or "").lower()
+        if _is_blocked_admin_db_table(table):
+            return sqlite3.SQLITE_DENY
+        if column and _is_blocked_admin_db_column(table, column):
+            return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
+def _sanitize_admin_db_value(value: Any) -> Any:
+    """Recursively apply ``strip_sensitive_from_response`` to decoded row dicts."""
+    if isinstance(value, dict):
+        stripped = strip_sensitive_from_response(value)
+        return {k: _sanitize_admin_db_value(v) for k, v in stripped.items()}
+    if isinstance(value, list):
+        return [_sanitize_admin_db_value(item) for item in value]
+    return value
+
 
 @app.get("/api/admin/db/schema", operation_id="adminDbSchema")
 async def admin_db_schema(request: Request) -> dict[str, Any]:
@@ -27696,6 +28059,8 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
         )
         for row in cursor.fetchall():
             table_name = row["name"]
+            if _is_blocked_admin_db_table(table_name):
+                continue
             cols = conn.execute(f"PRAGMA table_info({table_name})")
             columns = [
                 {
@@ -27705,6 +28070,7 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
                     "notnull": bool(c["notnull"]),
                 }
                 for c in cols.fetchall()
+                if not _is_blocked_admin_db_column(table_name, c["name"])
             ]
             count = conn.execute(
                 f"SELECT COUNT(*) as c FROM [{table_name}]"
@@ -27855,6 +28221,22 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
     sql_hash = hashlib.sha256(sql.encode()).hexdigest()
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    authorizer_denied = False
+
+    def _track_authorizer(
+        action: int,
+        arg1: str | None,
+        arg2: str | None,
+        db_name: str | None,
+        source: str | None,
+    ) -> int:
+        nonlocal authorizer_denied
+        decision = _admin_db_authorizer(action, arg1, arg2, db_name, source)
+        if decision != sqlite3.SQLITE_OK:
+            authorizer_denied = True
+        return decision
+
+    conn.set_authorizer(_track_authorizer)
     try:
         cursor = conn.execute(sql)
         rows = cursor.fetchall()
@@ -27879,36 +28261,52 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
             },
             request=request,
         )
-        # A row can carry a credential column (``github_token``, a key): mask the
-        # sensitive names in every row before the payload leaves the API, and
-        # let the shared response filter redact a ``request_params``-shaped one.
-        # Cell *text* is left verbatim — a row is data, and the URL masker would
-        # cut a value at its first ``?``/``#`` and drop its newlines (#581).
-        # The audit row above keeps the row *count* only, never the rows.
-        return strip_sensitive_from_response(
-            {
-                "columns": columns,
-                "rows": [
-                    mask_sensitive_fields(row, sanitize_text=False) for row in results
-                ],
-                "count": len(results),
-            }
-        )
+        # Scrub nested ``request_params``/``progress_log`` payloads inside any
+        # decoded row dicts first, then mask sensitive-named columns while
+        # leaving plain cell text verbatim (#581, #596).
+        sanitized_rows = [
+            mask_sensitive_fields(_sanitize_admin_db_value(row), sanitize_text=False)
+            for row in results
+        ]
+        return {
+            "columns": columns,
+            "rows": sanitized_rows,
+            "count": len(results),
+        }
     except sqlite3.Error as e:
+        is_auth_denied = (
+            authorizer_denied
+            or getattr(e, "sqlite_errorcode", None) == sqlite3.SQLITE_AUTH
+        )
+        if is_auth_denied:
+            logger.warning(
+                "Admin DB query blocked by SQLite authorizer for %s (sql_hash=%s): %s",
+                username,
+                sql_hash[:12],
+                e,
+            )
         # Any sqlite3 error, not only an operational one: a malformed statement
         # (``SELECT ?`` raises ``ProgrammingError``) is an attempt too, so it
         # leaves a failure row and the same 400 the client expects.
         await record_audit(
             action="admin.db_query",
             actor=username,
-            message=f"Admin '{username}' admin chat DB query failed",
+            message=(
+                f"Admin '{username}' admin chat DB query "
+                + ("denied" if is_auth_denied else "failed")
+            ),
             target_type="database",
-            outcome="failure",
-            details={"sql_hash": sql_hash},
+            outcome="denied" if is_auth_denied else "failure",
+            details=(
+                {"sql_hash": sql_hash, "reason": "not_authorized"}
+                if is_auth_denied
+                else {"sql_hash": sql_hash}
+            ),
             request=request,
         )
         raise HTTPException(status_code=400, detail=f"SQL Error: {e}")
     finally:
+        conn.set_authorizer(None)
         conn.close()
 
 
@@ -28097,7 +28495,12 @@ async def admin_chat_stream(request: Request) -> StreamingResponse:
     """SSE stream for real-time admin chat message updates."""
     _require_admin(request)
     _require_authenticated(request)
-    return _chat_sse_response(request, request.state.username, ADMIN_CHAT_JOB_ID)
+    return _chat_sse_response(
+        request,
+        request.state.username,
+        ADMIN_CHAT_JOB_ID,
+        auth_check=_make_admin_sse_auth_check(request),
+    )
 
 
 @app.post("/api/admin/chat", status_code=202, operation_id="sendAdminChatMessage")
@@ -28465,23 +28868,163 @@ async def _process_admin_chat_message(
 # -- Admin chat artifact helpers --
 
 _ADMIN_ARTIFACTS_BASE = Path("/tmp/rootcoz-admin-artifacts")
+# Leading dot is forbidden in valid usernames (storage._validate_username), so
+# `.by-id/<owner_id>` is strictly disjoint from every username-named directory.
+_ADMIN_ARTIFACTS_BY_ID_DIR = ".by-id"
 
 
-def _get_admin_artifacts_dir(username: str) -> Path:
-    """Get the artifacts directory for an admin user."""
+def _get_admin_artifacts_dir(username: str, *, owner_id: int | None = None) -> Path:
+    """Get the artifacts directory for an admin user.
+
+    DB admins use their immutable ``users.id`` under ``.by-id/<id>`` (disjoint
+    from every valid username) so recreating the same username never reaches
+    surviving artifacts from a prior account nor races with an in-flight
+    deletion of the old account (#603). Bootstrap ``admin`` (which has no
+    users row) and any non-DB caller use ``user_dir_key(username)`` so distinct
+    usernames (e.g. ``alice_1`` vs ``alice..1``) never collide (#607).
+    """
     from rootcoz.temp_paths import user_dir_key
 
+    if owner_id is not None:
+        return _ADMIN_ARTIFACTS_BASE / _ADMIN_ARTIFACTS_BY_ID_DIR / str(owner_id)
     return _ADMIN_ARTIFACTS_BASE / user_dir_key(username)
 
 
-def _cleanup_admin_artifacts(username: str) -> DeleteResult:
+async def _migrate_legacy_admin_artifacts() -> None:
+    """Migrate pre-upgrade username-keyed admin artifact dirs into ``.by-id/<id>``.
+
+    Runs once at startup before requests are served: existing DB accounts
+    (including temporarily demoted admins) keep their saved reports under their
+    immutable owner_id path, while orphaned directories from deleted accounts
+    are purged. Symlinks are never followed.
+    """
+    if (
+        _ADMIN_ARTIFACTS_BASE.is_symlink()
+        or not _ADMIN_ARTIFACTS_BASE.exists()
+        or not _ADMIN_ARTIFACTS_BASE.is_dir()
+    ):
+        return
+    by_id_root = _ADMIN_ARTIFACTS_BASE / _ADMIN_ARTIFACTS_BY_ID_DIR
+    if by_id_root.is_symlink():
+        logger.warning(
+            "Admin chat: refusing legacy artifact migration because %s is a symlink",
+            by_id_root,
+        )
+        return
+    base_resolved = _ADMIN_ARTIFACTS_BASE.resolve()
+    try:
+        entries = list(_ADMIN_ARTIFACTS_BASE.iterdir())
+    except OSError:
+        logger.warning(
+            "Admin chat: failed to scan %s for legacy artifact migration",
+            _ADMIN_ARTIFACTS_BASE,
+            exc_info=True,
+        )
+        return
+
+    from rootcoz.temp_paths import sanitize_path_part, user_dir_key
+
+    users = await storage.list_users()
+    sanitized_to_users: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for user in users:
+        uname = str(user.get("username", ""))
+        if uname:
+            sanitized_to_users[sanitize_path_part(uname)].append(user)
+
+    bootstrap_admin_key = user_dir_key("admin")
+    for entry in entries:
+        name = entry.name
+        if (
+            name in ("admin", bootstrap_admin_key)
+            or name.startswith(".")
+            or entry.is_symlink()
+            or not entry.is_dir()
+        ):
+            continue
+        matches = sanitized_to_users.get(name, [])
+        # Migrate only when a single DB account maps unambiguously to this
+        # sanitized legacy directory name; purge orphaned (0) or colliding
+        # (>1, e.g. `a..b` and `a_b`) directories rather than risking cross-
+        # account disclosure.
+        if len(matches) == 1:
+            row = matches[0]
+            target_dir = _get_admin_artifacts_dir(
+                str(row["username"]), owner_id=int(row["id"])
+            )
+
+            def _move_dir(src: Path = entry, dst: Path = target_dir) -> None:
+                if src.is_symlink() or dst.parent.is_symlink() or dst.is_symlink():
+                    return
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.parent.is_symlink():
+                    return
+                dst.mkdir(exist_ok=True)
+                if dst.is_symlink():
+                    return
+                if not dst.resolve().is_relative_to(base_resolved):
+                    return
+                dst.chmod(0o700)
+                for item in src.iterdir():
+                    if item.is_symlink() or not item.is_file():
+                        continue
+                    dest_item = dst / item.name
+                    if not dest_item.exists() and not dest_item.is_symlink():
+                        item.replace(dest_item)
+                delete_tree(src)
+
+            try:
+                await asyncio.to_thread(_move_dir)
+                logger.info(
+                    "Admin chat: migrated legacy artifacts for '%s' to owner %s",
+                    row["username"],
+                    row["id"],
+                )
+            except OSError:
+                logger.warning(
+                    "Admin chat: failed to migrate legacy artifacts for '%s'",
+                    row["username"],
+                    exc_info=True,
+                )
+        else:
+            if len(matches) > 1:
+                logger.warning(
+                    "Admin chat: purging ambiguous legacy artifact dir '%s' matching %d accounts",
+                    name,
+                    len(matches),
+                )
+            await cleanup_off_loop(
+                f"legacy-artifacts:{name}", partial(delete_tree, entry)
+            )
+
+
+async def _resolve_admin_artifacts_owner_id(username: str) -> tuple[bool, int | None]:
+    """Resolve the immutable owner_id for an admin artifact caller.
+
+    Returns ``(True, None)`` for bootstrap ``admin``, ``(True, id)`` for an
+    active DB admin, and ``(False, None)`` otherwise.
+    """
+    if username == "admin":
+        return True, None
+    row = await storage.get_user_by_username(username)
+    if row is None or row.get("disabled") or row.get("role") != "admin":
+        return False, None
+    return True, int(row["id"])
+
+
+def _cleanup_admin_artifacts(
+    username: str, *, owner_id: int | None = None
+) -> DeleteResult:
     """Delete all artifacts for an admin user; a reaper step, never inline.
 
     ``delete_tree`` reports failed paths in ``DeleteResult.failed`` instead of
     raising, so that count — not the absence of an exception — says whether the
     artifacts are gone.
     """
-    artifacts_dir = _get_admin_artifacts_dir(username)
+    artifacts_dir = (
+        _get_admin_artifacts_dir(username, owner_id=owner_id)
+        if owner_id is not None
+        else _get_admin_artifacts_dir(username)
+    )
     if not artifacts_dir.exists():
         return DeleteResult(0, 0)
     reclaimed = delete_tree(artifacts_dir)
@@ -28494,6 +29037,334 @@ def _cleanup_admin_artifacts(username: str) -> DeleteResult:
     else:
         logger.info("Admin chat: cleaned up artifacts for %s", username)
     return reclaimed
+
+
+_ADMIN_ARTIFACT_META_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:;"
+)
+_ADMIN_ARTIFACT_HTTP_CSP = f"{_ADMIN_ARTIFACT_META_CSP} sandbox"
+_ADMIN_ARTIFACT_CSP_META_TAG = (
+    f'<meta http-equiv="Content-Security-Policy" content="{_ADMIN_ARTIFACT_META_CSP}">'
+)
+_HTML_STRIP_WITH_CONTENT_TAGS: frozenset[str] = frozenset(
+    {
+        "script",
+        "iframe",
+        "object",
+        "applet",
+        "xmp",
+        "noembed",
+        "noframes",
+        "noscript",
+    }
+)
+_HTML_STRIP_VOID_TAGS: frozenset[str] = frozenset(
+    {"embed", "base", "link", "plaintext"}
+)
+_HTML_FOREIGN_CONTAINER_TAGS: frozenset[str] = frozenset({"svg", "math"})
+_HTML_FOREIGN_RAW_CONTENT_TAGS: frozenset[str] = frozenset(
+    {"style", "title", "textarea"}
+)
+_HTML_BLOCKED_META_HTTP_EQUIV: frozenset[str] = frozenset(
+    {"refresh", "content-security-policy", "set-cookie"}
+)
+_HTML_RESOURCE_URL_ATTRS: frozenset[str] = frozenset(
+    {
+        "src",
+        "srcset",
+        "poster",
+        "data",
+        "action",
+        "formaction",
+        "background",
+        "ping",
+        "codebase",
+        "cite",
+        "longdesc",
+        "archive",
+        "classid",
+        "usemap",
+        "dynsrc",
+        "lowsrc",
+    }
+)
+_HTML_HREF_ATTRS: frozenset[str] = frozenset({"href", "xlink:href"})
+_HTML_SAFE_DATA_IMAGE_PREFIXES: tuple[str, ...] = (
+    "data:image/png",
+    "data:image/jpeg",
+    "data:image/jpg",
+    "data:image/gif",
+    "data:image/webp",
+    "data:image/avif",
+    "data:image/bmp",
+    "data:image/x-icon",
+)
+_HTML_SAFE_CSS_DATA_PREFIXES: tuple[str, ...] = (
+    *_HTML_SAFE_DATA_IMAGE_PREFIXES,
+    "data:font/",
+)
+_HTML_SAFE_LINK_PREFIXES: tuple[str, ...] = (
+    "https://",
+    "http://",
+    "mailto:",
+    "#",
+)
+_HTML_ASCII_CTRL_WS_RE = re.compile(r"[\x00-\x20]+")
+_CSS_COMMENT_RE = re.compile(r"/\*.*?(?:\*/|$)", re.DOTALL)
+_CSS_HEX_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?")
+_CSS_CHAR_ESCAPE_RE = re.compile(r"\\([a-zA-Z@(-])")
+_CSS_IMPORT_RE = re.compile(r"@\s*import\b[^;]*(?:;|$)", re.IGNORECASE)
+_CSS_URL_RE = re.compile(r"url\s*\(([^)]*)\)", re.IGNORECASE)
+_CSS_IMAGE_SET_START_RE = re.compile(r"(?:-[a-z]+-)?image-set\s*\(", re.IGNORECASE)
+_CSS_EXPRESSION_RE = re.compile(r"expression\s*\(", re.IGNORECASE)
+
+
+def _normalize_html_url(value: str) -> str:
+    return _HTML_ASCII_CTRL_WS_RE.sub("", value).lower()
+
+
+def _decode_css_hex_escape(match: re.Match[str]) -> str:
+    codepoint = int(match.group(1), 16)
+    if codepoint == 0 or codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+        return "\ufffd"
+    ch = chr(codepoint)
+    # Never decode into HTML markup delimiters or CSS string/escape delimiters.
+    if ch in ("'", '"', "\\", "<", ">", "&"):
+        return match.group(0)
+    return ch
+
+
+def _strip_css_image_set(css: str) -> str:
+    """Replace CSS image-set(...) calls with 'none' in linear time (no ReDoS)."""
+    out: list[str] = []
+    pos = 0
+    length = len(css)
+    while pos < length:
+        match = _CSS_IMAGE_SET_START_RE.search(css, pos)
+        if match is None:
+            out.append(css[pos:])
+            break
+        out.append(css[pos : match.start()])
+        depth = 1
+        quote: str | None = None
+        idx = match.end()
+        while idx < length and depth > 0:
+            ch = css[idx]
+            if quote is not None:
+                if ch == "\\" and idx + 1 < length:
+                    idx += 2
+                    continue
+                if ch == quote:
+                    quote = None
+            elif ch in ("'", '"'):
+                quote = ch
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            idx += 1
+        out.append("none")
+        pos = idx
+    return "".join(out)
+
+
+def _is_allowed_html_url(tag: str, attr: str, value: str) -> bool:
+    normalized = _normalize_html_url(value)
+    if attr in _HTML_RESOURCE_URL_ATTRS:
+        # Only inline raster data: URIs on <img src> are allowed; strip all
+        # external resource loads and form submission endpoints.
+        return (
+            tag == "img"
+            and attr == "src"
+            and normalized.startswith(_HTML_SAFE_DATA_IMAGE_PREFIXES)
+        )
+    if attr in _HTML_HREF_ATTRS:
+        if tag == "a" and attr == "href":
+            return normalized.startswith(_HTML_SAFE_LINK_PREFIXES)
+        # Non-anchor href / xlink:href (e.g. SVG <use>, <image>) may only target
+        # in-document fragments, never external resources or scriptable schemes.
+        return normalized.startswith("#")
+    return True
+
+
+def _sanitize_inline_css(css: str) -> str:
+    """Strip CSS @import rules, legacy expression(), and external url()/image-set() loads."""
+    cleaned = _CSS_COMMENT_RE.sub("", css)
+    cleaned = _CSS_HEX_ESCAPE_RE.sub(_decode_css_hex_escape, cleaned)
+    cleaned = _CSS_CHAR_ESCAPE_RE.sub(r"\1", cleaned)
+    cleaned = _CSS_IMPORT_RE.sub("", cleaned)
+    cleaned = _CSS_EXPRESSION_RE.sub("blocked(", cleaned)
+
+    def _replace_url(match: re.Match[str]) -> str:
+        raw_target = match.group(1).strip().strip("\"'")
+        normalized = _normalize_html_url(raw_target)
+        if normalized.startswith("#") or normalized.startswith(
+            _HTML_SAFE_CSS_DATA_PREFIXES
+        ):
+            return match.group(0)
+        return "url()"
+
+    cleaned = _CSS_URL_RE.sub(_replace_url, cleaned)
+    return _strip_css_image_set(cleaned)
+
+
+class _AdminReportHTMLSanitizer(HTMLParser):
+    """Strip active HTML/external resources and inject a strict CSP meta tag (#606)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self._parts: list[str] = []
+        self._skip_stack: list[str] = []
+        self._csp_injected = False
+        self._before_head_eligible = True
+        self._seen_html_tag = False
+        self._in_style = False
+        self._foreign_depth = 0
+        self._doctype_end_idx: int | None = None
+
+    def _is_blocked_meta(self, attrs: list[tuple[str, str | None]]) -> bool:
+        for name, value in attrs:
+            if (
+                name.lower() == "http-equiv"
+                and (value or "").strip().lower() in _HTML_BLOCKED_META_HTTP_EQUIV
+            ):
+                return True
+        return False
+
+    def _filter_attrs(self, tag: str, attrs: list[tuple[str, str | None]]) -> str:
+        rendered: list[str] = []
+        for raw_name, value in attrs:
+            name = raw_name.lower()
+            if name.startswith("on") or name == "srcdoc":
+                continue
+            if (name in _HTML_RESOURCE_URL_ATTRS or name in _HTML_HREF_ATTRS) and (
+                value is None or not _is_allowed_html_url(tag, name, value)
+            ):
+                continue
+            if name == "style" and value is not None:
+                value = _sanitize_inline_css(value)
+            if value is None:
+                rendered.append(f" {name}")
+            else:
+                rendered.append(f' {name}="{html.escape(value, quote=True)}"')
+        return "".join(rendered)
+
+    def handle_decl(self, decl: str) -> None:
+        if self._skip_stack:
+            return
+        self._parts.append(f"<!{decl}>")
+        if (
+            self._doctype_end_idx is None
+            and self._before_head_eligible
+            and not self._seen_html_tag
+            and decl.lstrip().lower().startswith("doctype")
+        ):
+            self._doctype_end_idx = len(self._parts)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lower = tag.lower()
+        if lower in _HTML_STRIP_WITH_CONTENT_TAGS:
+            self._skip_stack.append(lower)
+            return
+        if self._skip_stack:
+            return
+        # Inside <svg>/<math>, HTML5 parses tags inside <style>/<title>/<textarea>
+        # as markup while Python's HTMLParser treats them as CDATA/RCDATA — drop them.
+        if self._foreign_depth > 0 and lower in _HTML_FOREIGN_RAW_CONTENT_TAGS:
+            self._skip_stack.append(lower)
+            return
+        if lower in _HTML_STRIP_VOID_TAGS:
+            return
+        if lower == "meta" and self._is_blocked_meta(attrs):
+            return
+        self._parts.append(f"<{lower}{self._filter_attrs(lower, attrs)}>")
+        if lower == "html":
+            self._seen_html_tag = True
+        elif lower == "head" and self._before_head_eligible and not self._csp_injected:
+            self._parts.append(_ADMIN_ARTIFACT_CSP_META_TAG)
+            self._csp_injected = True
+            self._before_head_eligible = False
+        else:
+            self._before_head_eligible = False
+        if lower in _HTML_FOREIGN_CONTAINER_TAGS:
+            self._foreign_depth += 1
+        if lower == "style":
+            self._in_style = True
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lower = tag.lower()
+        if self._skip_stack:
+            return
+        if (
+            lower in _HTML_STRIP_WITH_CONTENT_TAGS
+            or lower in _HTML_STRIP_VOID_TAGS
+            or lower == "style"
+            or (self._foreign_depth > 0 and lower in _HTML_FOREIGN_RAW_CONTENT_TAGS)
+        ):
+            return
+        if lower == "meta" and self._is_blocked_meta(attrs):
+            return
+        self._parts.append(f"<{lower}{self._filter_attrs(lower, attrs)} />")
+        if lower == "html":
+            self._seen_html_tag = True
+        else:
+            self._before_head_eligible = False
+
+    def handle_endtag(self, tag: str) -> None:
+        lower = tag.lower()
+        if self._skip_stack:
+            if lower in self._skip_stack:
+                while self._skip_stack:
+                    if self._skip_stack.pop() == lower:
+                        break
+            return
+        if lower in _HTML_STRIP_WITH_CONTENT_TAGS or lower in _HTML_STRIP_VOID_TAGS:
+            return
+        if lower == "style":
+            self._in_style = False
+        if lower in _HTML_FOREIGN_CONTAINER_TAGS and self._foreign_depth > 0:
+            self._foreign_depth -= 1
+        self._parts.append(f"</{lower}>")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_stack:
+            return
+        if data.strip():
+            self._before_head_eligible = False
+        if self._in_style:
+            data = _sanitize_inline_css(data).replace("<", r"\3c ")
+        self._parts.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        if self._skip_stack:
+            return
+        self._before_head_eligible = False
+        self._parts.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if self._skip_stack:
+            return
+        self._before_head_eligible = False
+        self._parts.append(f"&#{name};")
+
+    def handle_comment(self, data: str) -> None:
+        if self._skip_stack:
+            return
+        self._parts.append(f"<!--{data}-->")
+
+    def render(self) -> str:
+        if not self._csp_injected:
+            insert_at = self._doctype_end_idx or 0
+            self._parts.insert(insert_at, _ADMIN_ARTIFACT_CSP_META_TAG)
+        return "".join(self._parts)
+
+
+def _sanitize_admin_report_html(raw_html: str) -> str:
+    """Sanitize an admin chat HTML report before saving it to disk (#606)."""
+    parser = _AdminReportHTMLSanitizer()
+    parser.feed(raw_html)
+    parser.close()
+    return parser.render()
 
 
 class SaveArtifactRequest(BaseModel):
@@ -28509,6 +29380,9 @@ async def save_admin_chat_artifact(
     """Save an HTML report artifact from admin chat. Returns a download URL."""
     _require_admin(request)
     username = request.state.username
+    ok, owner_id = await _resolve_admin_artifacts_owner_id(username)
+    if not ok:
+        raise HTTPException(status_code=403, detail="Admin access required")
 
     # Sanitize filename — strip path separators, keep only the basename
     from rootcoz.temp_paths import sanitize_path_part
@@ -28520,24 +29394,40 @@ async def save_admin_chat_artifact(
     if not safe_filename.endswith(".html"):
         safe_filename += ".html"
 
-    artifact_id = str(uuid.uuid4())
-    artifacts_dir = _get_admin_artifacts_dir(username)
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    artifacts_dir.chmod(0o700)
+    sanitized_html = await asyncio.to_thread(
+        _sanitize_admin_report_html, body.html_content
+    )
 
-    artifact_path = artifacts_dir / f"{artifact_id}.html"
-    try:
-        await asyncio.to_thread(
-            artifact_path.write_text, body.html_content, encoding="utf-8"
-        )
-    except OSError as exc:
-        logger.exception("Failed to save artifact")
-        raise HTTPException(status_code=500, detail="Failed to save artifact") from exc
+    artifact_id = str(uuid.uuid4())
+
+    async def _write_artifact() -> None:
+        artifacts_dir = _get_admin_artifacts_dir(username, owner_id=owner_id)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        artifacts_dir.chmod(0o700)
+        artifact_path = artifacts_dir / f"{artifact_id}.html"
+        try:
+            await asyncio.to_thread(
+                artifact_path.write_text, sanitized_html, encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.exception("Failed to save artifact")
+            raise HTTPException(
+                status_code=500, detail="Failed to save artifact"
+            ) from exc
+
+    if owner_id is not None:
+        async with _hold_attachment_scope_locks(f"owner:{owner_id}"):
+            if not await storage.user_id_exists(owner_id):
+                raise HTTPException(status_code=403, detail="Admin access required")
+            await _write_artifact()
+    else:
+        await _write_artifact()
 
     logger.info(
-        "Admin chat: saved artifact %s (%d chars) for %s",
+        "Admin chat: saved artifact %s (%d chars, sanitized=%d chars) for %s",
         artifact_id,
         len(body.html_content),
+        len(sanitized_html),
         username,
     )
 
@@ -28563,7 +29453,11 @@ async def get_admin_chat_artifact(
     except ValueError:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    artifacts_dir = _get_admin_artifacts_dir(username)
+    ok, owner_id = await _resolve_admin_artifacts_owner_id(username)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    artifacts_dir = _get_admin_artifacts_dir(username, owner_id=owner_id)
     artifact_path = (artifacts_dir / f"{artifact_id}.html").resolve()
     # Belt-and-suspenders: ensure resolved path stays under the artifacts dir
     if not artifact_path.is_relative_to(artifacts_dir.resolve()):
@@ -28584,6 +29478,8 @@ async def get_admin_chat_artifact(
         media_type="text/html",
         headers={
             "Content-Disposition": f'attachment; filename="{download_filename}"',
+            "Content-Security-Policy": _ADMIN_ARTIFACT_HTTP_CSP,
+            "X-Content-Type-Options": "nosniff",
         },
     )
 
@@ -28595,6 +29491,7 @@ async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
     from rootcoz.engine.chat import cleanup_chat_repos, get_chat_workspace
 
     username = request.state.username
+    _ok, owner_id = await _resolve_admin_artifacts_owner_id(username)
 
     async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         await _require_chat_clear_version(ADMIN_CHAT_JOB_ID, username, request)
@@ -28610,7 +29507,8 @@ async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
         )
 
     await cleanup_off_loop(
-        ADMIN_CHAT_JOB_ID, partial(_cleanup_admin_artifacts, username)
+        ADMIN_CHAT_JOB_ID,
+        partial(_cleanup_admin_artifacts, username, owner_id=owner_id),
     )
     _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
     logger.info("Admin chat: cleared %d messages for user %s", count, username)

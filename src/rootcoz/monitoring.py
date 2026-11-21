@@ -17,6 +17,7 @@ import smtplib
 import subprocess
 import threading
 import time
+import weakref
 from collections import deque
 from dataclasses import dataclass, field
 from email.message import EmailMessage
@@ -209,10 +210,14 @@ async def check_db(db_path: str) -> dict[str, str]:
             }
 
         async with aiosqlite.connect(db_path) as db:
-            # Use BEGIN IMMEDIATE to verify write-lock can be acquired,
-            # then rollback to avoid any side effects.
-            await db.execute("BEGIN IMMEDIATE")
-            await db.execute("ROLLBACK")
+            # Read-only probe: never acquire a SQLite write lock (BEGIN IMMEDIATE)
+            # from unauthenticated /api/health or /metrics requests. Reading
+            # sqlite_master under query_only=ON verifies connectivity and a
+            # non-corrupt schema without contending with writers; filesystem
+            # writability was checked above.
+            await db.execute("PRAGMA query_only = ON")
+            async with db.execute("SELECT 1 FROM sqlite_master LIMIT 1") as cursor:
+                await cursor.fetchone()
         return {"status": "ok"}
     except (aiosqlite.Error, OSError) as exc:
         # health check must return status, not raise
@@ -504,22 +509,86 @@ def audit_health_check() -> dict[str, Any]:
     }
 
 
-async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
-    """Build full health response with checks and error rates.
+_HEALTH_CACHE_TTL_SECONDS = 5.0
+_HEALTH_CHECK_TIMEOUT = 6.0
 
-    Returns a dict with:
-    - status: "healthy", "degraded", or "unhealthy"
-    - checks: results from individual dependency checks
-    - error_rates: current rolling-window error statistics
 
-    Component versions are intentionally NOT included here: /api/health is
-    public (unauthenticated) and exact versions aid fingerprinting. Admins
-    get them via GET /api/admin/component-versions.
+@dataclass(frozen=True, slots=True)
+class _HealthProbeCacheEntry:
+    """Cached dependency probe results for a specific settings/db_path key."""
+
+    key: tuple[Any, ...]
+    probes: dict[str, dict[str, Any]]
+    fetched_at: float
+
+
+_health_cache_state_lock = threading.Lock()
+_health_probe_cache: _HealthProbeCacheEntry | None = None
+_health_cache_generation = 0
+_health_cache_locks: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, asyncio.Lock
+] = weakref.WeakKeyDictionary()
+
+
+def _get_health_cache_lock() -> asyncio.Lock:
+    """Return the single-flight asyncio.Lock bound to the running event loop."""
+    loop = asyncio.get_running_loop()
+    lock = _health_cache_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _health_cache_locks[loop] = lock
+    return lock
+
+
+def _health_cache_key(settings: Any, db_path: str) -> tuple[Any, ...]:
+    """Build a secret-free cache key for dependency health probes."""
+    return (
+        db_path,
+        getattr(settings, "jenkins_url", ""),
+        bool(getattr(settings, "jenkins_ssl_verify", True)),
+        bool(getattr(settings, "reportportal_enabled", False)),
+        getattr(settings, "reportportal_url", ""),
+        getattr(settings, "reportportal_project", ""),
+        bool(getattr(settings, "reportportal_verify_ssl", True)),
+        getattr(settings, "ai_provider", ""),
+        getattr(settings, "ai_model", ""),
+        os.getenv("SIDECAR_URL", "").strip(),
+        os.getenv("SIDECAR_PORT", "").strip(),
+    )
+
+
+def clear_health_cache() -> None:
+    """Invalidate the cached health dependency probes.
+
+    Bumps the cache generation so any probe already in flight will not publish
+    a stale result once it finishes.
     """
-    checks: dict[str, dict[str, Any]] = {}
+    global _health_probe_cache, _health_cache_generation
+    with _health_cache_state_lock:
+        _health_probe_cache = None
+        _health_cache_generation += 1
+        generation = _health_cache_generation
+    logger.debug("Cleared health probe cache (generation=%d)", generation)
 
-    # Run all checks concurrently
-    _HEALTH_CHECK_TIMEOUT = 6.0
+
+def _get_cached_probes(key: tuple[Any, ...]) -> dict[str, dict[str, Any]] | None:
+    """Return fresh cached probe results for key, or None on miss/expiry."""
+    now = time.monotonic()
+    with _health_cache_state_lock:
+        entry = _health_probe_cache
+        if (
+            entry is not None
+            and entry.key == key
+            and (now - entry.fetched_at) < _HEALTH_CACHE_TTL_SECONDS
+        ):
+            return entry.probes
+    return None
+
+
+async def _run_dependency_probes(
+    settings: Any, db_path: str
+) -> dict[str, dict[str, Any]]:
+    """Run all external/DB health probes concurrently with a bounded timeout."""
     try:
         db_check, jenkins_check, ai_check, rp_check = await asyncio.wait_for(
             asyncio.gather(
@@ -543,10 +612,76 @@ async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
             return {"status": "error", "detail": str(result)}
         return result
 
-    checks["database"] = _safe(db_check)
-    checks["jenkins"] = _safe(jenkins_check)
-    checks["ai_provider"] = _safe(ai_check)
-    checks["reportportal"] = _safe(rp_check)
+    return {
+        "database": _safe(db_check),
+        "jenkins": _safe(jenkins_check),
+        "ai_provider": _safe(ai_check),
+        "reportportal": _safe(rp_check),
+    }
+
+
+async def _get_dependency_probes(
+    settings: Any, db_path: str
+) -> dict[str, dict[str, Any]]:
+    """Return dependency probe results using single-flight coalescing and a short TTL."""
+    global _health_probe_cache
+    cache_key = _health_cache_key(settings, db_path)
+
+    cached = _get_cached_probes(cache_key)
+    if cached is not None:
+        logger.debug("Health probe cache hit (fast path)")
+        return {name: dict(result) for name, result in cached.items()}
+
+    async with _get_health_cache_lock():
+        cached = _get_cached_probes(cache_key)
+        if cached is not None:
+            logger.debug("Health probe cache hit (coalesced waiter)")
+            return {name: dict(result) for name, result in cached.items()}
+
+        with _health_cache_state_lock:
+            start_generation = _health_cache_generation
+
+        logger.debug(
+            "Running health dependency probes (generation=%d)", start_generation
+        )
+        probes = await _run_dependency_probes(settings, db_path)
+
+        with _health_cache_state_lock:
+            if _health_cache_generation == start_generation:
+                _health_probe_cache = _HealthProbeCacheEntry(
+                    key=cache_key,
+                    probes=probes,
+                    fetched_at=time.monotonic(),
+                )
+            else:
+                logger.debug(
+                    "Skipped caching health probes from stale generation %d (current=%d)",
+                    start_generation,
+                    _health_cache_generation,
+                )
+
+        return {name: dict(result) for name, result in probes.items()}
+
+
+async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
+    """Build full health response with checks and error rates.
+
+    Returns a dict with:
+    - status: "healthy", "degraded", or "unhealthy"
+    - checks: results from individual dependency checks
+    - error_rates: current rolling-window error statistics
+
+    Dependency probes (database, Jenkins, sidecar/AI provider, ReportPortal)
+    are coalesced behind a single-flight lock and cached for
+    ``_HEALTH_CACHE_TTL_SECONDS`` so unauthenticated /api/health and /metrics
+    bursts share one probe run. Cheap in-process checks (audit, result_json,
+    uptime, error rates) are always evaluated fresh.
+
+    Component versions are intentionally NOT included here: /api/health is
+    public (unauthenticated) and exact versions aid fingerprinting. Admins
+    get them via GET /api/admin/component-versions.
+    """
+    checks = await _get_dependency_probes(settings, db_path)
     # In-process state, no probe needed; a degraded entry makes the whole
     # response degraded without turning /api/health into a 503.
     checks["audit"] = audit_health_check()

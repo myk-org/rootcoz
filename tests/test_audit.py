@@ -3828,6 +3828,240 @@ async def test_admin_db_query_by_a_non_admin_is_audited_as_denied(
     assert events[0]["details"] == {"reason": "forbidden"}
 
 
+def test_admin_db_query_blocks_vacuum_into_attach_and_pragma(
+    app_client, temp_db_path: Path, tmp_path: Path
+) -> None:
+    """SQLite authorizer must block VACUUM INTO, ATTACH, PRAGMA, comments, load_extension (#596)."""
+    admin_login(app_client)
+    vacuum_target = tmp_path / "vacuum_dump.db"
+    attach_target = tmp_path / "attach_touch.db"
+    blocked_queries = [
+        f"VACUUM INTO '{vacuum_target}'",
+        "VACUUM",
+        f"ATTACH DATABASE '{attach_target}' AS stolen",
+        "PRAGMA database_list",
+        "SELECT * FROM pragma_database_list",
+        "/* bypass */ DELETE FROM users",
+        "SELECT load_extension('nonexistent')",
+    ]
+    with patch.object(main, "DB_PATH", temp_db_path):
+        for sql in blocked_queries:
+            resp = app_client.post("/api/admin/db/query", json={"sql": sql})
+            assert resp.status_code == 400, f"expected 400 for {sql!r}, got {resp.text}"
+
+    assert not vacuum_target.exists(), "VACUUM INTO must never create a dump file"
+    assert not attach_target.exists(), "ATTACH DATABASE must never create a file"
+
+    events = _events(action="admin.db_query")
+    assert len(events) == len(blocked_queries)
+    for event in events:
+        assert event["outcome"] == "denied"
+        assert event["details"]["reason"] == "not_authorized"
+        assert len(event["details"]["sql_hash"]) == 64
+
+
+def test_admin_db_query_blocks_sensitive_tables_and_aliased_columns(
+    app_client, temp_db_path: Path
+) -> None:
+    """Sensitive columns/tables are blocked regardless of SQL aliasing; safe queries work (#596)."""
+    admin_login(app_client)
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute(
+            "INSERT INTO users (username, api_key_hash, role, github_token_enc, ai_credentials_enc) "
+            "VALUES ('dummy_bob', 'sha256_dummy_bob_hash', 'reviewer', 'enc:tok', 'enc:ai')"
+        )
+        conn.execute(
+            "INSERT INTO server_ai_providers (provider, api_key_enc) "
+            "VALUES ('openai', 'enc:server_key')"
+        )
+        conn.execute(
+            "INSERT INTO sessions (token, username, is_admin, expires_at) "
+            "VALUES ('sess_tok_secret', 'dummy_bob', 0, '2099-01-01')"
+        )
+        conn.execute(
+            "INSERT INTO push_subscriptions (username, endpoint, p256dh_key, auth_key) "
+            "VALUES ('dummy_bob', 'https://push.example/1', 'p256_secret', 'auth_secret')"
+        )
+        conn.execute(
+            "INSERT INTO ai_session_sources "
+            "(session_id, username, provider, credential_source, claim_token) "
+            "VALUES ('s1', 'dummy_bob', 'openai', 'user', 'claim_secret')"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO server_settings (key, value) "
+            "VALUES ('jira_token', 'enc:jira_secret')"
+        )
+        conn.execute(
+            "INSERT INTO server_settings_history (key, value, action, changed_by) "
+            "VALUES ('jira_token', 'enc:jira_secret', 'set', 'admin')"
+        )
+        conn.execute(
+            "INSERT INTO results (job_id, status, result_json, job_name) "
+            "VALUES ('job-1', 'completed', '{\"secret\": true}', 'ci-job')"
+        )
+
+    blocked_queries = [
+        "SELECT api_key_hash AS a FROM users",
+        "SELECT SUBSTR(api_key_hash, 1, 8) AS s FROM users",
+        "SELECT github_token_enc AS g FROM users",
+        "SELECT ai_credentials_enc AS c FROM users",
+        "SELECT * FROM users",
+        "SELECT id FROM users WHERE api_key_hash IS NOT NULL",
+        "SELECT api_key_enc AS k FROM server_ai_providers",
+        "SELECT token AS t FROM sessions",
+        "SELECT p256dh_key AS p FROM push_subscriptions",
+        "SELECT auth_key AS a FROM push_subscriptions",
+        "SELECT claim_token AS c FROM ai_session_sources",
+        "SELECT key, value FROM server_settings",
+        "SELECT COUNT(*) FROM server_settings",
+        "SELECT key, value FROM server_settings_history",
+        "SELECT result_json AS r FROM results",
+    ]
+    with patch.object(main, "DB_PATH", temp_db_path):
+        for sql in blocked_queries:
+            resp = app_client.post("/api/admin/db/query", json={"sql": sql})
+            assert resp.status_code == 400, f"expected 400 for {sql!r}, got {resp.text}"
+
+        # Legitimate read-only queries continue to work normally.
+        res_resp = app_client.post(
+            "/api/admin/db/query",
+            json={"sql": "SELECT job_id, status FROM results WHERE job_id = 'job-1'"},
+        )
+        assert res_resp.status_code == 200, res_resp.text
+        assert res_resp.json()["rows"] == [{"job_id": "job-1", "status": "completed"}]
+
+        count_resp = app_client.post(
+            "/api/admin/db/query",
+            json={"sql": "SELECT COUNT(*) AS n FROM results"},
+        )
+        assert count_resp.status_code == 200, count_resp.text
+        assert count_resp.json()["rows"] == [{"n": 1}]
+
+        user_resp = app_client.post(
+            "/api/admin/db/query",
+            json={
+                "sql": "SELECT username, role FROM users WHERE username = 'dummy_bob'"
+            },
+        )
+        assert user_resp.status_code == 200, user_resp.text
+        assert user_resp.json()["rows"] == [
+            {"username": "dummy_bob", "role": "reviewer"}
+        ]
+
+        cte_resp = app_client.post(
+            "/api/admin/db/query",
+            json={
+                "sql": (
+                    "WITH RECURSIVE cnt(x) AS "
+                    "(SELECT 1 UNION ALL SELECT x + 1 FROM cnt WHERE x < 3) "
+                    "SELECT x FROM cnt"
+                )
+            },
+        )
+        assert cte_resp.status_code == 200, cte_resp.text
+        assert cte_resp.json()["rows"] == [{"x": 1}, {"x": 2}, {"x": 3}]
+
+
+def test_admin_db_query_recursively_strips_sensitive_decoded_json_payloads(
+    app_client, temp_db_path: Path
+) -> None:
+    """Decoded result-shaped dicts in row cells are recursively scrubbed (#596)."""
+    admin_login(app_client)
+    payload = {
+        "job_id": "job-nested-1",
+        "request_params": {
+            "tests_repo_url": "https://user:dummy_repo_tok@example.com/org/repo.git",  # pragma: allowlist secret
+            "additional_repos": [
+                {"url": "https://example.com/org/extra@ghp_dummy_extra_tok"}
+            ],
+            "github_token": "ghp_dummy_inline_secret",
+            "job_name": "ci-nightly",
+        },
+        "progress_log": [
+            {
+                "stage": "clone",
+                "url": "https://x-access-token:dummy_prog_tok@example.com/org/repo.git",  # pragma: allowlist secret
+            }
+        ],
+        "nested": [
+            {
+                "progress_log": [
+                    {
+                        "url": "https://bot:dummy_deep_tok@example.com/org/deep.git",  # pragma: allowlist secret
+                    }
+                ]
+            }
+        ],
+    }
+    blob_hex = zstd.compress(json.dumps(payload).encode()).hex()
+    with patch.object(main, "DB_PATH", temp_db_path):
+        resp = app_client.post(
+            "/api/admin/db/query",
+            json={"sql": f"SELECT x'{blob_hex}' AS decoded_cell"},
+        )
+    assert resp.status_code == 200, resp.text
+    for secret in (
+        "dummy_repo_tok",
+        "ghp_dummy_extra_tok",
+        "ghp_dummy_inline_secret",
+        "dummy_prog_tok",
+        "dummy_deep_tok",
+    ):
+        assert secret not in resp.text
+
+    cell = resp.json()["rows"][0]["decoded_cell"]
+    assert cell["job_id"] == "job-nested-1"
+    assert cell["request_params"]["job_name"] == "ci-nightly"
+    assert "github_token" not in cell["request_params"]
+    assert (
+        cell["request_params"]["tests_repo_url"]
+        == "https://***@example.com/org/repo.git"
+    )
+    assert (
+        cell["request_params"]["additional_repos"][0]["url"]
+        == "https://example.com/org/extra@***"
+    )
+    assert cell["progress_log"][0]["url"] == "https://***@example.com/org/repo.git"
+    assert (
+        cell["nested"][0]["progress_log"][0]["url"]
+        == "https://***@example.com/org/deep.git"
+    )
+
+
+def test_admin_db_schema_hides_blocked_tables_and_columns(
+    app_client, temp_db_path: Path
+) -> None:
+    """db_schema omits the same sensitive tables/columns blocked by db_query (#596)."""
+    admin_login(app_client)
+    with patch.object(main, "DB_PATH", temp_db_path):
+        resp = app_client.get("/api/admin/db/schema")
+    assert resp.status_code == 200, resp.text
+    by_table = {
+        t["name"]: {c["name"] for c in t["columns"]} for t in resp.json()["tables"]
+    }
+    assert "server_settings" not in by_table
+    assert "server_settings_history" not in by_table
+
+    assert "results" in by_table
+    assert {"job_id", "status"}.issubset(by_table["results"])
+    assert "result_json" not in by_table["results"]
+
+    assert "users" in by_table
+    assert {"id", "username", "role"}.issubset(by_table["users"])
+    assert "api_key_hash" not in by_table["users"]
+    assert not any(c.endswith("_enc") for c in by_table["users"])
+
+    if "server_ai_providers" in by_table:
+        assert "api_key_enc" not in by_table["server_ai_providers"]
+    if "sessions" in by_table:
+        assert "token" not in by_table["sessions"]
+    if "push_subscriptions" in by_table:
+        assert "p256dh_key" not in by_table["push_subscriptions"]
+        assert "auth_key" not in by_table["push_subscriptions"]
+    if "ai_session_sources" in by_table:
+        assert "claim_token" not in by_table["ai_session_sources"]
+
+
 # --- GET /api/admin/audit --------------------------------------------------
 
 
@@ -5864,6 +6098,7 @@ def test_audit_endpoints_reject_unauthenticated(app_client) -> None:
 async def test_audit_stream_emits_new_event(audit_db: Path) -> None:
     request = AsyncMock()
     request.state.is_admin = True
+    request.state.username = "admin"
     request.is_disconnected = AsyncMock(return_value=False)
 
     response = await main.stream_audit_events(request)
@@ -5909,6 +6144,7 @@ async def test_audit_stream_strips_nested_credentials(audit_db: Path) -> None:
     """A queued event is projected like the list endpoint before it is sent."""
     request = AsyncMock()
     request.state.is_admin = True
+    request.state.username = "admin"
     request.is_disconnected = AsyncMock(return_value=False)
 
     response = await main.stream_audit_events(request)

@@ -1809,3 +1809,194 @@ class TestUsernameConsecutiveDotsRejected:
         )
         assert resp.status_code == 400
         assert "consecutive dots" in resp.json()["detail"].lower()
+
+
+class TestAiSessionScoping:
+    """Regression tests for server-verified AI session scoping (#618)."""
+
+    @pytest.mark.asyncio
+    async def test_session_storage_persists_is_ai_session_flag(self, temp_db_path):
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+
+            regular_token = await storage.create_session("alice")
+            ai_token = await storage.create_session("alice", is_ai_session=True)
+
+            regular_session = await storage.get_session(regular_token)
+            ai_session = await storage.get_session(ai_token)
+
+            assert regular_session is not None
+            assert regular_session["is_ai_session"] is False
+            assert ai_session is not None
+            assert ai_session["is_ai_session"] is True
+
+    @pytest.mark.asyncio
+    async def test_init_db_migrates_legacy_sessions_table_idempotently(
+        self, temp_db_path
+    ):
+        import aiosqlite
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            # Create a legacy sessions table without the is_ai_session column.
+            async with aiosqlite.connect(temp_db_path) as db:
+                await db.execute(
+                    """
+                    CREATE TABLE sessions (
+                        token TEXT PRIMARY KEY,
+                        username TEXT NOT NULL,
+                        is_admin INTEGER NOT NULL DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        expires_at TIMESTAMP NOT NULL
+                    )
+                    """
+                )
+                legacy_hash = storage._hash_session_token("legacy-token-value")
+                await db.execute(
+                    "INSERT INTO sessions (token, username, is_admin, expires_at)"
+                    " VALUES (?, ?, ?, datetime('now', '+1 hour'))",
+                    (legacy_hash, "legacy_user", 0),
+                )
+                await db.commit()
+
+            # Running init_db twice must migrate cleanly and stay idempotent.
+            await storage.init_db()
+            await storage.init_db()
+
+            session = await storage.get_session("legacy-token-value")
+            assert session is not None
+            assert session["username"] == "legacy_user"
+            assert session["is_ai_session"] is False
+
+    @pytest.mark.asyncio
+    async def test_create_ai_auth_header_only_marks_ai_session_when_requested(
+        self, temp_db_path
+    ):
+        from rootcoz import main
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.create_admin_user("alice")
+
+            chat_header = await main._create_ai_auth_header("alice")
+            admin_chat_header = await main._create_ai_auth_header(
+                "alice", is_admin=True
+            )
+            analysis_header = await main._create_ai_auth_header(
+                "alice", is_ai_session=True
+            )
+
+            chat_session = await storage.get_session(
+                chat_header.removeprefix("Bearer ").strip()
+            )
+            admin_chat_session = await storage.get_session(
+                admin_chat_header.removeprefix("Bearer ").strip()
+            )
+            analysis_session = await storage.get_session(
+                analysis_header.removeprefix("Bearer ").strip()
+            )
+
+            assert chat_session is not None and chat_session["is_ai_session"] is False
+            assert (
+                admin_chat_session is not None
+                and admin_chat_session["is_ai_session"] is False
+            )
+            assert (
+                analysis_session is not None
+                and analysis_session["is_ai_session"] is True
+            )
+
+    def test_auth_middleware_sets_is_ai_session_only_for_ai_sessions(self, client):
+        """AuthMiddleware exposes is_ai_session=True only on AI-scoped sessions."""
+        from fastapi import FastAPI, Request
+
+        from rootcoz.main import AuthMiddleware
+
+        probe_app = FastAPI()
+        probe_app.add_middleware(AuthMiddleware)
+
+        @probe_app.get("/_probe_ai_session")
+        async def _probe(request: Request):
+            return {
+                "username": request.state.username,
+                "is_ai_session": request.state.is_ai_session,
+            }
+
+        # Create a regular user + API key via the existing client fixture.
+        api_key, user_cookies = _create_user_with_role(client, "alice", "reviewer")
+        ai_token = asyncio.run(storage.create_session("alice", is_ai_session=True))
+        chat_token = asyncio.run(storage.create_session("alice", is_ai_session=False))
+
+        with (
+            patch.dict(os.environ, {"TRUST_PROXY_HEADERS": "true"}),
+            TestClient(probe_app) as probe,
+        ):
+            clear_settings_cache()
+            try:
+                # Bootstrap admin key -> False
+                resp = probe.get(
+                    "/_probe_ai_session",
+                    headers={
+                        "Authorization": "Bearer test-admin-key-16chars"  # pragma: allowlist secret
+                    },
+                )
+                assert resp.status_code == 200
+                assert resp.json() == {"username": "admin", "is_ai_session": False}
+
+                # User API key -> False
+                resp = probe.get(
+                    "/_probe_ai_session",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                assert resp.status_code == 200
+                assert resp.json() == {"username": "alice", "is_ai_session": False}
+
+                # Regular login session cookie -> False
+                resp = probe.get("/_probe_ai_session", cookies=user_cookies)
+                assert resp.status_code == 200
+                assert resp.json() == {"username": "alice", "is_ai_session": False}
+
+                # Chat-minted Bearer session -> False
+                resp = probe.get(
+                    "/_probe_ai_session",
+                    headers={"Authorization": f"Bearer {chat_token}"},
+                )
+                assert resp.status_code == 200
+                assert resp.json() == {"username": "alice", "is_ai_session": False}
+
+                # Proxy header (SSO) -> False
+                resp = probe.get(
+                    "/_probe_ai_session",
+                    headers={"X-Forwarded-User": "sso-user"},
+                )
+                assert resp.status_code == 200
+                assert resp.json() == {"username": "sso-user", "is_ai_session": False}
+
+                # AI-scoped Bearer session -> True
+                resp = probe.get(
+                    "/_probe_ai_session",
+                    headers={"Authorization": f"Bearer {ai_token}"},
+                )
+                assert resp.status_code == 200
+                assert resp.json() == {"username": "alice", "is_ai_session": True}
+
+                # Bootstrap admin Bearer key overrides an AI session cookie -> False
+                resp = probe.get(
+                    "/_probe_ai_session",
+                    cookies={"rootcoz_session": ai_token},
+                    headers={
+                        "Authorization": "Bearer test-admin-key-16chars"  # pragma: allowlist secret
+                    },
+                )
+                assert resp.status_code == 200
+                assert resp.json() == {"username": "admin", "is_ai_session": False}
+
+                # User API key overrides an AI session cookie -> False
+                resp = probe.get(
+                    "/_probe_ai_session",
+                    cookies={"rootcoz_session": ai_token},
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                assert resp.status_code == 200
+                assert resp.json() == {"username": "alice", "is_ai_session": False}
+            finally:
+                clear_settings_cache()

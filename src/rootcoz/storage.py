@@ -55,6 +55,7 @@ from rootcoz.models import (
     OverrideClassificationLiteral,
     PatternLiteral,
 )
+from rootcoz.url_utils import sanitize_http_href
 
 if TYPE_CHECKING:
     from rootcoz.issue_attachments import ValidatedAttachment
@@ -2329,6 +2330,7 @@ async def init_db() -> None:
                 token TEXT PRIMARY KEY,
                 username TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
+                is_ai_session INTEGER NOT NULL DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP NOT NULL
             )
@@ -2337,6 +2339,11 @@ async def init_db() -> None:
         # Migration: add role column to sessions table
         await _migrate_add_column(
             db, "sessions", "role", "TEXT NOT NULL DEFAULT 'reviewer'"
+        )
+
+        # Migration: add is_ai_session column to sessions table
+        await _migrate_add_column(
+            db, "sessions", "is_ai_session", "INTEGER NOT NULL DEFAULT 0"
         )
 
         # Migration: backfill session roles from users table so existing
@@ -5984,9 +5991,49 @@ async def add_tracked_in_link(
     Returns:
         ID of the inserted row, or 0 if URL is empty.
     """
+    url = sanitize_http_href(url)
     if not url:
         return 0
     async with _connect_db() as db:
+        # Match any pre-hardening rows in the same scope whose sanitized URL
+        # equals `url`, so re-adding an old credential-bearing link updates it
+        # in place instead of creating a duplicate alongside the legacy row.
+        existing_cursor = await db.execute(
+            "SELECT id, url FROM tracked_in_links "
+            "WHERE job_id = ? AND test_name = ? "
+            "AND child_job_name = ? AND child_build_number = ? "
+            "ORDER BY id",
+            (job_id, test_name, child_job_name, child_build_number),
+        )
+        matching_rows = [
+            row
+            for row in await existing_cursor.fetchall()
+            if sanitize_http_href(row["url"]) == url
+        ]
+        if matching_rows:
+            keeper = next(
+                (row for row in matching_rows if row["url"] == url),
+                matching_rows[0],
+            )
+            extra_ids = [
+                row["id"] for row in matching_rows if row["id"] != keeper["id"]
+            ]
+            if extra_ids:
+                placeholders = ",".join("?" for _ in extra_ids)
+                await db.execute(
+                    f"DELETE FROM tracked_in_links WHERE id IN ({placeholders})",
+                    extra_ids,
+                )
+            await db.execute(
+                "UPDATE tracked_in_links SET url = ?, "
+                "type = CASE WHEN ? != '' THEN ? ELSE type END, "
+                "created_by = CASE WHEN created_by = '' THEN ? ELSE created_by END "
+                "WHERE id = ?",
+                (url, tracked_type, tracked_type, tracked_by, keeper["id"]),
+            )
+            await db.commit()
+            return int(keeper["id"])
+
         cursor = await db.execute(
             "INSERT INTO tracked_in_links "
             "(job_id, test_name, child_job_name, child_build_number, url, type, created_by) "
@@ -6073,7 +6120,7 @@ async def get_tracked_in_for_job(job_id: str) -> dict[str, list[dict[str, Any]]]
             result.setdefault(key, []).append(
                 {
                     "id": row["id"],
-                    "tracked_in_url": row["url"],
+                    "tracked_in_url": sanitize_http_href(row["url"]),
                     "tracked_in_type": row["type"],
                     "tracked_in_by": row["created_by"],
                 }
@@ -6124,7 +6171,7 @@ async def get_tracked_in_for_scope(
         for row in rows:
             result.setdefault(row["test_name"], []).append(
                 {
-                    "tracked_in_url": row["url"],
+                    "tracked_in_url": sanitize_http_href(row["url"]),
                     "tracked_in_type": row["type"],
                     "tracked_in_by": row["created_by"],
                 }
@@ -6524,6 +6571,17 @@ async def get_test_history(
             [*params, limit],
         )
         recent_runs = [dict(row) for row in await cursor.fetchall()]
+        for run in recent_runs:
+            raw_urls = run.get("tracked_urls")
+            if raw_urls:
+                clean_urls = list(
+                    dict.fromkeys(
+                        u
+                        for part in raw_urls.split(", ")
+                        if (u := sanitize_http_href(part))
+                    )
+                )
+                run["tracked_urls"] = ", ".join(clean_urls) or None
 
         # Total failure record count — computed with a separate unbounded query
         # so the value is not capped by the `limit` parameter used for recent_runs.
@@ -8969,6 +9027,20 @@ async def get_user_audit_snapshot(username: str) -> dict[str, Any] | None:
     return data
 
 
+_auth_revocation_version: int = 0
+
+
+def get_auth_revocation_version() -> int:
+    """Return a monotonic counter bumped on every auth/user-lifecycle revocation."""
+    return _auth_revocation_version
+
+
+def _bump_auth_revocation_version() -> None:
+    """Signal live SSE streams to re-check credentials against SQLite immediately."""
+    global _auth_revocation_version
+    _auth_revocation_version += 1
+
+
 async def delete_user(username: str) -> bool:
     """Delete a user and their sessions. Returns True if deleted."""
     username = _normalize_username(username)
@@ -8994,14 +9066,26 @@ async def delete_user(username: str) -> bool:
             "WHERE username = ? AND credential_source NOT IN ('deleting', 'deleted')",
             (username,),
         )
-        await db.execute(
-            "UPDATE chat_messages SET session_id = '' WHERE username = ? AND session_id != ''",
-            (username,),
-        )
         cursor = await db.execute("DELETE FROM users WHERE username = ?", (username,))
         if cursor.rowcount > 0:
             await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
+            await db.execute(
+                "DELETE FROM chat_messages WHERE username = ?", (username,)
+            )
+            await db.execute(
+                "DELETE FROM filter_presets WHERE username = ? AND scope = 'user'",
+                (username,),
+            )
+            await db.execute(
+                "DELETE FROM push_subscriptions WHERE username = ?", (username,)
+            )
+            await db.execute(
+                "DELETE FROM mention_reads WHERE username = ?", (username,)
+            )
         await db.commit()
+        if cursor.rowcount > 0:
+            _bump_auth_revocation_version()
+            logger.info("Deleted user '%s' and purged username-scoped state", username)
         return cursor.rowcount > 0
 
 
@@ -9069,6 +9153,7 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
                 # Invalidate all sessions so user must re-login with new role
                 await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
                 await db.commit()
+                _bump_auth_revocation_version()
             except ValueError:
                 raise
             except Exception:
@@ -9084,6 +9169,7 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
             # Invalidate all sessions so user must re-login with new role
             await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
             await db.commit()
+            _bump_auth_revocation_version()
 
             return username, raw_key
 
@@ -9185,26 +9271,27 @@ async def set_user_can_use_server_providers(username: str, value: bool) -> bool:
 
 
 async def can_user_use_server_providers(username: str) -> bool:
-    """Read the current grant; unknown identities are denied."""
+    """Read the current grant; unknown or disabled identities are denied."""
     if username == "admin":
         return True
     user = await get_user_by_username(username)
-    return bool(user and user["can_use_server_providers"])
+    return bool(user and not user.get("disabled") and user["can_use_server_providers"])
 
 
 async def can_user_use_free_providers(username: str) -> bool:
     """Effective free-pair access.
 
     The gate is the server-level ``ENABLE_FREE_MODELS`` toggle: when on,
-    every user may run admin-declared free provider+model pairs on server
-    credentials. Bootstrap admins, role admins, and users holding the full
-    server grant already have the superset. A deleted account gets nothing,
-    even if a background worker still carries its username.
+    every active non-disabled user may run admin-declared free provider+model
+    pairs on server credentials. Bootstrap admins, role admins, and users
+    holding the full server grant already have the superset. A deleted or
+    disabled account gets nothing, even if a background worker still carries
+    its username.
     """
     if username == "admin":
         return True
     user = await get_user_by_username(username)
-    if not user:
+    if not user or user.get("disabled"):
         return False
     if user["role"] == "admin" or user["can_use_server_providers"]:
         return True
@@ -9892,6 +9979,7 @@ async def create_session(
     is_admin: bool = False,
     ttl_hours: int | None = None,
     role: str = "reviewer",
+    is_ai_session: bool = False,
 ) -> str:
     """Create an opaque session token. Returns raw token."""
     if ttl_hours is None:
@@ -9904,9 +9992,17 @@ async def create_session(
     async def _insert() -> None:
         async with _connect_db() as db:
             await db.execute(
-                "INSERT INTO sessions (token, username, is_admin, expires_at, role)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (token_hash, username, 1 if is_admin else 0, expires_str, role),
+                "INSERT INTO sessions"
+                " (token, username, is_admin, expires_at, role, is_ai_session)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    token_hash,
+                    username,
+                    1 if is_admin else 0,
+                    expires_str,
+                    role,
+                    1 if is_ai_session else 0,
+                ),
             )
             await db.commit()
 
@@ -9922,13 +10018,17 @@ async def get_session(token: str) -> dict[str, Any] | None:
     token_hash = _hash_session_token(token)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT username, is_admin, role, created_at, expires_at"
+            "SELECT username, is_admin, role, is_ai_session, created_at, expires_at"
             " FROM sessions"
             " WHERE token = ? AND expires_at > datetime('now')",
             (token_hash,),
         )
         row = await cursor.fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        session = dict(row)
+        session["is_ai_session"] = bool(row["is_ai_session"])
+        return session
 
 
 async def renew_session(token: str) -> bool:
@@ -9957,6 +10057,7 @@ async def delete_session(token: str) -> None:
     async with _connect_db() as db:
         await db.execute("DELETE FROM sessions WHERE token = ?", (token_hash,))
         await db.commit()
+    _bump_auth_revocation_version()
 
 
 def _validate_user_status(status: str) -> None:
@@ -10105,6 +10206,8 @@ async def set_user_status(username: str, status: str) -> bool:
             (status, username),
         )
         await db.commit()
+        if cursor.rowcount > 0:
+            _bump_auth_revocation_version()
         return cursor.rowcount > 0
 
 
@@ -10328,6 +10431,7 @@ async def set_user_disabled(
             )
             invalidated = sessions.rowcount > 0
         await db.commit()
+        _bump_auth_revocation_version()
         return {
             "role": row["role"],
             "disabled": already_disabled,
@@ -10365,6 +10469,7 @@ async def rotate_user_key(username: str) -> str:
         # Invalidate all existing sessions for this user
         await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
         await db.commit()
+    _bump_auth_revocation_version()
     return raw_key
 
 
@@ -10388,6 +10493,7 @@ async def rotate_own_key(username: str) -> str:
         # Invalidate all existing sessions for this user
         await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
         await db.commit()
+    _bump_auth_revocation_version()
     return raw_key
 
 
@@ -10423,6 +10529,7 @@ async def rotate_admin_key(username: str, custom_key: str | None = None) -> str:
         # Invalidate all existing sessions for this user
         await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
         await db.commit()
+    _bump_auth_revocation_version()
     return raw_key
 
 
@@ -10433,6 +10540,8 @@ async def cleanup_expired_sessions() -> int:
             "DELETE FROM sessions WHERE expires_at <= datetime('now')"
         )
         await db.commit()
+        if cursor.rowcount > 0:
+            _bump_auth_revocation_version()
         return cursor.rowcount
 
 
@@ -10918,7 +11027,8 @@ async def save_ai_session_source(
             if expected_account_id is not None:
                 account = await (
                     await db.execute(
-                        "SELECT 1 FROM users WHERE username = ? AND id = ?",
+                        "SELECT 1 FROM users WHERE username = ? AND id = ? "
+                        "AND COALESCE(disabled, 0) = 0",
                         (username, expected_account_id),
                     )
                 ).fetchone()
@@ -11974,8 +12084,14 @@ async def get_push_subscriptions_for_users(
     async with _connect_db() as db:
         placeholders = ",".join("?" for _ in usernames)
         cursor = await db.execute(
-            f"SELECT username, endpoint, p256dh_key, auth_key "
-            f"FROM push_subscriptions WHERE username IN ({placeholders})",
+            f"SELECT ps.username, ps.endpoint, ps.p256dh_key, ps.auth_key "
+            f"FROM push_subscriptions ps "
+            f"LEFT JOIN users u ON u.username = ps.username "
+            f"WHERE ps.username IN ({placeholders}) "
+            f"AND (ps.username = 'admin' OR ("
+            f"u.username IS NOT NULL "
+            f"AND COALESCE(u.disabled, 0) = 0 "
+            f"AND COALESCE(NULLIF(u.status, ''), 'active') = 'active'))",
             usernames,
         )
         rows = await cursor.fetchall()
@@ -12720,21 +12836,25 @@ async def complete_chat_message_if_generation(
         cursor = await db.execute(
             "UPDATE chat_messages SET content = ?, status = 'completed', "
             "ai_provider = ?, ai_model = ?, session_id = ? "
-            "WHERE id = ? AND status = 'pending' AND "
-            "(? = 1 OR ? IS NULL OR EXISTS (SELECT 1 FROM users "
+            "WHERE id = ? AND status = 'pending' "
+            "AND NOT EXISTS (SELECT 1 FROM users "
             "WHERE username = chat_messages.username "
+            "AND COALESCE(disabled, 0) != 0) "
+            "AND (? = 1 OR ? IS NULL OR EXISTS (SELECT 1 FROM users "
+            "WHERE username = chat_messages.username AND COALESCE(disabled, 0) = 0 "
             "AND COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) = ?)) "
             "AND (? = 0 OR chat_messages.username = 'admin' OR EXISTS "
             "(SELECT 1 FROM users WHERE username = chat_messages.username "
+            "AND COALESCE(disabled, 0) = 0 "
             "AND (role = 'admin' OR can_use_server_providers = 1)) OR "
             "(? = 1 AND EXISTS (SELECT 1 FROM users "
-            "WHERE username = chat_messages.username) AND EXISTS "
-            "(SELECT 1 FROM free_ai_models "
+            "WHERE username = chat_messages.username AND COALESCE(disabled, 0) = 0) "
+            "AND EXISTS (SELECT 1 FROM free_ai_models "
             "WHERE lower(provider) = lower(?) AND model = ?))) "
             "AND (chat_messages.job_id != '__admin_chat__' "
             "OR chat_messages.username = 'admin' OR EXISTS "
             "(SELECT 1 FROM users WHERE username = chat_messages.username "
-            "AND role = 'admin'))",
+            "AND COALESCE(disabled, 0) = 0 AND role = 'admin'))",
             (
                 content,
                 ai_provider,

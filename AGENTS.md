@@ -290,7 +290,7 @@ When not configured, error messages are role-aware: admins are pointed to Server
 
 ### AI System Identity
 
-`rootcoz-ai` is the reserved system identity for all AI-originated actions (auto-review, classification). The identity string is defined as `AI_SYSTEM_USERNAME` in `storage.py` — all code must use this constant instead of hardcoding the string. It is blocked from user registration. The `POST /history/classify` endpoint uses `source="ai"` in the request body to identify AI callers, and stores `created_by = "rootcoz-ai"` for attribution. A backend guard prevents AI from overriding user classifications.
+`rootcoz-ai` is the reserved system identity for all AI-originated actions (auto-review, classification). The identity string is defined as `AI_SYSTEM_USERNAME` in `storage.py` — all code must use this constant instead of hardcoding the string. It is blocked from user registration. The `POST /history/classify` endpoint attributes classifications to `created_by = "rootcoz-ai"` only when both `source="ai"` is sent in the request body and the request authenticates with a server-minted AI analysis session (`sessions.is_ai_session = 1`, exposed on `request.state.is_ai_session`); non-AI callers sending `source="ai"` are attributed to `request.state.username`, visible immediately, and audited. A backend guard prevents AI from overriding user classifications.
 
 ### Test Entries & Zero-Failure Fast Path
 
