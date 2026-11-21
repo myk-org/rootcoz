@@ -25,8 +25,8 @@ const catalog: AiModelsResponse = {
     anthropic: [{ id: 'server-model', name: 'Server model', provider: 'anthropic', credential_sources: ['server'], verified: true }, { id: 'mixed', name: 'Mixed', provider: 'anthropic', credential_sources: ['user', 'server'], verified: false }],
   },
   provider_status: {
-    openrouter: { ok: true, modelListingSupported: false, has_api_key: true },
-    mistral: { ok: true, modelListingSupported: false, has_api_key: true },
+    openrouter: { modelListingSupported: false, has_api_key: true },
+    mistral: { modelListingSupported: false, has_api_key: true },
     anthropic: { modelListingSupported: false, has_api_key: true },
   },
 }
@@ -338,7 +338,7 @@ describe('new analysis stored default (#591)', () => {
   beforeEach(() => act(() => resetProviderCatalogCache()))
 
   /** The stored server default this mount reads, as the deployment had it: a provider the catalog lost. */
-  const unserved = { ai_provider: 'cursor', ai_model: 'cursor:cursor-grok-4.6-high' }
+  const unserved = { ai_provider: 'removed-provider', ai_model: 'removed-model' }
   /** Every path the API client was asked for — a listing for an absent provider is the bug. */
   const requestedPaths = () => get.mock.calls.map(([path]) => String(path))
 
@@ -351,7 +351,7 @@ describe('new analysis stored default (#591)', () => {
     const provider = screen.getByRole('combobox', { name: 'AI Provider' })
     // No selection at all: not the unserved provider behind an "(unavailable)" trigger.
     await waitFor(() => expect(provider).toHaveTextContent('Select provider...'))
-    expect(provider).not.toHaveTextContent(/cursor/i)
+    expect(provider).not.toHaveTextContent(/removed-provider/i)
     // The catalog that answers has no model listing to ask for: no per-provider request.
     expect(requestedPaths().some((path) => path.includes('provider='))).toBe(false)
     // Sending is refused client-side, with the actionable message, instead of a 400 or

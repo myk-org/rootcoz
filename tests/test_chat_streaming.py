@@ -729,9 +729,6 @@ async def test_chat_with_ai_forwards_on_delta_to_call_ai(
         return AIResult(success=True, text="ok", session_id="s1")
 
     monkeypatch.setattr(chat_mod, "call_ai", fake_call_ai)
-    monkeypatch.setattr(
-        chat_mod, "install_http_tools_mcp_best_effort_async", AsyncMock()
-    )
     _seen, on_delta = deltas()
 
     await chat_mod.chat_with_ai(
@@ -1150,9 +1147,6 @@ def _patch_chat_processing(monkeypatch: pytest.MonkeyPatch) -> None:
         "rootcoz.engine.chat.clone_chat_repos", AsyncMock(return_value=False)
     )
     monkeypatch.setattr(
-        "rootcoz.engine.chat.install_http_tools_mcp_best_effort_async", AsyncMock()
-    )
-    monkeypatch.setattr(
         "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
         AsyncMock(return_value=False),
     )
@@ -1322,9 +1316,6 @@ async def test_streamed_reply_records_usage_once_with_real_tokens(
         )
 
     monkeypatch.setattr(chat_mod, "call_ai", fake_call_ai)
-    monkeypatch.setattr(
-        chat_mod, "install_http_tools_mcp_best_effort_async", AsyncMock()
-    )
 
     async def fake_record_usage(result: AIResult, **kwargs: Any) -> None:
         recorded.append(result)

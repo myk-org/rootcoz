@@ -52,7 +52,6 @@ async def test_lost_user_session_never_retries_on_server_after_key_removed(
     monkeypatch.setattr(
         ai_client, "supported_key_providers", AsyncMock(return_value=["openai"])
     )
-    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     monkeypatch.setattr(chat, "call_ai", real_call_ai)
     calls = []
 
@@ -74,7 +73,6 @@ async def test_lost_user_session_never_retries_on_server_after_key_removed(
             ai_model="m",
             build_prompt_fn=lambda: "prompt",
             session_id="sid",
-            install_mcp=False,
         )
         assert not success
         assert "SERVER REPLY" not in text

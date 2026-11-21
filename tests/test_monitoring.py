@@ -1235,6 +1235,7 @@ def test_compute_component_versions_handles_non_object_manifests(tmp_path, monke
 
     assert versions["pi_sidecar"] is None
     assert versions["pi"] == "1.2.3"
+    assert "acpx" not in versions
 
 
 async def test_the_instantaneous_trigger_is_untouched(monkeypatch) -> None:

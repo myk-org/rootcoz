@@ -797,24 +797,16 @@ class TestAiConfigEntry:
 
     @pytest.mark.parametrize(
         "provider",
-        ["claude", "gemini", "cursor"],
+        ["claude", "gemini", "openai"],
     )
     def test_valid_providers(self, provider: str) -> None:
         """Test all valid AI providers are accepted."""
         entry = AiConfigEntry(ai_provider=provider, ai_model="model-1")
         assert entry.ai_provider == provider
 
-    @pytest.mark.parametrize(
-        ("legacy", "provider"),
-        [
-            ("cursor-cli", "cli-cursor"),
-            ("claude-cli", "cli-claude"),
-            ("gemini-cli", "cli-gemini"),
-        ],
-    )
-    def test_legacy_cli_providers_normalize(self, legacy: str, provider: str) -> None:
-        entry = AiConfigEntry(ai_provider=legacy, ai_model="model-1")
-        assert entry.ai_provider == provider
+    def test_provider_normalizes_case_and_whitespace(self) -> None:
+        entry = AiConfigEntry(ai_provider="  OpenAI  ", ai_model="model-1")
+        assert entry.ai_provider == "openai"
 
     def test_catalog_provider_is_retained_for_sidecar_validation(self) -> None:
         """Provider/model membership is validated against the live sidecar catalog."""

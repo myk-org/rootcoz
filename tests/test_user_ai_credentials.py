@@ -805,7 +805,6 @@ async def test_chat_initial_creation_encoded_error_never_logs_user_key(
     monkeypatch.setattr(
         chat, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
-    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             assert (
@@ -1125,7 +1124,6 @@ async def test_resumed_chat_failure_hides_rotated_key_from_log_and_response(
         ),
     )
     monkeypatch.setattr(chat, "call_ai", real_call_ai)
-    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=old_key))
     token = ai_client.ai_username.set("alice")
     try:
@@ -1137,7 +1135,6 @@ async def test_resumed_chat_failure_hides_rotated_key_from_log_and_response(
                 ai_model="m",
                 build_prompt_fn=lambda: "system",
                 session_id="sid",
-                install_mcp=False,
             )
         assert (ok, text, sid) == (False, "AI call failed", None)
         assert old_key not in caplog.text
@@ -1211,7 +1208,6 @@ async def test_resumed_chat_lost_session_still_retries(monkeypatch):
             ai_model="m",
             build_prompt_fn=lambda: "system",
             session_id="sid",
-            install_mcp=False,
         )
         assert (ok, text, sid) == (True, "reply", "new")
         assert sidecar.await_count == 2
@@ -1319,7 +1315,6 @@ async def test_real_sidecar_failed_new_chat_prompt_deletes_session(
                 ai_provider="p",
                 ai_model="m",
                 build_prompt_fn=lambda: "system",
-                install_mcp=False,
             )
             # Positive control: the capture does see these loggers.
             chat.logger.warning("capture control reached caplog")
@@ -1523,7 +1518,6 @@ async def test_chat_session_creation_and_resumed_turn(
         ai_client, "session_key", AsyncMock(return_value="secret-value")
     )
     ai_client._selected_credential_source.set("user")
-    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     assert (
         await chat._create_chat_session(
             system_prompt="system", ai_provider="p", ai_model="m"
@@ -1553,7 +1547,6 @@ async def test_chat_session_creation_and_resumed_turn(
         ai_model="m",
         build_prompt_fn=lambda: "system",
         session_id="sid",
-        install_mcp=False,
     )
     assert (ok, text, sid) == (True, "reply", "sid")
     await client.close()
@@ -1825,7 +1818,6 @@ async def test_session_creation_logs_frames_not_secret(monkeypatch):
     monkeypatch.setattr(
         chat, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
-    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     messages = []
     monkeypatch.setattr(

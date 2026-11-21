@@ -168,13 +168,13 @@ def test_a_lock_wait_is_bounded_by_the_deadline(tmp_path):
     A preparation that queues behind a held workspace lock used to wait there
     with no clock at all, so the deadline never got to refuse anything.
     """
-    from rootcoz.engine import http_mcp
+    from rootcoz.temp_paths import workspace_lock
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _repo(workspace)
 
-    with http_mcp._workspace_install_lock(workspace):
+    with workspace_lock(workspace):
         for call in (
             lambda deadline: graft.roots_needing_index(
                 workspace, {}, deadline=deadline
@@ -367,9 +367,6 @@ async def test_session_tools_without_graph_keep_file_tools(tmp_path, monkeypatch
     monkeypatch.setattr(
         "rootcoz.engine.graft_http.cloned_graph_roots", lambda *_a, **_k: {}
     )
-    monkeypatch.setattr(
-        session_tools, "install_http_tools_mcp_best_effort_async", no_index
-    )
 
     tools = await session_tools.build_session_tools(
         builtin=list(CHAT_BUILTIN_TOOLS),
@@ -531,11 +528,7 @@ async def test_analysis_sessions_still_wait_for_their_graph(tmp_path, monkeypatc
     async def index(_workspace, job_id="", repos=None, *, deadline=None):
         seen.append(deadline)
 
-    async def noop(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(session_tools, "index_workspace_graph", index)
-    monkeypatch.setattr(session_tools, "install_http_tools_mcp_best_effort_async", noop)
     monkeypatch.setattr(
         "rootcoz.engine.graft_http.graph_http_tools", lambda *_a, **_k: []
     )

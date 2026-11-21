@@ -347,7 +347,10 @@ class TestPrepareFeedbackAndSettings:
                 ),
             )
             preview = await feedback.generate_feedback_preview(
-                req, get_settings(), ai_provider="cli-claude", ai_model="sonnet-4-5"
+                req,
+                get_settings(),
+                ai_provider="google-vertex-claude",
+                ai_model="sonnet-4-5",
             )
 
         prepared = feedback.prepare_feedback_issue(

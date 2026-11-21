@@ -2690,43 +2690,24 @@ class TestChatCleanup:
         assert not workspace.exists()
         assert not artifacts_dir.exists()
 
-    def test_cleanup_workspace_removes_nested_user_mcp_dumps(self, tmp_path):
-        from rootcoz.engine.chat import cleanup_chat_workspace
-        from rootcoz.engine.http_mcp import http_tools_dump_path
-
-        workspace = tmp_path / "rootcoz-chat-job"
-        user_ws = workspace / "alice"
-        user_ws.mkdir(parents=True)
-        dump = http_tools_dump_path(user_ws)
-        dump.write_text("[]")
-        (user_ws / "session.txt").write_text("x")
-
-        with patch("rootcoz.engine.chat.get_chat_workspace", return_value=workspace):
-            cleanup_chat_workspace("job")
-
-        assert not workspace.exists()
-        assert not dump.exists()
-
-    def test_cleanup_workspace_waits_for_mcp_install_lock(self, tmp_path):
+    def test_cleanup_workspace_waits_for_workspace_lock(self, tmp_path):
         import threading
         import time
 
-        from rootcoz.engine import http_mcp as http_mcp_mod
         from rootcoz.engine.chat import cleanup_chat_workspace
+        from rootcoz.temp_paths import workspace_lock
 
         workspace = tmp_path / "ws"
         workspace.mkdir()
-        dump = http_mcp_mod.http_tools_dump_path(workspace)
         order: list[str] = []
         started = threading.Event()
         release = threading.Event()
 
         def hold_lock():
-            with http_mcp_mod._workspace_install_lock(workspace):
-                order.append("install")
+            with workspace_lock(workspace):
+                order.append("builder")
                 started.set()
                 release.wait(timeout=5)
-                dump.write_text("secret")
 
         holder = threading.Thread(target=hold_lock)
         holder.start()
@@ -2747,10 +2728,9 @@ class TestChatCleanup:
         release.set()
         holder.join(timeout=5)
         cleaner.join(timeout=5)
-        assert order[:2] == ["install", "cleanup-start"]
+        assert order[:2] == ["builder", "cleanup-start"]
         assert order[-1] == "cleanup-end"
         assert not workspace.exists()
-        assert not dump.exists()
 
     @pytest.mark.asyncio
     async def test_undeletable_symlink_is_counted_not_raised(
@@ -2879,12 +2859,12 @@ async def test_init_chat_under_barrier_rejects_deleting_job():
 
 @pytest.mark.asyncio
 async def test_cleanup_deleted_job_does_not_block_event_loop(tmp_path, monkeypatch):
-    """A contended MCP flock during cleanup must not stall asyncio."""
+    """A contended workspace flock during cleanup must not stall asyncio."""
     import threading
     import time
 
     from rootcoz import main as main_mod
-    from rootcoz.engine import http_mcp as http_mcp_mod
+    from rootcoz.temp_paths import workspace_lock
 
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -2892,7 +2872,7 @@ async def test_cleanup_deleted_job_does_not_block_event_loop(tmp_path, monkeypat
     release = threading.Event()
 
     def hold_lock():
-        with http_mcp_mod._workspace_install_lock(workspace):
+        with workspace_lock(workspace):
             started.set()
             release.wait(timeout=5)
 
@@ -2979,10 +2959,6 @@ async def test_process_chat_answers_when_the_workspace_lock_outlives_the_clock(
     )
     monkeypatch.setattr(
         "rootcoz.engine.chat.chat_with_ai", AsyncMock(return_value=(True, "ok", "sess"))
-    )
-    monkeypatch.setattr(
-        "rootcoz.engine.session_tools.install_http_tools_mcp_best_effort_async",
-        AsyncMock(),
     )
     monkeypatch.setattr(
         "rootcoz.engine.graft_http.graph_http_tools", lambda *a, **k: []
@@ -3115,10 +3091,6 @@ async def test_followup_indexes_only_new_or_missing_graph(
         "rootcoz.engine.chat.chat_with_ai", AsyncMock(return_value=(True, "ok", "sess"))
     )
     monkeypatch.setattr(
-        "rootcoz.engine.session_tools.install_http_tools_mcp_best_effort_async",
-        AsyncMock(),
-    )
-    monkeypatch.setattr(
         "rootcoz.engine.graft_http.graph_http_tools", lambda *a, **k: []
     )
     monkeypatch.setattr(
@@ -3195,7 +3167,6 @@ async def test_process_chat_releases_barrier_before_ai(setup_test_db, monkeypatc
 
     async def fake_chat(**kwargs):
         held_during_ai.append(main_mod._get_chat_job_barrier(job_id).locked())
-        assert kwargs.get("install_mcp") is False
         return True, "ok", "sess"
 
     monkeypatch.setattr("rootcoz.engine.chat.chat_with_ai", fake_chat)
@@ -3206,10 +3177,6 @@ async def test_process_chat_releases_barrier_before_ai(setup_test_db, monkeypatc
     monkeypatch.setattr(
         "rootcoz.engine.chat.clone_chat_repos",
         AsyncMock(return_value=False),
-    )
-    monkeypatch.setattr(
-        "rootcoz.engine.chat.install_http_tools_mcp_best_effort_async",
-        AsyncMock(),
     )
     monkeypatch.setattr(
         "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
@@ -4019,29 +3986,17 @@ class TestChatEndpoints:
         assert response.status_code == 422
         assert "Unknown Pi-sidecar provider/model pair" in response.json()["detail"]
 
-    async def test_send_message_normalizes_legacy_provider_alias(
+    async def test_send_message_rejects_removed_cli_provider_alias(
         self, test_client, temp_db_path: Path
     ):
-        """Legacy aliases retain their exact CLI sidecar provider route."""
+        """Removed *-cli provider aliases are rejected with 422."""
         await _save_job(temp_db_path, "chat-alias-job")
-        await _start_chat(test_client, "chat-alias-job", "cursor-cli", "composer-1")
-        with patch(
-            "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
-        ) as mock_chat:
-            mock_chat.return_value = (True, "ok", None)
-            response = test_client.post(
-                "/api/chat/chat-alias-job",
-                json={
-                    "message": "hello",
-                    "ai_provider": "cursor-cli",
-                    "ai_model": "composer-1",
-                },
-            )
-        assert response.status_code == 202
-        history = test_client.get("/api/chat/chat-alias-job").json()
-        assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
-        assert assistant_msgs[-1]["ai_provider"] == "cli-cursor"
-        assert assistant_msgs[-1]["ai_model"] == "composer-1"
+        response = test_client.post(
+            "/api/chat/chat-alias-job/init",
+            json={"ai_provider": "cursor-cli", "ai_model": "composer-1"},
+        )
+        assert response.status_code == 422
+        assert "Unknown Pi-sidecar provider/model pair" in response.json()["detail"]
 
     async def test_send_message_normalizes_provider_case(
         self, test_client, temp_db_path: Path
@@ -5517,25 +5472,6 @@ async def test_non_limit_4xx_gets_its_own_sentence(
 
 
 @pytest.mark.asyncio
-async def test_cursor_session_failure_keeps_its_remediation(refusal_secret_key):
-    """A Cursor ``/sessions`` 400 keeps the ``agent login`` remediation."""
-    from rootcoz import ai_client
-
-    detail = f"sidecar said no for {refusal_secret_key}"
-    send = ai_client.format_chat_ai_user_error(
-        f"Sidecar session creation failed (HTTP 400): {detail}",
-        is_admin=True,
-        ai_provider="cursor",
-        ai_model="composer",
-    )
-    start = ai_client._session_refusal(400, detail, "cursor", "composer")
-    for message in (send, start):
-        assert "agent login" in message
-        assert "CURSOR_API_KEY" in message
-        assert refusal_secret_key not in message
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status_code", "raw_text", "expected"),
     [
@@ -5990,40 +5926,6 @@ def test_the_own_sentence_registry_stays_bounded():
     assert len(ai_client._own_sentences) == ai_client._OWN_SENTENCE_REGISTRY_MAX
 
 
-def test_cursor_401_names_the_rejected_credential_not_the_browser_login():
-    """A refused key is the cause; the browser-login hint is only a bare 4xx."""
-    from rootcoz import ai_client
-
-    sentence = ai_client._session_refusal(
-        401, "upstream rejected the key", "cursor", "composer"
-    )
-    assert "agent login" not in sentence
-    assert "rejected the AI credential for cursor/composer" in sentence
-    # The bare-4xx Cursor failure keeps its remediation.
-    assert "agent login" in ai_client._session_refusal(
-        400, "upstream said no", "cursor", "composer"
-    )
-
-
-def test_a_cursor_refusal_keeps_its_sentence_at_send_time_too():
-    """Start's 422 detail and the send-time message are one sentence.
-
-    A bare-4xx Cursor refusal carries the browser-login hint, whose ``agent
-    login`` marker used to re-label it; the sentence rootcoz built wins.
-    """
-    from rootcoz import ai_client
-
-    sentence = ai_client._session_refusal(400, "upstream said no", "cursor", "composer")
-    assert "agent login" in sentence
-    for is_admin in (True, False):
-        assert (
-            ai_client.format_chat_ai_user_error(
-                sentence, is_admin=is_admin, ai_provider="cursor", ai_model="composer"
-            )
-            == sentence
-        )
-
-
 @pytest.mark.asyncio
 async def test_a_mapped_refusal_keeps_the_transcript_session_id():
     """The refusal copy still correlates with its recorded transcript.
@@ -6187,7 +6089,6 @@ async def _chat_turn(monkeypatch, tmp_path, handler, session_id=None):
         ai_client, "session_key", AsyncMock(return_value="user-chat-key")
     )
     monkeypatch.setattr(chat, "call_ai", _real_call_ai_for_turns)
-    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     if session_id is not None:
         await storage.save_ai_session_source(session_id, "alice", "openai", "user")
     user = ai_client.ai_username.set("alice")
@@ -6200,7 +6101,6 @@ async def _chat_turn(monkeypatch, tmp_path, handler, session_id=None):
             ai_model="m",
             build_prompt_fn=lambda: "prompt",
             session_id=session_id,
-            install_mcp=False,
             on_warning=warnings.append,
         )
     finally:

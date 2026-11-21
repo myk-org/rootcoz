@@ -100,7 +100,7 @@ The sidebar footer, `GET /api/version` and `rootcoz version` name the build as `
 
 | Value | Env var | Notes |
 |-------|---------|-------|
-| `ai.provider` | `AI_PROVIDER` | Any sidecar provider ID: `gemini`, `claude`, `cursor`, or a custom provider registered via the agent dir |
+| `ai.provider` | `AI_PROVIDER` | Any sidecar provider ID: `gemini`, `claude`, or a custom provider registered via the agent dir |
 | `ai.model` | `AI_MODEL` | Model name for the provider |
 | Provider credential | see below | Required for AI analysis |
 
@@ -113,7 +113,6 @@ Provider credentials (typically in `~/.config/rootcoz/helm/values.secrets.yaml`)
 | Gemini | `ai.geminiApiKey` | `GEMINI_API_KEY` |
 | Claude (API) | `ai.anthropicApiKey` | `ANTHROPIC_API_KEY` |
 | Claude (Vertex) | `ai.vertex.serviceAccountKey` + `ai.vertex.projectId` | mounted SA JSON |
-| Cursor | `ai.cursor.apiKey` and/or `ai.cursor.authJson` | `CURSOR_API_KEY` + auth mount |
 | Datadog (optional) | `datadog.apiKey` + `datadog.appKey` | `DATADOG_API_KEY` + `DATADOG_APP_KEY` |
 | Custom (sidecar agent dir) | `sidecar.agentDir.modelsJson` etc. | `PI_SIDECAR_AGENT_DIR` + agent-dir mount |
 
@@ -169,7 +168,7 @@ Login: username `admin`, password = API key above.
 
 **Warning:** Do not delete the encryption secret (`rootcoz-encryption-key`) independently — the database becomes unreadable.
 
-AI API keys, Vertex SA JSON, Cursor `auth.json`, and sidecar agent-dir files supplied via values are stored in Kubernetes Secrets **and** in the Helm release Secret (`sh.helm.release.v1.*`). For stricter environments, inject credentials with External Secrets / Sealed Secrets and omit plaintext keys from Helm values where possible. On upgrade, omitting a previously set AI key / mount credential preserves the existing Secret via Helm `lookup`.
+AI API keys, Vertex SA JSON, and sidecar agent-dir files supplied via values are stored in Kubernetes Secrets **and** in the Helm release Secret (`sh.helm.release.v1.*`). For stricter environments, inject credentials with External Secrets / Sealed Secrets and omit plaintext keys from Helm values where possible. On upgrade, omitting a previously set AI key / mount credential preserves the existing Secret via Helm `lookup`.
 
 ## Production Sizing
 
@@ -399,7 +398,7 @@ helm upgrade rootcoz ./chart -n rootcoz \
   -f ~/.config/rootcoz/helm/values.secrets.yaml
 ```
 
-AI credential keys in values apply on upgrade. Auto-generated `ADMIN_KEY` and `ROOTCOZ_ENCRYPTION_KEY` are never rotated by Helm upgrade. Vertex SA JSON and Cursor `auth.json` are also preserved via `lookup` when omitted from values. Deployment pod-template checksums track values changes (salted with the release revision). Out-of-band Secret edits (e.g. via External Secrets) require `kubectl rollout restart`.
+AI credential keys in values apply on upgrade. Auto-generated `ADMIN_KEY` and `ROOTCOZ_ENCRYPTION_KEY` are never rotated by Helm upgrade. Vertex SA JSON is also preserved via `lookup` when omitted from values. Deployment pod-template checksums track values changes (salted with the release revision). Out-of-band Secret edits (e.g. via External Secrets) require `kubectl rollout restart`.
 
 To rotate encryption key: delete the secret manually, then reinstall (destroys encrypted DB credentials — re-issue API keys).
 

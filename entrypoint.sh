@@ -148,15 +148,6 @@ if [ "${1:-}" = "--exit-check" ]; then
     _run_app bash -c "trap '' TERM; : > \"$4\"; while [ ! -f \"$_check_release\" ]; do sleep 0.01; done; exit $_check_code"
 fi
 
-# Cursor auth: create config dir (owned by runtime UID so chmod works)
-# and symlink auth.json to the PVC mount for persistence
-if [ -d /home/appuser/.cursor-auth ]; then
-    _cursor_cfg="${XDG_CONFIG_HOME:-/home/appuser/.config}/cursor"
-    mkdir -p "$_cursor_cfg"
-    chmod 0700 "$_cursor_cfg"
-    ln -sf /home/appuser/.cursor-auth/auth.json "$_cursor_cfg/auth.json"
-fi
-
 # Resolve PORT with a default so the exec-form CMD (which cannot expand
 # shell variables) gets the correct bind port at runtime.
 export PORT="${PORT:-8000}"

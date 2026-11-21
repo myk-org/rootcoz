@@ -71,9 +71,8 @@ export function analysisAiUnavailablePart(
   provider: string, model: string, canUseServer = true, canUseFree = false,
 ): AnalysisAiUnavailablePart {
   const id = normalizeProvider(provider)
-  // `providers` is what the picker offers. A provider_status key is not enough: the
-  // backend synthesises a `cursor` entry whenever any Cursor-family provider is
-  // registered, so a stale `cursor` default would be blamed on its model (#591).
+  // `providers` is what the picker offers; a provider_status key alone is not
+  // enough to consider the provider available (#591).
   if (!(id in providers)) return 'provider'
   const listed = usableModels(providers, provider, false, status, canUseServer, canUseFree)
   return listed.some((option) => option.id === model && option.session_supported === false) ? 'session' : 'model'

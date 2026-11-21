@@ -196,9 +196,6 @@ async def test_analysis_prompt_advertises_the_graph(
         lambda workspace, job_id, **_kwargs: list(GRAPH_TOOLS),
     )
     monkeypatch.setattr(session_tools, "index_workspace_graph", AsyncMock())
-    monkeypatch.setattr(
-        session_tools, "install_http_tools_mcp_best_effort_async", AsyncMock()
-    )
 
     await core.run_single_ai_analysis(
         failures=[

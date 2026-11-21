@@ -34,10 +34,6 @@ async def test_console_only_usage_attaches_to_each_child_build(
     with (
         patch.object(storage, "DB_PATH", temp_db_path),
         patch("rootcoz.engine.core.call_ai_once", side_effect=ai_response),
-        patch(
-            "rootcoz.engine.session_tools.install_http_tools_mcp_best_effort_async",
-            new_callable=AsyncMock,
-        ),
     ):
         await storage.init_db()
         children = []

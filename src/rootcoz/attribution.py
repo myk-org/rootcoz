@@ -124,9 +124,9 @@ class AiProvenance:
 def _pair(provenance: AiProvenance) -> tuple[str, str]:
     """Return the creditable (provider, model) pair — empty when AI was unused.
 
-    The provider is the catalog's internal ID; the public API only ever exposes
-    ``claude``/``gemini``/``cursor``, so it is mapped through ai_client's one
-    provider table before it reaches a footer or a signed payload.
+    The provider is the catalog's internal ID; the public API exposes friendly
+    names like ``claude``/``gemini`` via ai_client's provider table before it
+    reaches a footer or a signed payload.
     """
     if not provenance.ai_used:
         return "", ""

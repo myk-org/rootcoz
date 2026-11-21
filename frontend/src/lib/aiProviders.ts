@@ -1,15 +1,7 @@
 export type AiProviderOption = { value: string; label: string }
 
-/** Legacy aliases accepted from older settings / URLs. */
-const LEGACY_PROVIDER_ALIASES: Record<string, string> = {
-  'cursor-cli': 'cli-cursor',
-  'claude-cli': 'cli-claude',
-  'gemini-cli': 'cli-gemini',
-}
-
 export function normalizeProvider(provider: string): string {
-  const p = provider.toLowerCase().trim()
-  return LEGACY_PROVIDER_ALIASES[p] ?? p
+  return provider.toLowerCase().trim()
 }
 
 /** Providers advertised by the server, plus any legacy current selection. */

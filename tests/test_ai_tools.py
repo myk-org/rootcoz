@@ -209,33 +209,6 @@ class TestChatImplTools:
         assert retry_kwargs.get("tools") == list(CHAT_BUILTIN_TOOLS)
         assert retry_kwargs.get("session_id") is None
 
-    @pytest.mark.asyncio
-    async def test_install_mcp_false_skips_mcp_install(self):
-        from rootcoz.engine.chat import _chat_with_ai_impl
-
-        mock_call_ai = AsyncMock(
-            return_value=AIResult(success=True, text="response", session_id="s")
-        )
-        with (
-            patch("rootcoz.engine.chat.call_ai", mock_call_ai),
-            patch(
-                "rootcoz.engine.chat.install_http_tools_mcp_best_effort_async",
-                new_callable=AsyncMock,
-            ) as mock_install,
-        ):
-            await _chat_with_ai_impl(
-                message="hello",
-                history=[],
-                ai_provider="gemini",
-                ai_model="pro",
-                build_prompt_fn=lambda: "system prompt",
-                session_id=None,
-                restrict_tools=True,
-                install_mcp=False,
-            )
-
-        mock_install.assert_not_called()
-
 
 class TestAnalysisTools:
     """Verify call_ai_once in core.py passes ANALYSIS_BUILTIN_TOOLS."""
@@ -310,9 +283,6 @@ class TestAnalysisTools:
 
         monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_ai_once)
         monkeypatch.setattr("rootcoz.engine.core.update_progress_phase", AsyncMock())
-        mcp_js = tmp_path / "http-tools-mcp.js"
-        mcp_js.write_text("// stub\n", encoding="utf-8")
-        monkeypatch.setenv("ROOTCOZ_HTTP_TOOLS_MCP", str(mcp_js))
 
         # Ensure history prompt file is discoverable
         failures = [
@@ -346,11 +316,10 @@ class TestAnalysisTools:
         # Token only in tool headers
         for t in tools:
             assert t["http"]["headers"]["Authorization"] == "Bearer super-secret-token"
-        mcp_blob = (tmp_path / ".mcp.json").read_text(encoding="utf-8")
-        assert "super-secret-token" not in mcp_blob
-        dump = tmp_path.parent / f".{tmp_path.name}.rootcoz-http-tools.json"
-        dumped_names = [t["name"] for t in json.loads(dump.read_text(encoding="utf-8"))]
-        assert "get_failure_history" in dumped_names
+        assert not (tmp_path / ".mcp.json").exists()
+        assert not (
+            tmp_path.parent / f".{tmp_path.name}.rootcoz-http-tools.json"
+        ).exists()
 
 
 class TestPeerAnalysisTools:
@@ -405,10 +374,6 @@ class TestPeerAnalysisTools:
         ]
         peer_configs = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
 
-        mcp_js = tmp_path / "http-tools-mcp.js"
-        mcp_js.write_text("// stub\n", encoding="utf-8")
-        monkeypatch.setenv("ROOTCOZ_HTTP_TOOLS_MCP", str(mcp_js))
-
         await analyze_failure_group_with_peers(
             failures=failures,
             console_context="some console output",
@@ -435,8 +400,7 @@ class TestPeerAnalysisTools:
         ]
         assert tool_lists, "peer call_ai must pass HTTP custom_tools"
         assert "get_failure_history" in tool_lists[0]
-        mcp_blob = (tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8")
-        assert "peer-secret" not in mcp_blob
+        assert not (tmp_path / ".cursor" / "mcp.json").exists()
 
 
 class TestResourcesAgentDiscovery:

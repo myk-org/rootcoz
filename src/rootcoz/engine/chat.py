@@ -23,11 +23,6 @@ from rootcoz.ai_client import (
     format_ai_diagnostic,
     resolve_catalog_pair,
 )
-from rootcoz.engine.http_mcp import (
-    _workspace_install_lock,
-    cleanup_http_tools_mcp,
-    install_http_tools_mcp_best_effort_async,
-)
 from rootcoz.error_messages import tracker_credential_message, unavailable_sentence
 from rootcoz.jira import (
     JiraConnection,
@@ -43,6 +38,7 @@ from rootcoz.temp_paths import (
     delete_tree,
     reusable_path_lock,
     sanitize_path_part,
+    workspace_lock,
 )
 from rootcoz.utils import single_line_diagnostic
 
@@ -1299,7 +1295,7 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> DeleteResult | _Aband
         total = total.plus(delete_tree(staging))
     for item in workspace.iterdir():
         if item.name.startswith("."):
-            continue  # Keep .claude/, .cursor/ etc (session data)
+            continue  # Keep hidden dirs (session data)
         if item.is_symlink():
             total = total.plus(_safe_remove_symlink(item))
         elif item.is_dir():
@@ -1311,8 +1307,8 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> DeleteResult | _Aband
     return total
 
 
-def _chat_mcp_lock_targets(workspace: Path) -> list[Path]:
-    """Job workspace plus nested per-user dirs that have their own MCP dumps."""
+def _chat_lock_targets(workspace: Path) -> list[Path]:
+    """Job workspace plus nested per-user dirs that may hold workspace locks."""
     targets: list[Path] = []
     if workspace.exists() and workspace.is_dir():
         for child in workspace.iterdir():
@@ -1344,7 +1340,7 @@ def cleanup_chat_workspace(
             f"Chat cleanup: refusing to delete symlinked workspace {workspace}"
         )
         return DeleteResult(0, 0)
-    targets = _chat_mcp_lock_targets(workspace)
+    targets = _chat_lock_targets(workspace)
     from rootcoz.engine.graft import reap_graph
     from rootcoz.engine.graft_http import unregister_workspace
 
@@ -1353,12 +1349,11 @@ def cleanup_chat_workspace(
     if isinstance(graph, _Abandoned):
         return ABANDON
     total = graph
-    # Hold each workspace's MCP install lock for the whole delete + dump
-    # unlink so an in-flight installer cannot recreate credentials after
-    # the job (or nested user dir) was removed.
+    # Hold each workspace lock for the delete so an in-flight builder or
+    # cleanup on a nested user dir cannot race workspace removal.
     with ExitStack() as stack:
         for target in sorted(targets, key=lambda p: str(p)):
-            stack.enter_context(_workspace_install_lock(target))
+            stack.enter_context(workspace_lock(target))
         if workspace.exists():
             # Resolve symlinks before removing workspace tree — symlinked
             # artifact dirs live outside the workspace and are not reached by
@@ -1367,8 +1362,6 @@ def cleanup_chat_workspace(
                 if item.is_symlink():
                     total = total.plus(_safe_remove_symlink(item))
             total = total.plus(delete_tree(workspace))
-        for target in targets:
-            cleanup_http_tools_mcp(target)
     logger.info(f"Deleted chat workspace for job {job_id}")
     return total
 
@@ -1909,7 +1902,6 @@ async def _create_chat_session(
             create_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
             create_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
-        await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
         from rootcoz.ai_client import session_key
 
         key = (
@@ -2036,7 +2028,6 @@ async def _chat_with_ai_impl(
     log_prefix: str = "Chat",
     request_id: str = "",
     call_type: str = "chat",
-    install_mcp: bool = True,
     on_delta: Callable[[str], None] | None = None,
     on_warning: Callable[[str], None] | None = None,
 ) -> tuple[bool, str, str | None]:
@@ -2083,8 +2074,6 @@ async def _chat_with_ai_impl(
         call_kwargs["on_delta"] = on_delta
     if not session_id and restrict_tools:
         call_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
-    if install_mcp:
-        await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
     # Free-form chat has no schema to check, so its rule is "a non-empty
     # answer": pi-config's prompt response carries no stop_reason, and dropping
     # a finished reply because the turn also recorded an error loses work the
@@ -2127,10 +2116,6 @@ async def _chat_with_ai_impl(
             retry_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
             retry_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
-        if install_mcp:
-            await install_http_tools_mcp_best_effort_async(
-                repo_path, custom_tools or []
-            )
         result = await call_ai(prompt, accept_turn=_chat_turn_usable, **retry_kwargs)
 
     await result.record_usage(
@@ -2178,7 +2163,6 @@ async def chat_with_ai(
     custom_tools: list[dict[str, Any]] | None = None,
     repos_available: bool = False,
     ci_build_data_available: bool = False,
-    install_mcp: bool = True,
     tracker_unavailable: dict[str, str] | None = None,
     issue_repos: tuple[str, ...] = (),
     on_delta: Callable[[str], None] | None = None,
@@ -2212,7 +2196,6 @@ async def chat_with_ai(
         log_prefix=f"Chat(job={job_id})",
         request_id=job_id,
         call_type="chat",
-        install_mcp=install_mcp,
         on_delta=on_delta,
         on_warning=on_warning,
     )

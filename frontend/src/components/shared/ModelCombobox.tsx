@@ -10,8 +10,6 @@ import { ChevronDown } from 'lucide-react'
 export interface ModelOption {
   id: string
   name: string
-  /** Model source under the friendly provider: acpx | cli | api */
-  source?: string
   credential_sources?: Array<'user' | 'server'>
   verified?: boolean
   serverLocked?: boolean
@@ -316,11 +314,6 @@ export function ModelCombobox({
                       <CredentialSourceLabel label={credentialLabel([{ ...model, provider: '' }], false, forceServer)} canUseServer={canUseServer} />
                     </span>
                   ) : null}
-                  {model.source && (
-                    <span className="rounded border border-border-default px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-tertiary">
-                      {model.source}
-                    </span>
-                  )}
                   {model.name && model.name !== model.id && (
                     <span className="text-xs text-text-tertiary">{model.name}</span>
                   )}

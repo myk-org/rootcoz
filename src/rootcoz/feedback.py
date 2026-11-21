@@ -492,7 +492,7 @@ async def generate_feedback_preview(
         title=title,
         body=body,
         labels=labels,
-        # Public names only — catalog IDs such as ``cli-claude`` never reach
+        # Public names only — catalog IDs such as ``google-vertex-claude`` never reach
         # the browser, exactly as they never reach a footer.
         ai_provider=public_provider_name(provenance.provider),
         ai_model=provenance.model,

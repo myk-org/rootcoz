@@ -90,15 +90,12 @@ from rootcoz.ai_client import (
     bounded_model_catalog,
     build_friendly_catalog,
     call_ai_once,
-    clear_cursor_auth_cache,
     format_ai_diagnostic,
     format_chat_ai_user_error,
-    is_cursor_provider,
     list_models,
     model_listing_status,
     normalize_provider,
     parse_ambient_auth_provider_ids,
-    probe_cursor_auth,
     registered_provider_ids,
     resolve_catalog_pair,
     scoped_models,
@@ -520,8 +517,6 @@ _DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
         "sidecar_host",
         "sidecar_port",
         "sidecar_url",
-        "acpx_agents",
-        "cli_agents",
         "pi_sidecar_log_level",
         "node_binary",
         "pi_sidecar_transcripts_dir",
@@ -548,8 +543,6 @@ _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
         "sidecar_host",
         "sidecar_port",
         "sidecar_url",
-        "acpx_agents",
-        "cli_agents",
         "pi_sidecar_log_level",
         "node_binary",
         "pi_sidecar_transcripts_dir",
@@ -797,8 +790,6 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "sidecar_host",
         "sidecar_port",
         "sidecar_url",
-        "acpx_agents",
-        "cli_agents",
         "node_binary",
         "pi_sidecar_transcripts_dir",
     ],
@@ -864,8 +855,6 @@ _SETTING_LABEL_OVERRIDES: dict[str, str] = {
     "require_approval": "Require admin approval",
     "admin_wait_approve_msg": "Approval wait message",
     "enable_free_models": "Enable free AI models",
-    "cli_agents": "CLI agents",
-    "acpx_agents": "ACPX agents",
     "max_workspace_graph_mb": "Workspace graph budget (MB)",
     "login_lockout_enabled": "Enable login lockout",
     "login_lockout_threshold": "Failed logins before lockout",
@@ -3153,7 +3142,7 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
         )
 
 
-async def _safe_preload_cursor_models() -> None:
+async def _safe_preload_sidecar_models() -> None:
     """Pre-populate the sidecar model catalog in background. Best-effort."""
     try:
         await list_models()
@@ -3997,8 +3986,6 @@ _SIDECAR_BRIDGE_SETTINGS: tuple[str, ...] = (
     "sidecar_host",
     "sidecar_port",
     "sidecar_url",
-    "acpx_agents",
-    "cli_agents",
     "pi_sidecar_log_level",
     "node_binary",
     "pi_sidecar_transcripts_dir",
@@ -4186,8 +4173,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # One sampler for the event-loop lag the admin status page reports.
         server_status.start_loop_lag_watchdog()
 
-        # Pre-populate cursor models in background (don't block startup)
-        _spawn_background(_safe_preload_cursor_models())
+        # Pre-populate sidecar models in background (don't block startup)
+        _spawn_background(_safe_preload_sidecar_models())
 
         # Retroactively assign metadata to jobs that don't have it yet
         settings = get_settings()
@@ -17421,56 +17408,6 @@ async def get_classifications(
     return strip_sensitive_from_response({"classifications": classifications})
 
 
-def _cursor_status_for_client(
-    status: dict[str, Any], *, is_admin: bool
-) -> dict[str, Any]:
-    """Return Cursor provider_status safe for the caller's role.
-
-    Non-admins must not learn whether ``CURSOR_API_KEY`` is configured
-    (``has_api_key`` or credential-revealing reasons/hints).
-    """
-    out = dict(status)
-    if is_admin:
-        return out
-    out.pop("has_api_key", None)
-    if out.get("reason") in ("auth_expired", "api_key_not_applied"):
-        out["reason"] = "unavailable"
-    if not out.get("ok"):
-        out["hint"] = "Cursor is unavailable. Contact an administrator."
-    return out
-
-
-def _cursor_status_from_model_count(model_count: int) -> dict[str, Any]:
-    """Coarse Cursor status for non-admins (no subprocess / credential probe)."""
-    if model_count > 0:
-        return {"ok": True, "reason": None, "hint": None, "model_count": model_count}
-    return {
-        "ok": False,
-        "reason": "unavailable",
-        "hint": "Cursor is unavailable. Contact an administrator.",
-        "model_count": model_count,
-    }
-
-
-def _has_cursor_provider(provider_ids: Iterable[str]) -> bool:
-    """Whether a Cursor provider is present, regardless of its model count (#374).
-
-    A registered Cursor provider with zero current models (expired login,
-    sidecar outage) is exactly the state ``probe_cursor_auth`` diagnoses, so
-    presence — not the visible model count — decides whether status is reported.
-    """
-    return any(is_cursor_provider(provider_id) for provider_id in provider_ids)
-
-
-def _cursor_model_count(models_by_provider: Mapping[str, Sequence[Any]]) -> int:
-    """Cursor models in a provider-keyed catalog, for the status model_count."""
-    return sum(
-        len(models)
-        for provider_id, models in models_by_provider.items()
-        if is_cursor_provider(provider_id)
-    )
-
-
 async def scoped_models_for_request(
     request: Request,
 ) -> dict[str, list[dict[str, Any]]]:
@@ -17490,18 +17427,9 @@ async def list_ai_models(
         description="Filter by an exact Pi-sidecar provider identifier.",
     ),
 ) -> dict[str, Any]:
-    """List available AI models for one or all configured providers.
-
-    When listing all providers (or a Cursor provider), includes ``provider_status``
-    with a Cursor auth probe (browser ``agent login`` expires; ``CURSOR_API_KEY``
-    does not expire and always works when set in the server env).
-    Credential-state fields (``has_api_key``) are admin-only.
-    Non-admins get a coarse ok/unavailable status from model_count only
-    (no ``agent status`` subprocess).
-    """
+    """List available AI models for one or all configured providers."""
     _require_authenticated(request)
     logger.debug("GET /api/ai-models provider=%s", provider)
-    is_admin = bool(getattr(request.state, "is_admin", False))
     try:
         scoped = await scoped_models_for_request(request)
         listing_status = model_listing_status.get() or {}
@@ -17528,34 +17456,11 @@ async def list_ai_models(
                 ]
                 if listing_status[provider].get("unavailable"):
                     payload["unavailable"] = True
-            if is_cursor_provider(provider):
-                if is_admin:
-                    cursor_raw = await probe_cursor_auth(model_count=len(models))
-                    cursor_status = _cursor_status_for_client(cursor_raw, is_admin=True)
-                else:
-                    cursor_status = _cursor_status_from_model_count(len(models))
-                payload["provider_status"] = {"cursor": cursor_status}
             return strip_sensitive_from_response(payload)
 
         # No provider specified — use the shared successful sidecar catalog.
-        # A deployment without a Cursor provider must not report Cursor status
-        # at all, and must not pay for the ``agent status`` probe (#374).
         all_models = scoped
         provider_status: dict[str, Any] = dict(listing_status)
-        if _has_cursor_provider(all_models):
-            cursor_count = _cursor_model_count(all_models)
-            if is_admin:
-                cursor_status = _cursor_status_for_client(
-                    await probe_cursor_auth(model_count=cursor_count),
-                    is_admin=True,
-                )
-            else:
-                cursor_status = _cursor_status_from_model_count(cursor_count)
-            provider_status = {"cursor": cursor_status, **provider_status}
-        else:
-            # A user-credential listing entry must not surface a Cursor banner
-            # for a deployment with no Cursor provider (#374).
-            provider_status.pop("cursor", None)
         return strip_sensitive_from_response(
             {"providers": all_models, "provider_status": provider_status}
         )
@@ -17583,32 +17488,21 @@ async def refresh_ai_models(request: Request) -> dict[str, Any]:
         client = get_sidecar_client()
         models = await client.refresh_models()
         update_model_catalog(models)
-        clear_cursor_auth_cache()
-        # Probe Cursor when the deployment has a Cursor provider, even when the
-        # refreshed catalog lists no Cursor models — that outage is what the
-        # probe reports (#374). The sidecar registry still names a registered
-        # provider whose listing came back empty.
         catalog = build_friendly_catalog(models)
-        cursor_providers = {*catalog, *(await registered_provider_ids() or ())}
-        has_cursor = _has_cursor_provider(cursor_providers)
-        cursor_status = await probe_cursor_auth(force=True) if has_cursor else None
         # A forced refresh also re-reads every deployment-credential listing
         # (#372): the admin asked for live models, and a custom provider keyed
         # from the deployment env has no stored key to refresh.
         deployment_counts = await capture_deployment_provider_listings(force=True)
         logger.info(
-            "Model refresh complete: %d models available (cursor_provider=%s, cursor_ok=%s)",
+            "Model refresh complete: %d models available across %d provider(s)",
             len(models),
-            has_cursor,
-            (cursor_status or {}).get("ok"),
+            len(catalog),
         )
         payload: dict[str, Any] = {
             "models": models,
             "count": len(models),
             "deployment_providers": deployment_counts,
         }
-        if cursor_status is not None:
-            payload["provider_status"] = {"cursor": cursor_status}
         # One action id for every model refresh (#379): ``scope`` says whether
         # the whole catalog was re-read or a single provider (see
         # ``refresh_server_provider_models``). Never the model list itself.
@@ -22738,7 +22632,7 @@ async def _deployment_authenticated_provider_ids(
        a manifest ``$VAR``/``${VAR}`` ``apiKey``.
     2. The sidecar's own auth status for the provider
        (``authStatus.configured``), which is how a provider authenticated
-       from the deployment environment — ADC, OAuth, a CLI/ACPX login —
+       from the deployment environment — e.g. ADC or OAuth —
        reports itself. A provider the sidecar does not register answers
        ``404`` and stays unauthenticated.
 
@@ -27060,11 +26954,10 @@ async def _normalize_and_validate_ai_params(
 ) -> tuple[str | None, str | None]:
     """Normalize and validate AI provider/model from request body.
 
-    Returns (provider, model) with whitespace stripped, legacy aliases
-    normalized (e.g. ``cursor-cli`` / ``CURSOR`` → ``cursor``), and blanks
-    as None. Raises HTTPException 422 for invalid providers, or when only
-    one of provider/model is set (avoids pairing UI provider with settings
-    model).
+    Returns (provider, model) with whitespace stripped, provider names
+    lowercased, and blanks as None. Raises HTTPException 422 for invalid
+    providers, or when only one of provider/model is set (avoids pairing UI
+    provider with settings model).
     """
     provider_raw = (ai_provider or "").strip()
     provider = (normalize_provider(provider_raw) or None) if provider_raw else None
@@ -27525,7 +27418,6 @@ async def _process_chat_message(
                         custom_tools=custom_tools,
                         repos_available=repos_available,
                         ci_build_data_available=ci_build_data_available,
-                        install_mcp=False,
                         tracker_unavailable=tracker_unavailable,
                         issue_repos=tuple(sorted(issue_repos)),
                         # Display only: the stored reply is still the whole text.

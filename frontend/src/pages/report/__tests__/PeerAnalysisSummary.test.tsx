@@ -15,31 +15,31 @@ function debate(ai_configs: PeerDebate['ai_configs']): { debate: PeerDebate } {
 }
 
 describe('getPeerAiLabels', () => {
-  const main = { ai_provider: 'cursor', ai_model: 'cursor:cursor-grok-4.5-high-fast' }
+  const main = { ai_provider: 'openai', ai_model: 'gpt-5' }
   const peerClaude = { ai_provider: 'claude', ai_model: 'claude-opus-4-6-1m' }
-  const peerComposer = { ai_provider: 'cursor', ai_model: 'cursor:composer-2.5-fast' }
+  const peerGemini = { ai_provider: 'gemini', ai_model: 'gemini-2.5-pro' }
 
   it('drops ai_configs[0] (main) and keeps peers', () => {
-    const labels = getPeerAiLabels([debate([main, peerClaude, peerComposer])])
+    const labels = getPeerAiLabels([debate([main, peerClaude, peerGemini])])
     expect(labels).toEqual([
       'claude/claude-opus-4-6-1m',
-      'cursor/cursor:composer-2.5-fast',
+      'gemini/gemini-2.5-pro',
     ])
   })
 
   it('keeps a peer that shares the main provider/model', () => {
     const labels = getPeerAiLabels([debate([main, main])])
-    expect(labels).toEqual(['cursor/cursor:cursor-grok-4.5-high-fast'])
+    expect(labels).toEqual(['openai/gpt-5'])
   })
 
   it('dedupes peer labels across debates', () => {
     const labels = getPeerAiLabels([
       debate([main, peerClaude]),
-      debate([main, peerClaude, peerComposer]),
+      debate([main, peerClaude, peerGemini]),
     ])
     expect(labels).toEqual([
       'claude/claude-opus-4-6-1m',
-      'cursor/cursor:composer-2.5-fast',
+      'gemini/gemini-2.5-pro',
     ])
   })
 

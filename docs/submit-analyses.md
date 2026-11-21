@@ -5,7 +5,7 @@ Use this page when you have CI output and want RootCoz to turn it into a report.
 ## Prerequisites
 - A running RootCoz server. See [Quickstart](quickstart.html) or [Deploying Rootcoz](deploy-rootcoz.html).
 - An account with the `operator` or `admin` role. `reviewer` and `viewer` can read results but cannot submit.
-- At least one AI provider credential for `claude`, `gemini`, or `cursor`, unless you are only collecting CI results.
+- At least one AI provider credential (for example for `claude`, `gemini`, `anthropic`, or another configured provider), unless you are only collecting CI results.
 - Your input: a Jenkins job and build, a Prow job and build ID, a JUnit XML file, or raw JUnit XML text.
 
 ## Quick Example

@@ -42,9 +42,9 @@ describe('lastAiPair store', () => {
     expect(localStorage.getItem(KEY('alice'))).toBeNull()
   })
 
-  it('normalizes a legacy provider alias and keeps an explicit clear as a value', () => {
-    writeLastAiPair('alice', { provider: 'cursor-cli', model: 'sonnet' })
-    expect(readLastAiPair('alice')?.pair).toEqual({ provider: 'cli-cursor', model: 'sonnet' })
+  it('normalizes provider casing/whitespace and keeps an explicit clear as a value', () => {
+    writeLastAiPair('alice', { provider: '  OpenAI  ', model: 'gpt-5' })
+    expect(readLastAiPair('alice')?.pair).toEqual({ provider: 'openai', model: 'gpt-5' })
     writeLastAiPair('alice', { provider: '', model: '' })
     expect(readLastAiPair('alice')).toEqual({ owner: 'alice', pair: { provider: '', model: '' } })
   })

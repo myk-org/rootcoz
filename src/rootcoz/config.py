@@ -94,7 +94,7 @@ def parse_peer_configs(raw: str) -> list[dict[str, str]]:
     """Parse 'provider:model,provider:model' into list of dicts.
 
     Model names may contain commas inside square brackets
-    (e.g. ``cursor:gpt-5.4[context=272k,reasoning=medium]``).
+    (e.g. ``openai:gpt-5.4[context=272k,reasoning=medium]``).
 
     Raises ValueError on malformed input. Empty string returns [].
     """
@@ -329,9 +329,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Claude Code CLI configuration (set by container environment)
-    # These env vars are read by the claude CLI, not by this application:
-    # - CLAUDE_CODE_USE_VERTEX=1
+    # Vertex AI configuration (set by container environment)
+    # These env vars are read by @myk-org/pi-vertex-claude in the sidecar, not by this application:
     # - CLOUD_ML_REGION=<region>
     # - ANTHROPIC_VERTEX_PROJECT_ID=<project>
 
@@ -1237,14 +1236,6 @@ class Settings(BaseSettings):
     sidecar_url: str = Field(
         default="",
         description="Base URL rootcoz uses to reach the sidecar (SIDECAR_URL). Restart required.",
-    )
-    acpx_agents: str = Field(
-        default="",
-        description="ACPX agent spec for the sidecar (ACPX_AGENTS). Restart required.",
-    )
-    cli_agents: str = Field(
-        default="",
-        description="CLI agent spec for the sidecar (CLI_AGENTS). Restart required.",
     )
     pi_sidecar_log_level: str = Field(
         default="",

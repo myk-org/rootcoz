@@ -825,9 +825,6 @@ def install_start_rig(monkeypatch, tmp_path):
             credential_source=credential_source,
         )
         monkeypatch.setattr(graft_http, "cloned_graph_roots", lambda workspace: {})
-        monkeypatch.setattr(
-            chat, "install_http_tools_mcp_best_effort_async", AsyncMock()
-        )
         monkeypatch.setattr(chat, "get_sidecar_client", lambda: client)
         monkeypatch.setattr(
             chat,

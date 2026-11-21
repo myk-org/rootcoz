@@ -56,7 +56,7 @@ def test_graph_bridge(tmp_path: Path, monkeypatch) -> None:
     )
     skill_paths = [
         ws / location / "skills" / "rootcoz-graft" / "SKILL.md"
-        for location in (".pi", ".agents", ".cursor", ".claude", ".gemini")
+        for location in (".pi", ".agents", ".claude", ".gemini")
     ]
     assert all(
         path.read_text().startswith("---\nname: rootcoz-graft\n")
@@ -584,10 +584,10 @@ def test_graph_skill_rejects_unsafe_or_custom_discovery_paths(tmp_path: Path) ->
     repo.mkdir(parents=True)
     external = tmp_path / "external"
     external.mkdir()
-    (ws / ".cursor").symlink_to(external, target_is_directory=True)
+    (ws / ".agents").symlink_to(external, target_is_directory=True)
     assert register_workspace(ws, {"repo": repo}) == []
     assert list(external.iterdir()) == []
-    (ws / ".cursor").unlink()
+    (ws / ".agents").unlink()
     assert install_graph_skill(ws)
     skill = ws / ".pi" / "skills" / "rootcoz-graft" / "SKILL.md"
     skill.write_text("custom")

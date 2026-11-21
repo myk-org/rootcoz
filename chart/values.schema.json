@@ -67,13 +67,6 @@
             "region": { "type": "string" },
             "serviceAccountKey": { "type": ["string", "object"] }
           }
-        },
-        "cursor": {
-          "type": "object",
-          "properties": {
-            "apiKey": { "type": "string" },
-            "authJson": { "type": ["string", "object"] }
-          }
         }
       }
     },

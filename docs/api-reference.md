@@ -77,7 +77,7 @@ That single authenticated GET returns the stored analysis for one job, including
 | GET | `/api/auth/me` | viewer | Username, role, `can_view_reports`, `can_use_server_providers` |
 | POST | `/api/auth/rotate-key` | viewer | Rotates your own API key; the old key stops working. Known gap — see the note below |
 | GET | `/api/user/ai-credentials` | viewer | Supported provider IDs with a `configured` flag and a `supports_user_keys` flag each (a stored key for a provider that stopped accepting user keys — e.g. an ambient-auth provider — stays listed with `supports_user_keys: false`). Keys are never returned |
-| PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key. Body is `{api_key, model}` — `model` is required (`400` without it, since the key is verified against it) and the key is only persisted when the provider returns `accepted`. A `rejected` or `inconclusive` check is not an HTTP error: it returns `200` with `ok: false`, an `outcome`, and an explanatory `message`, leaving any existing credential unchanged, so clients must check `ok` rather than the status code. `{provider}` is an exact provider ID from `GET /api/user/ai-credentials` (for example `anthropic` or `google`), not the `claude`/`gemini`/`cursor` names used for analysis settings. Unknown IDs are rejected with 400 |
+| PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key. Body is `{api_key, model}` — `model` is required (`400` without it, since the key is verified against it) and the key is only persisted when the provider returns `accepted`. A `rejected` or `inconclusive` check is not an HTTP error: it returns `200` with `ok: false`, an `outcome`, and an explanatory `message`, leaving any existing credential unchanged, so clients must check `ok` rather than the status code. `{provider}` is an exact provider ID from `GET /api/user/ai-credentials` (for example `anthropic` or `google`), not the `claude`/`gemini` aliases used for analysis settings. Unknown IDs are rejected with 400 |
 | DELETE | `/api/user/ai-credentials/{provider}` | reviewer | Remove a personal provider key |
 | GET | `/api/user/tokens` | viewer | Stored Jira and GitHub tracker tokens |
 | PUT | `/api/user/tokens` | reviewer | Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, `""` or `null` clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. Fields are `github_token`, `jira_email`, `jira_token`, and `jira_sa_token` (an Atlassian service-account credential — an ATOA-prefixed OAuth 2.0 client secret or an ATST-prefixed scoped token — which takes precedence over the regular Jira credentials). A body with none of the fields writes nothing and returns `saved: false`; anything other than a string or `null` is rejected with `400` |
@@ -116,7 +116,7 @@ The shared body accepts the server defaults as per-request overrides:
 | `raw_xml`, `failures`, `passed_tests`, `skipped_tests` | File and raw sources |
 | `prow_job_name`, `build_id`, `gcs_prefix` | Prow build identity and artifact prefix |
 | `prow_url`, `gcs_bucket` | Prow server defaults, overridable per request |
-| `ai_provider`, `ai_model` | `claude`, `gemini`, or `cursor` |
+| `ai_provider`, `ai_model` | `claude`, `gemini`, or any exact Pi-sidecar provider ID and model |
 | `ai_call_timeout`, `max_concurrent_ai_calls` | AI budget for this run |
 | `peer_ai_configs`, `peer_analysis_max_rounds` | Multi-AI debate settings |
 | `additional_repos` | Extra repositories to clone for context |
@@ -336,7 +336,7 @@ Date bounds use the `date_from` and `date_to` query names. The legacy `from` and
 | GET | `/api/notifications/vapid-public-key` | viewer | Web Push public key |
 | POST | `/api/notifications/subscribe` | viewer | `endpoint`, `p256dh_key`, `auth_key` |
 | POST | `/api/notifications/unsubscribe` | viewer | Removes a subscription |
-| GET | `/api/ai-models` | viewer | `provider`; lists models for `claude`, `gemini`, `cursor`. Each model may carry `session_supported` (boolean) and, when it is `false`, `session_unsupported_reason`; both are **absent** for providers that are not key-scoped (`trustKeyScopedListing`) |
+| GET | `/api/ai-models` | viewer | `provider`; lists models for the configured sidecar providers (including `claude`, `gemini`, and any native API or custom provider). Each model may carry `session_supported` (boolean) and, when it is `false`, `session_unsupported_reason`; both are **absent** for providers that are not key-scoped (`trustKeyScopedListing`) |
 | GET | `/api/capabilities` | viewer | Feature toggles, whether server credentials exist, and `issue_attachments` limits, allowed MIME types, and per-entry availability |
 | GET | `/api/default-server-settings` | viewer | Non-sensitive settings and defaults only |
 | POST | `/api/feedback/preview` | viewer | AI-drafted feedback issue; does not accept `attachments` |

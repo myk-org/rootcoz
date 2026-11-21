@@ -58,7 +58,7 @@ FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 
 WORKDIR /app
 
-# Install bash, git (runtime for gitpython), curl (for Cursor CLI + NodeSource setup)
+# Install bash, git (runtime for gitpython), curl (for NodeSource setup and healthcheck)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     git \
@@ -103,24 +103,6 @@ RUN useradd --create-home --shell /bin/bash -g 0 appuser \
     && chown appuser:0 /data \
     && chmod -R g+w /data
 
-# Switch to non-root user for CLI installs
-USER appuser
-
-# Install AI CLI tools
-# Claude Code CLI (installs to ~/.local/bin)
-RUN /bin/bash -o pipefail -c "curl -fsSL https://claude.ai/install.sh | bash"
-
-# Cursor Agent CLI (installs to ~/.local/bin)
-RUN /bin/bash -o pipefail -c "curl -fsSL https://cursor.com/install | bash"
-
-# Gemini CLI and acpx (npm global installs)
-RUN mkdir -p /home/appuser/.npm-global \
-    && npm config set prefix '/home/appuser/.npm-global' \
-    && npm install -g acpx @google/gemini-cli
-
-# Switch to root for file copies and permission fixes
-USER root
-
 # Copy the virtual environment from builder
 COPY --chown=appuser:0 --from=builder /app/.venv /app/.venv
 
@@ -159,8 +141,8 @@ RUN find /home/appuser -type d -exec chmod g=u {} + \
 # Switch back to non-root user for runtime
 USER appuser
 
-# Ensure CLIs are in PATH
-ENV PATH="/app/sidecar-helper/node_modules/.bin:/home/appuser/.local/bin:/home/appuser/.npm-global/bin:${PATH}"
+# Ensure sidecar tools (trail) are in PATH
+ENV PATH="/app/sidecar-helper/node_modules/.bin:${PATH}"
 # Set HOME for OpenShift compatibility (random UID has no passwd entry)
 ENV HOME="/home/appuser"
 ENV DO_NOT_TRACK=1

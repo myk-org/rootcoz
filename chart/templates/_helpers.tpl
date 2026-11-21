@@ -64,10 +64,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-gcloud-credentials" (include "rootcoz.fullname" .) }}
 {{- end }}
 
-{{- define "rootcoz.cursorAuthSecretName" -}}
-{{- printf "%s-cursor-auth" (include "rootcoz.fullname" .) }}
-{{- end }}
-
 {{- define "rootcoz.sidecarAgentSecretName" -}}
 {{- printf "%s-sidecar-agent" (include "rootcoz.fullname" .) }}
 {{- end }}
@@ -88,7 +84,7 @@ credentials Secret preserved from it) keeps working instead of silently
 losing it — an explicitly set chart value wins and rejects the shadowing key.
 */}}
 {{- define "rootcoz.reservedEnvKeys" -}}
-ADMIN_KEY,GEMINI_API_KEY,ANTHROPIC_API_KEY,CURSOR_API_KEY,DATADOG_API_KEY,DATADOG_APP_KEY,ROOTCOZ_ENCRYPTION_KEY,AI_PROVIDER,AI_MODEL,PUBLIC_BASE_URL,SECURE_COOKIES,LOG_LEVEL,METADATA_RULES_FILE,XDG_CONFIG_HOME,XDG_DATA_HOME,CLAUDE_CODE_USE_VERTEX,CLOUD_ML_REGION,ANTHROPIC_VERTEX_PROJECT_ID,CLOUDSDK_CONFIG,GOOGLE_APPLICATION_CREDENTIALS,PI_SIDECAR_AGENT_DIR,SIDECAR_PORT,DEV_MODE,PORT{{ if include "rootcoz.retentionEnvRenders" .Values.env.sidecarTranscriptsMaxAgeDays }},PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS{{ end }}{{ if include "rootcoz.retentionEnvRenders" .Values.env.sidecarTranscriptsMaxSizeMb }},PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB{{ end }}
+ADMIN_KEY,GEMINI_API_KEY,ANTHROPIC_API_KEY,DATADOG_API_KEY,DATADOG_APP_KEY,ROOTCOZ_ENCRYPTION_KEY,AI_PROVIDER,AI_MODEL,PUBLIC_BASE_URL,SECURE_COOKIES,LOG_LEVEL,METADATA_RULES_FILE,XDG_CONFIG_HOME,XDG_DATA_HOME,CLOUD_ML_REGION,ANTHROPIC_VERTEX_PROJECT_ID,CLOUDSDK_CONFIG,GOOGLE_APPLICATION_CREDENTIALS,PI_SIDECAR_AGENT_DIR,SIDECAR_PORT,DEV_MODE,PORT{{ if include "rootcoz.retentionEnvRenders" .Values.env.sidecarTranscriptsMaxAgeDays }},PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS{{ end }}{{ if include "rootcoz.retentionEnvRenders" .Values.env.sidecarTranscriptsMaxSizeMb }},PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB{{ end }}
 {{- end }}
 
 {{/*
@@ -185,10 +181,6 @@ Validate chart values: routing, AI config.
 {{- end -}}
 {{- if and .Values.ai.vertex.enabled (not .Values.ai.vertex.serviceAccountKey) -}}
 {{- fail "ai.vertex.serviceAccountKey is required when ai.vertex.enabled is true" -}}
-{{- end -}}
-{{- else if eq $aiProvider "cursor" -}}
-{{- if and (not .Values.ai.cursor.apiKey) (not .Values.ai.cursor.authJson) -}}
-{{- fail "ai.cursor.apiKey or ai.cursor.authJson is required when ai.provider is cursor" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -329,13 +321,6 @@ GEMINI_API_KEY: {{ $gemini | b64enc | quote }}
 {{- if $anthropic }}
 ANTHROPIC_API_KEY: {{ $anthropic | b64enc | quote }}
 {{- end -}}
-{{- $cursor := .Values.ai.cursor.apiKey -}}
-{{- if and (not $cursor) $existing (index $existing.data "CURSOR_API_KEY") -}}
-{{- $cursor = (index $existing.data "CURSOR_API_KEY" | b64dec) -}}
-{{- end -}}
-{{- if $cursor }}
-CURSOR_API_KEY: {{ $cursor | b64enc | quote }}
-{{- end -}}
 {{- $datadog := .Values.datadog.apiKey -}}
 {{- if and (not $datadog) $existing (index $existing.data "DATADOG_API_KEY") -}}
 {{- $datadog = (index $existing.data "DATADOG_API_KEY" | b64dec) -}}
@@ -409,13 +394,6 @@ Accepts a non-empty string or map in values.
 {{- end }}
 
 {{/*
-Resolve Cursor auth.json: values override, else preserve existing secret on upgrade.
-*/}}
-{{- define "rootcoz.cursorAuthJson" -}}
-{{- include "rootcoz.resolveSecretPayload" (dict "value" .Values.ai.cursor.authJson "secretName" (include "rootcoz.cursorAuthSecretName" .) "secretKey" "auth.json" "Release" .Release) -}}
-{{- end }}
-
-{{/*
 Sidecar agent dir secret data: models.json / auth.json / settings.json payloads
 (values override, string or YAML object, → existing secret fallback) as `data:`
 lines. Empty when no file is configured — the Deployment gates
@@ -461,7 +439,6 @@ SECURE_COOKIES: {{ include "rootcoz.secureCookies" . | quote }}
 LOG_LEVEL: {{ .Values.tuning.logLevel | quote }}
 {{- end }}
 {{- if .Values.ai.vertex.enabled }}
-CLAUDE_CODE_USE_VERTEX: "1"
 {{- if .Values.ai.vertex.region }}
 CLOUD_ML_REGION: {{ .Values.ai.vertex.region | quote }}
 {{- end }}

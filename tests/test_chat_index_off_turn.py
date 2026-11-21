@@ -17,12 +17,7 @@ from rootcoz.engine import session_tools
 
 
 def _quiet(monkeypatch) -> None:
-    """Silence the two real side effects: no MCP install, no graph server."""
-
-    async def noop(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(session_tools, "install_http_tools_mcp_best_effort_async", noop)
+    """Silence the real side effect: no graph server."""
     monkeypatch.setattr(
         "rootcoz.engine.graft_http.graph_http_tools", lambda *_a, **_k: []
     )

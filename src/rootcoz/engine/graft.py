@@ -19,8 +19,13 @@ from pathlib import Path
 from typing import Any
 
 from rootcoz import get_child_logger
-from rootcoz.engine.http_mcp import _workspace_install_lock
-from rootcoz.temp_paths import ABANDON, DeleteResult, _Abandoned, delete_tree
+from rootcoz.temp_paths import (
+    ABANDON,
+    DeleteResult,
+    _Abandoned,
+    delete_tree,
+    workspace_lock,
+)
 
 logger = get_child_logger(__name__)
 
@@ -637,7 +642,7 @@ def _index_one(
         # fired during the build: an over-budget graph left in place is rejected
         # by every query and its manifest still reads as current, so it would
         # never be rebuilt.
-        with _workspace_install_lock(_root(repo.parent)):
+        with workspace_lock(_root(repo.parent)):
             workspace_used = _workspace_graph_size(_root(repo.parent))
         if workspace_used > max_workspace_graph_bytes():
             shutil.rmtree(destination, ignore_errors=True)
@@ -768,7 +773,7 @@ def index_repositories(
     # Analysis waits for this before its first AI call, so the width matters:
     # two at a time turned five clones into a ~6 minute pause per job.
     with (
-        _workspace_install_lock(workspace, deadline=deadline),
+        workspace_lock(workspace, deadline=deadline),
         ThreadPoolExecutor(max_workers=4) as pool,
     ):
         futures = {
@@ -953,7 +958,7 @@ def query_repo(
     if not _valid_repo(workspace, scope, repo):
         return {"status": "skipped", "reason": "invalid repository"}
     try:
-        with _workspace_install_lock(workspace, deadline=deadline):
+        with workspace_lock(workspace, deadline=deadline):
             return _query_locked(
                 repo, destination, snapshot, graph, tool, params, deadline
             )
@@ -1078,7 +1083,7 @@ def roots_needing_index(
     """
     workspace = Path(workspace).resolve()
     root = _root(workspace)
-    with _workspace_install_lock(workspace, deadline=deadline):
+    with workspace_lock(workspace, deadline=deadline):
         result = {}
         names = list(cloned_repos.items())
         for position, (name, repo) in enumerate(names):
@@ -1166,7 +1171,7 @@ def indexed_roots(workspace: Path, *, deadline: float | None = None) -> dict[str
     """
     workspace = Path(workspace)
     root = _root(workspace)
-    with _workspace_install_lock(workspace.resolve(), deadline=deadline):
+    with workspace_lock(workspace.resolve(), deadline=deadline):
         if not root.is_dir() or root.is_symlink() or not workspace.is_dir():
             return {}
         return {
@@ -1190,7 +1195,7 @@ def cleanup_graph(workspace: Path, *, deadline: float | None = None) -> DeleteRe
     belongs to the builder holding the lock.
     """
     root = _root(workspace)
-    with _workspace_install_lock(Path(workspace).resolve(), deadline=deadline):
+    with workspace_lock(Path(workspace).resolve(), deadline=deadline):
         if root.is_dir() and not root.is_symlink():
             return delete_tree(root)
         return DeleteResult(0, 0)

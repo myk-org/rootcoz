@@ -211,40 +211,40 @@ async def test_free_pair_on_inactive_provider_not_usable(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_saved_public_name_keeps_internal_catalog_models(monkeypatch):
-    """Saved public names ('claude'/'cursor') keep cli-*/acpx-* server sources."""
-    _catalog(monkeypatch, "cli-claude", "acpx-cursor", "openai")
-    _set_active(monkeypatch, "claude,cursor")
+    """Saved public names ('claude'/'gemini') keep native catalog server sources."""
+    _catalog(monkeypatch, "google-vertex-claude", "google", "openai")
+    _set_active(monkeypatch, "claude,gemini")
     scoped = await ai_client.scoped_models()
-    assert scoped["cli-claude"][0]["credential_sources"] == ["server"]
-    assert scoped["acpx-cursor"][0]["credential_sources"] == ["server"]
+    assert scoped["google-vertex-claude"][0]["credential_sources"] == ["server"]
+    assert scoped["google"][0]["credential_sources"] == ["server"]
     # Providers not in the saved list still lose their server source.
     assert "openai" not in scoped
 
 
 @pytest.mark.asyncio
 async def test_saved_catalog_id_matches_internal_provider(monkeypatch):
-    """Reverse direction: a legacy saved catalog ID still matches its models."""
-    _catalog(monkeypatch, "cli-claude", "openai")
-    _set_active(monkeypatch, "cli-claude")
+    """Reverse direction: a saved catalog ID still matches its models."""
+    _catalog(monkeypatch, "google-vertex-claude", "openai")
+    _set_active(monkeypatch, "google-vertex-claude")
     scoped = await ai_client.scoped_models()
-    assert scoped["cli-claude"][0]["credential_sources"] == ["server"]
+    assert scoped["google-vertex-claude"][0]["credential_sources"] == ["server"]
     assert "openai" not in scoped
 
 
 @pytest.mark.asyncio
 async def test_grant_enforcement_accepts_public_name_for_internal_provider(monkeypatch):
     """is_server_provider_active matches public names to internal catalog IDs."""
-    _catalog(monkeypatch, "cli-claude", "openai")
+    _catalog(monkeypatch, "google-vertex-claude", "openai")
     _set_active(monkeypatch, "claude")
-    # Saved public name matches the internally-prefixed catalog provider.
+    # Saved public name matches the internal catalog provider.
     assert ai_client.is_server_provider_active("claude")
-    assert ai_client.is_server_provider_active("cli-claude")
+    assert ai_client.is_server_provider_active("google-vertex-claude")
     # Non-listed providers stay deactivated.
     assert not ai_client.is_server_provider_active("openai")
     # Reverse direction: the setting may hold the internal ID instead.
-    _set_active(monkeypatch, "cli-claude")
+    _set_active(monkeypatch, "google-vertex-claude")
     assert ai_client.is_server_provider_active("claude")
-    assert ai_client.is_server_provider_active("cli-claude")
+    assert ai_client.is_server_provider_active("google-vertex-claude")
 
 
 @pytest.mark.asyncio
@@ -414,13 +414,17 @@ async def test_picker_options_are_public_names_only(monkeypatch):
     _catalog(monkeypatch)
     _stored_keys(
         monkeypatch,
-        {"provider": "cli-claude", "verified_at": "2026-01-01", "extra": "ignored"},
+        {
+            "provider": "google-vertex-claude",
+            "verified_at": "2026-01-01",
+            "extra": "ignored",
+        },
         {"provider": "claude"},
     )
-    _deployment_keys(monkeypatch, {"acpx-cursor": "deployment-value"})
+    _deployment_keys(monkeypatch, {"google": "deployment-value"})
     options = await ai_client.server_provider_options()
-    assert options == ["claude", "cursor"]
-    assert json.dumps(options) == '["claude", "cursor"]'
+    assert options == ["claude", "gemini"]
+    assert json.dumps(options) == '["claude", "gemini"]'
 
 
 @pytest.mark.asyncio

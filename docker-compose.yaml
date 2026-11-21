@@ -48,7 +48,7 @@ services:
     volumes:
       - ./data:/data
       # Optional: Mount gcloud credentials for Vertex AI authentication
-      # Uncomment if using CLAUDE_CODE_USE_VERTEX=1 with Application Default Credentials
+      # Uncomment if using Vertex AI with Application Default Credentials
       # - ~/.config/gcloud:/home/appuser/.config/gcloud:ro
       # Dev mode: mount source for hot-reload (uncomment with DEV_MODE=true)
       # - ./src:/app/src
@@ -84,33 +84,25 @@ services:
       - JENKINS_PASSWORD=${JENKINS_PASSWORD:-your-api-token}
 
       # ===================
-      # AI CLI Configuration
+      # AI Configuration
       # ===================
       # AI_PROVIDER and AI_MODEL: exact provider ID/model pair discovered from Pi-sidecar
-      # *-cli requires CLI_AGENTS (same ops pattern as ACPX_AGENTS; nothing enabled by default)
       - AI_PROVIDER=${AI_PROVIDER:?AI_PROVIDER is required}
       - AI_MODEL=${AI_MODEL:?AI_MODEL is required}
-      # - ACPX_AGENTS=${ACPX_AGENTS:-}
-      # - CLI_AGENTS=${CLI_AGENTS:-}
 
-      # Claude CLI - Option 1: API Key
+      # Claude - Option 1: API Key
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
 
-      # Claude CLI - Option 2: Vertex AI
-      - CLAUDE_CODE_USE_VERTEX=${CLAUDE_CODE_USE_VERTEX:-}
+      # Claude - Option 2: Vertex AI
       - CLOUD_ML_REGION=${CLOUD_ML_REGION:-us-east5}
       - ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID:-}
 
-      # Gemini CLI - API Key
+      # Gemini - API Key
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
 
       # Datadog event exporter - API key + application key (optional, both required)
       - DATADOG_API_KEY=${DATADOG_API_KEY:-}
       - DATADOG_APP_KEY=${DATADOG_APP_KEY:-}
-
-      # Cursor Agent — CURSOR_API_KEY does NOT expire (unlike browser `agent login`).
-      # When set in the container env, Cursor auth keeps working. Dashboard → API Keys.
-      # - CURSOR_API_KEY=${CURSOR_API_KEY:-}
 
       # AI call timeout in minutes (default: 10)
       - AI_CALL_TIMEOUT=${AI_CALL_TIMEOUT:-10}

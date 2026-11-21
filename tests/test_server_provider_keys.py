@@ -48,7 +48,7 @@ def client(tmp_path, monkeypatch):
     # startup preload racing a test's own manifest/call-count assertions.
     monkeypatch.delenv("PI_SIDECAR_AGENT_DIR", raising=False)
     monkeypatch.setattr("rootcoz.main._deployment_listing_state", None)
-    monkeypatch.setattr("rootcoz.main._safe_preload_cursor_models", AsyncMock())
+    monkeypatch.setattr("rootcoz.main._safe_preload_sidecar_models", AsyncMock())
     clear_settings_cache()
     with TestClient(app) as client:
         yield client
@@ -1604,7 +1604,6 @@ async def test_chat_session_creation_rejects_deselected_model(monkeypatch, tmp_p
         AsyncMock(return_value=(SECRET, None)),
     )
     monkeypatch.setattr(chat, "create_session_safely", create)
-    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     monkeypatch.setattr(chat, "get_sidecar_client", lambda: object())
     choice = ai_client._selected_credential_source.set("server")
     token = ai_client.ai_username.set("admin")
@@ -1931,7 +1930,6 @@ async def test_chat_session_passes_stored_server_key(monkeypatch, tmp_path):
         AsyncMock(return_value=(SECRET, 5)),
     )
     monkeypatch.setattr(chat, "create_session_safely", create)
-    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     monkeypatch.setattr(chat, "get_sidecar_client", lambda: object())
     choice = ai_client._selected_credential_source.set("server")
     try:
@@ -3186,7 +3184,7 @@ async def test_startup_capture_survives_sweep_storage_failure(tmp_path, monkeypa
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(storage, "set_server_provider_key_models", _boom)
-    await rootcoz_main._safe_preload_cursor_models()
+    await rootcoz_main._safe_preload_sidecar_models()
 
     assert [
         (row["provider"], row["model"])
@@ -3673,12 +3671,6 @@ def test_ai_models_refresh_forces_deployment_capture(client, monkeypatch, tmp_pa
     sidecar = MagicMock()
     sidecar.refresh_models = AsyncMock(return_value=[])
     monkeypatch.setattr("pi_sidecar_client.get_sidecar_client", lambda: sidecar)
-    monkeypatch.setattr(
-        "rootcoz.main.probe_cursor_auth", AsyncMock(return_value={"ok": True})
-    )
-    monkeypatch.setattr(
-        "rootcoz.main.registered_provider_ids", AsyncMock(return_value=set())
-    )
     try:
         refreshed = client.post(
             "/api/admin/ai-models/refresh", headers=_admin_headers()
@@ -3700,7 +3692,7 @@ async def test_startup_discovery_captures_deployment_listings(tmp_path, monkeypa
     monkeypatch.setattr("rootcoz.main._deployment_listing_state", None)
     _fake_catalog(monkeypatch, [{"provider": "mygateway", "id": "mygateway/gpt-4o"}])
     calls = _mock_key_discovery(monkeypatch, [{"id": "mygateway/gpt-4o"}])
-    await rootcoz_main._safe_preload_cursor_models()
+    await rootcoz_main._safe_preload_sidecar_models()
     assert calls == [("mygateway", DEPLOYMENT_KEY)]
     assert [
         (row["provider"], row["model"])
@@ -3879,14 +3871,6 @@ async def test_ambient_env_provider_is_captured_and_refreshable(
     assert AMBIENT_KEY not in refreshed.text
     assert AMBIENT_KEY not in captured.text
     assert "openai" in captured.text
-
-
-def test_ambient_resolution_skips_cursor_agents(monkeypatch):
-    """Cursor agents authenticate through the CLI, never CURSOR_API_KEY (#376)."""
-    _register_providers(monkeypatch, "cursor", "acpx-cursor", "cli-cursor")
-    monkeypatch.setenv("CURSOR_API_KEY", AMBIENT_KEY)
-
-    assert ai_client.deployment_provider_credentials() == {}
 
 
 def test_deployment_credentials_gemini_alias_falls_back_to_google(monkeypatch):

@@ -787,12 +787,12 @@ def _builder_holding(path: Path) -> Iterator[None]:
     """Hold ``path``'s workspace install lock in another thread, as a builder does."""
     from concurrent.futures import ThreadPoolExecutor
 
-    from rootcoz.engine.http_mcp import _workspace_install_lock
+    from rootcoz.temp_paths import workspace_lock
 
     entered, release = threading.Event(), threading.Event()
 
     def build() -> None:
-        with _workspace_install_lock(path.resolve()):
+        with workspace_lock(path.resolve()):
             entered.set()
             assert release.wait(3)
 
