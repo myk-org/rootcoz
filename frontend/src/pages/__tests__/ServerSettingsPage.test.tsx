@@ -46,13 +46,11 @@ let catalog: {
   providers: {}, providerStatus: {}, providerKeys: [],
 }
 vi.mock('@/lib/useProviderOptions', () => ({
-  useCursorAuthStatus: () => null,
   useProviderCatalog: () => catalog,
 }))
 vi.mock('@/components/shared/ServerProvidersCard', () => ({
   ServerProvidersCard: () => <div data-testid="server-providers-card" />,
 }))
-vi.mock('@/components/shared/CursorAuthBanner', () => ({ CursorAuthBanner: () => null }))
 vi.mock('@/components/shared/ProviderSelect', () => ({ ProviderSelect: () => null }))
 vi.mock('@/components/shared/ModelCombobox', () => ({
   ModelCombobox: ({ className }: { className?: string }) => (
@@ -1610,8 +1608,6 @@ describe('ServerSettingsPage env parity (#347)', () => {
       mk('sidecar_host', 'Advanced', '127.0.0.1', { restart_required: true }),
       mk('sidecar_port', 'Advanced', '8087', { type: 'integer', restart_required: true }),
       mk('sidecar_url', 'Advanced', '', { restart_required: true }),
-      mk('acpx_agents', 'Advanced', '', { restart_required: true }),
-      mk('cli_agents', 'Advanced', '', { restart_required: true }),
       mk('pi_sidecar_log_level', 'Logging', 'info', { restart_required: true }),
       mk('node_binary', 'Advanced', '', { restart_required: true }),
       mk('pi_sidecar_transcripts_dir', 'Advanced', '', { restart_required: true }),
@@ -1654,10 +1650,10 @@ describe('ServerSettingsPage env parity (#347)', () => {
     renderPage()
     await waitForRow('public_base_url')
 
-    // Advanced: the 7 sidecar settings it keeps are all restart-tagged
+    // Advanced: the 5 sidecar settings it keeps are all restart-tagged
     fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }))
     await waitForRow('sidecar_host')
-    expect(screen.getAllByLabelText('Restart required')).toHaveLength(7)
+    expect(screen.getAllByLabelText('Restart required')).toHaveLength(5)
 
     // Logging: pi_sidecar_log_level is restart-tagged too
     fireEvent.click(screen.getByRole('tab', { name: 'Logging' }))
@@ -1797,13 +1793,13 @@ describe('ServerSettingsPage AI default catalog check (#591)', () => {
 
   it('reports a stored default the catalog does not serve, without asking for its models', async () => {
     catalog = catalogServing({ enmaas: 'enmaas-model' })
-    storedDefault('cursor', 'cursor:cursor-grok-4.6-high')
+    storedDefault('removed-provider', 'removed-model')
     const providerRow = await openAiRow()
 
-    expect(within(providerRow).getByRole('status')).toHaveTextContent(/the provider catalog does not offer cursor/)
-    expect(within(providerRow).getAllByText(/cursor/).length).toBeGreaterThan(0)
+    expect(within(providerRow).getByRole('status')).toHaveTextContent(/the provider catalog does not offer removed-provider/)
+    expect(within(providerRow).getAllByText(/removed-provider/).length).toBeGreaterThan(0)
     // No model listing for a provider the catalog does not offer — that is the 400.
-    expect(modelListingCalls).not.toContain('cursor')
+    expect(modelListingCalls).not.toContain('removed-provider')
     // The stored default is displayed, never cleared or rewritten by rendering.
     expect(put).not.toHaveBeenCalled()
     expect(persistSetting).not.toHaveBeenCalled()
@@ -1840,19 +1836,18 @@ describe('ServerSettingsPage AI default catalog check (#591)', () => {
     expect(modelListingCalls).toContain('gemini')
   })
 
-  it('blames the provider for a status-only synthetic cursor entry', async () => {
-    // The backend adds `provider_status.cursor` whenever a Cursor-family provider is
-    // registered, while providers only carries `cli-cursor`/`acpx-cursor`: the picker
-    // never lists `cursor`, so a stale `cursor` default is a provider problem (#591).
+  it('blames the provider for a status-only provider entry absent from catalog', async () => {
+    // A provider present only in providerStatus and absent from providers is not
+    // offered by the picker, so a stale default is a provider problem (#591).
     catalog = {
-      ...catalogServing({ 'cli-cursor': 'cursor:cursor-grok-4.6-high' }),
-      providerStatus: { cursor: { ok: true, reason: null, hint: null, model_count: 1 } },
+      ...catalogServing({ openai: 'gpt-5' }),
+      providerStatus: { 'removed-provider': { has_api_key: true, modelListingSupported: true, model_count: 0 } },
     }
-    storedDefault('cursor', 'cursor:cursor-grok-4.6-high')
+    storedDefault('removed-provider', 'removed-model')
     const providerRow = await openAiRow()
 
     const status = within(providerRow).getByRole('status')
-    expect(status).toHaveTextContent(/the provider catalog does not offer cursor/)
+    expect(status).toHaveTextContent(/the provider catalog does not offer removed-provider/)
     expect(status).not.toHaveTextContent(/does not offer the model/)
   })
 
@@ -2881,7 +2876,7 @@ describe('ServerSettingsPage inline editors (E2E-F28..F30)', () => {
 
   it('shows Save/Cancel after the first peer add and Cancel restores the stored peers', async () => {
     get.mockResolvedValue(
-      structuredSettings({ peer_ai_configs: 'gemini:gemini-2.5-pro,cursor:claude-4-sonnet' }) as never,
+      structuredSettings({ peer_ai_configs: 'gemini:gemini-2.5-pro,claude:claude-4-sonnet' }) as never,
     )
     await openAnalysisTab()
 
@@ -2902,7 +2897,7 @@ describe('ServerSettingsPage inline editors (E2E-F28..F30)', () => {
 
   it('posts the peer configs alone — rounds save through their own row (E2E-F33)', async () => {
     get.mockResolvedValue(
-      structuredSettings({ peer_ai_configs: 'gemini:gemini-2.5-pro,cursor:claude-4-sonnet' }) as never,
+      structuredSettings({ peer_ai_configs: 'gemini:gemini-2.5-pro,claude:claude-4-sonnet' }) as never,
     )
     await openAnalysisTab()
 
@@ -2914,7 +2909,7 @@ describe('ServerSettingsPage inline editors (E2E-F28..F30)', () => {
     // peer is dropped, and the card no longer carries the rounds setting.
     await waitFor(() =>
       expect(put).toHaveBeenLastCalledWith('/api/admin/settings', {
-        settings: { peer_ai_configs: 'gemini:gemini-2.5-pro,cursor:claude-4-sonnet' },
+        settings: { peer_ai_configs: 'gemini:gemini-2.5-pro,claude:claude-4-sonnet' },
       }),
     )
     await waitFor(() => expect(within(peers).queryByRole('button', { name: 'Save' })).toBeNull())

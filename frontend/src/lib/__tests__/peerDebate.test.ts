@@ -51,14 +51,14 @@ describe('groupPeerRounds', () => {
     const rounds = [
       makeRound(1, 'orchestrator', 'claude'),
       makeRound(1, 'peer', 'gemini'),
-      makeRound(1, 'peer', 'cursor'),
+      makeRound(1, 'peer', 'openai'),
     ]
 
     const grouped = groupPeerRounds(rounds)
     expect(grouped).toHaveLength(1)
     expect(grouped[0].entries[0].ai_provider).toBe('claude')
     expect(grouped[0].entries[1].ai_provider).toBe('gemini')
-    expect(grouped[0].entries[2].ai_provider).toBe('cursor')
+    expect(grouped[0].entries[2].ai_provider).toBe('openai')
   })
 
   it('handles single round with single entry', () => {
@@ -101,7 +101,7 @@ describe('resolvedPeerConfigs', () => {
               failed_children: [
                 {
                   job_name: 'great-grandchild',
-                  failures: [failureWithDebate('cursor')],
+                  failures: [failureWithDebate('openai')],
                   failed_children: [],
                 },
               ],
@@ -112,7 +112,7 @@ describe('resolvedPeerConfigs', () => {
     } as unknown as AnalysisResult
     expect(resolvedPeerConfigs(result)).toEqual([
       { ai_provider: 'gemini', ai_model: 'test-model' },
-      { ai_provider: 'cursor', ai_model: 'test-model' },
+      { ai_provider: 'openai', ai_model: 'test-model' },
     ])
   })
 

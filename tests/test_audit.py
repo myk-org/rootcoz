@@ -3102,8 +3102,6 @@ def test_global_model_refresh_is_audited(app_client) -> None:
     with (
         patch("pi_sidecar_client.get_sidecar_client", return_value=sidecar),
         patch.object(main, "update_model_catalog"),
-        patch.object(main, "clear_cursor_auth_cache"),
-        patch.object(main, "registered_provider_ids", AsyncMock(return_value=set())),
         patch.object(
             main, "build_friendly_catalog", return_value={"claude": [], "openai": []}
         ),

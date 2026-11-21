@@ -1008,7 +1008,9 @@ class TestAiFooterNotDoubled:
         for separator in ["\v", "\f", "\x1c", "\x1d", "\x1e", "\u2028", "\u2029"]:
             preview = apply_ai_attribution(
                 f"## Bug{separator}separator{separator}Broken.",
-                AiProvenance(ai_used=True, provider="cli-claude", model="sonnet-4-5"),
+                AiProvenance(
+                    ai_used=True, provider="google-vertex-claude", model="sonnet-4-5"
+                ),
             )
             tampered = preview.replace(separator, "\n")
             assert read_provenance(preview) is not None
@@ -1027,11 +1029,11 @@ class TestAiFooterNotDoubled:
         posted = await self._posted(
             "## Details\nSome content",
             attribution=AiProvenance(
-                ai_used=True, provider="cli-claude", model="sonnet-4-5"
+                ai_used=True, provider="google-vertex-claude", model="sonnet-4-5"
             ),
         )
         assert "(claude / sonnet-4-5)" in posted
-        assert "cli-" not in posted
+        assert "google-vertex-claude" not in posted
 
     async def test_jira_footer_not_doubled(self):
         from rootcoz.bug_creation import JIRA_AI_FOOTER, create_jira_bug

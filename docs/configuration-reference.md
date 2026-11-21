@@ -5,7 +5,7 @@ RootCoz reads its configuration from environment variables at startup and lets a
 ## Prerequisites
 - A running or planned RootCoz deployment. See [Deploying RootCoz](deploy-rootcoz.html) for the Kubernetes and OpenShift paths.
 - Admin access if you plan to change settings after login. See [Managing Users and Server Settings](manage-users-and-server-settings.html).
-- One AI credential for `claude`, `gemini`, or `cursor` if you want analysis to run at all.
+- One AI credential for a configured provider (such as `claude`, `gemini`, or `anthropic`) if you want analysis to run at all.
 
 ## Quick Example
 
@@ -27,7 +27,7 @@ Only `AI_PROVIDER` and `AI_MODEL` are hard-required. `docker-compose.yaml` fails
 `AI_PROVIDER` and `AI_MODEL` are resolved as a pair at submit time, and the resolution is strict:
 
 - An **exact** `provider/model` pair that appears in the sidecar catalogue is used as-is.
-- The friendly names `claude`, `gemini`, and `cursor` are **not** provider IDs. Each maps to a sidecar provider (`claude` to `google-vertex-claude` or `cli-claude`, `gemini` to `google` or `cli-gemini`, `cursor` to any `*-cursor` provider including `cli-cursor`), and that mapping is applied only when the requested model id appears under **exactly one** catalogue provider *and* that provider is the mapped one.
+- The friendly names `claude` and `gemini` are **not** provider IDs. Each maps to a native sidecar provider (`claude` to `google-vertex-claude`, `gemini` to `google`), and that mapping is applied only when the requested model id appears under **exactly one** catalogue provider *and* that provider is the mapped one.
 - Anything else is rejected with `Unknown Pi-sidecar provider/model pair`, including an id that appears under two providers.
 
 The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticate `AI_PROVIDER=claude`: that key authenticates the `anthropic` provider, while the `claude` alias maps to `google-vertex-claude`, so a literal model id such as `claude-sonnet-4` is rejected unless your sidecar happens to expose it solely under `google-vertex-claude`. Check `rootcoz ai-models` before choosing an id, or set `AI_PROVIDER` to the exact provider ID that endpoint lists alongside the model.
@@ -87,7 +87,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `PEER_ANALYSIS_MAX_ROUNDS` | `3` | integer 1–10 | no | no | yes |
    | `RECORD_TRANSCRIPTS` | `false` | boolean | no | no | yes |
 
-   `AI_PROVIDER` accepts any exact provider ID that pi-sidecar reports, provided the `provider/model` pair appears in its catalogue. `claude`, `gemini`, and `cursor` are convenience aliases that resolve through the mapping described above; they are not the only accepted values. The chart's `ai.provider` accepts the same freedom — any provider ID string, including a custom provider registered through the sidecar agent dir (the chart's install-time credential checks only apply to the three built-in aliases). Values are lowercased on load, and legacy `*-cli` names are normalised to their canonical form. To see what your sidecar actually exposes, read the provider list from `GET /api/ai-models`. `PEER_AI_CONFIGS` uses `provider:model,provider:model`; model names may contain commas inside square brackets, for example `cursor:gpt-5.4[context=272k,reasoning=medium]`.
+   `AI_PROVIDER` accepts any exact provider ID that pi-sidecar reports, provided the `provider/model` pair appears in its catalogue. `claude` and `gemini` are convenience aliases that resolve through the mapping described above; they are not the only accepted values. The chart's `ai.provider` accepts the same freedom — any provider ID string, including a custom provider registered through the sidecar agent dir (the chart's install-time credential checks only apply to the two built-in aliases). Values are lowercased on load. To see what your sidecar actually exposes, read the provider list from `GET /api/ai-models`. `PEER_AI_CONFIGS` uses `provider:model,provider:model`; model names may contain commas inside square brackets, for example `openai:gpt-5.4[context=272k,reasoning=medium]`.
 
    > **Note:** An unsupported `AI_PROVIDER` value fails at submit time, immediately, even when the model is not yet resolved. Blank provider strings mean "not configured" and defer the error to a clearer message later.
 
@@ -329,15 +329,13 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
 14. **Sidecar category** (added with #347 — restart required).
 
-    The pi-sidecar starts **once** at container boot and reads these from its process environment. A value saved here is persisted to `/data/pi-sidecar/env`, which the container entrypoint sources before starting the sidecar — the same bridge `RECORD_TRANSCRIPTS` uses. Having no database override lets the deployment environment govern, and `Reset` (or `DELETE /api/admin/settings/{key}`) removes the override and falls back to it. Saving `""` is a different thing: on the string fields above it stores an explicit blank override that beats the deployment environment (that is how you clear, say, `CLI_AGENTS`), while the integer fields (`PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS`, `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB`, `SIDECAR_PORT`) and `sidecar_host`/`sidecar_port` reject an empty save with `400`. On both retention budgets `0` disables that budget.
+    The pi-sidecar starts **once** at container boot and reads these from its process environment. A value saved here is persisted to `/data/pi-sidecar/env`, which the container entrypoint sources before starting the sidecar — the same bridge `RECORD_TRANSCRIPTS` uses. Having no database override lets the deployment environment govern, and `Reset` (or `DELETE /api/admin/settings/{key}`) removes the override and falls back to it. Saving `""` is a different thing: on the string fields above it stores an explicit blank override that beats the deployment environment (that is how you clear, say, `PI_SIDECAR_LOG_LEVEL`), while the integer fields (`PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS`, `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB`, `SIDECAR_PORT`) and `sidecar_host`/`sidecar_port` reject an empty save with `400`. On both retention budgets `0` disables that budget.
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
     | `SIDECAR_HOST` | empty | string | no | **yes** | yes (restart) |
     | `SIDECAR_PORT` | empty | string | no | **yes** | yes (restart) |
     | `SIDECAR_URL` | empty | string | no | **yes** | yes (restart) |
-    | `ACPX_AGENTS` | empty | string | no | **yes** | yes (restart) |
-    | `CLI_AGENTS` | empty | string | no | **yes** | yes (restart) |
     | `PI_SIDECAR_LOG_LEVEL` | empty | string | no | **yes** | yes (restart) |
     | `NODE_BINARY` | empty | string | no | **yes** | yes (restart) |
     | `PI_SIDECAR_TRANSCRIPTS_DIR` | empty | string | no | **yes** | yes (restart) |
@@ -477,8 +475,6 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `SIDECAR_HOST` | `sidecar_host` | Sidecar | restart (env bridge) |
 | `SIDECAR_PORT` | `sidecar_port` | Sidecar | restart (env bridge) |
 | `SIDECAR_URL` | `sidecar_url` | Sidecar | restart (env bridge; derived from `sidecar_port` when unset — not persistable) |
-| `ACPX_AGENTS` | `acpx_agents` | Sidecar | restart (env bridge) |
-| `CLI_AGENTS` | `cli_agents` | Sidecar | restart (env bridge) |
 | `PI_SIDECAR_LOG_LEVEL` | `pi_sidecar_log_level` | Sidecar | restart (env bridge) |
 | `NODE_BINARY` | `node_binary` | Sidecar | restart (env bridge) |
 | `PI_SIDECAR_TRANSCRIPTS_DIR` | `pi_sidecar_transcripts_dir` | Sidecar | restart (env bridge) |
@@ -493,8 +489,6 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `DEV_MODE` / `DEBUG` | — (no setting) | excluded | env-only |
 | `GEMINI_API_KEY` | — (no setting) | excluded | env-only (sidecar credential) |
 | `ANTHROPIC_API_KEY` | — (no setting) | excluded | env-only (sidecar credential) |
-| `CURSOR_API_KEY` | — (no setting) | excluded | env-only (sidecar credential) |
-| `CLAUDE_CODE_USE_VERTEX` | — (no setting) | excluded | env-only (Vertex toggle) |
 | `CLOUD_ML_REGION` | — (no setting) | excluded | env-only (Vertex) |
 | `ANTHROPIC_VERTEX_PROJECT_ID` | — (no setting) | excluded | env-only (Vertex) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | — (no setting) | excluded | env-only (Vertex gcloud credential mount) |
@@ -519,11 +513,9 @@ These are read straight from the process environment and have no `Settings` fiel
 | `PORT` | `8000` | Port the ASGI server binds |
 | `ANTHROPIC_API_KEY` | unset | Claude credential for the sidecar |
 | `GEMINI_API_KEY` | unset | Gemini credential for the sidecar |
-| `CURSOR_API_KEY` | unset | Cursor credential for the sidecar |
-| `CLAUDE_CODE_USE_VERTEX` | unset | Set to `1` to authenticate Claude through Vertex AI |
-| `CLOUD_ML_REGION` | unset | Vertex region, used with `CLAUDE_CODE_USE_VERTEX` |
-| `ANTHROPIC_VERTEX_PROJECT_ID` | unset | Vertex project, used with `CLAUDE_CODE_USE_VERTEX` |
-| `GOOGLE_APPLICATION_CREDENTIALS` | unset | Path to the Vertex service-account key file the Helm chart mounts (`/gcloud-credentials/application_default_credentials.json`) |
+| `CLOUD_ML_REGION` | unset | Vertex AI region for `@myk-org/pi-vertex-claude` in the sidecar |
+| `ANTHROPIC_VERTEX_PROJECT_ID` | unset | Vertex AI project ID for `@myk-org/pi-vertex-claude` in the sidecar |
+| `GOOGLE_APPLICATION_CREDENTIALS` | unset | Path to the Vertex service-account key file (mounted at `/gcloud-credentials/application_default_credentials.json` by the Helm chart) |
 | `CLOUDSDK_CONFIG` | unset | gcloud config directory for the Vertex credential mount (`/gcloud-credentials` in the chart) |
 | `PI_SIDECAR_AGENT_DIR` | unset | Sidecar agent dir for custom providers and settings (see below) |
 | `ROOTCOZ_BUILD_COMMIT`, `ROOTCOZ_BUILD_REF`, `ROOTCOZ_BUILD_BUILT_AT` | empty | Which build this image is — see [Build identity](#build-identity) |
@@ -548,11 +540,11 @@ They reach the image through whatever builds it:
 
 The footer reads `v<version> · <ref>@<commit>` whenever the ref is not the release itself; a ref equal to the version (a release build) and an image with no args both render the bare `v<version>`.
 
-`gemini` resolves to the `google` provider, and `GEMINI_API_KEY` is the credential RootCoz documents and charts for it (`ai.provider=gemini` pairs with `ai.geminiApiKey`). `gemini auth login` is a host-side login for the standalone Gemini CLI; the sidecar exposes that agent under its own provider id — `cli-gemini`, the canonical form of the legacy `gemini-cli` name — not under `google`, so it is not a substitute for `GEMINI_API_KEY` on the `gemini` alias. For `claude`, see the resolution rules above: the alias maps to `google-vertex-claude`, so `ANTHROPIC_API_KEY` on its own is not the credential that provider uses — the Vertex path is. RootCoz passes the environment through to the sidecar and cannot say which credentials a provider accepts, so confirm the requirement in that provider's own documentation.
+`gemini` resolves to the `google` provider, and `GEMINI_API_KEY` is the credential RootCoz documents and charts for it (`ai.provider=gemini` pairs with `ai.geminiApiKey`). For `claude`, see the resolution rules above: the alias maps to `google-vertex-claude`, so `ANTHROPIC_API_KEY` on its own is not the credential that provider uses — `ANTHROPIC_API_KEY` authenticates the `anthropic` provider, while `claude` / `google-vertex-claude` uses Vertex AI. RootCoz passes the environment through to the sidecar and cannot say which credentials a provider accepts, so confirm the requirement in that provider's own documentation.
 
-RootCoz does not read the Vertex trio itself — `config.py` documents them as variables the Claude CLI consumes, and the server only passes them through the process environment to the sidecar. What this repo guarantees is limited to that pass-through. The Helm chart is the more useful reference, because it treats Vertex as a unit: setting `ai.vertex.enabled` writes `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`, and `ANTHROPIC_VERTEX_PROJECT_ID`, and separately mounts `ai.vertex.serviceAccountKey` and points `GOOGLE_APPLICATION_CREDENTIALS` at the mounted `application_default_credentials.json`. Install fails outright if `ai.vertex.enabled` is set without `ai.vertex.projectId` or `ai.vertex.serviceAccountKey`, so the chart's own definition of "Vertex enabled" includes a credential file, not just the three variables above.
+RootCoz does not read the Vertex variables itself — `config.py` documents `CLOUD_ML_REGION` and `ANTHROPIC_VERTEX_PROJECT_ID` as variables consumed by `@myk-org/pi-vertex-claude` in the sidecar alongside GCP credentials (`GOOGLE_APPLICATION_CREDENTIALS` or Application Default Credentials), and the server only passes them through the process environment to the sidecar. What this repo guarantees is limited to that pass-through. The Helm chart is the more useful reference, because it treats Vertex as a unit: setting `ai.vertex.enabled` writes `CLOUD_ML_REGION` and `ANTHROPIC_VERTEX_PROJECT_ID`, and separately mounts `ai.vertex.serviceAccountKey` and points `GOOGLE_APPLICATION_CREDENTIALS` at the mounted `application_default_credentials.json`. Install fails outright if `ai.vertex.enabled` is set without `ai.vertex.projectId` or `ai.vertex.serviceAccountKey`, so the chart's own definition of "Vertex enabled" includes a credential file, not just the region and project variables.
 
-Whether the provider ends up registered and usable, and what credentials it actually requires, is decided inside the Pi-sidecar and the Anthropic Vertex tooling, not here. For the authoritative credential requirements, follow the Anthropic Claude Code on Vertex AI documentation rather than treating the trio as self-sufficient. This matters for `AI_PROVIDER=claude` in particular, because that alias resolves to the `google-vertex-claude` provider — so Vertex is the path on which `claude` is expected to resolve at all.
+Whether the provider ends up registered and usable, and what credentials it actually requires, is decided inside the Pi-sidecar and `@myk-org/pi-vertex-claude`, not here. Confirm credential requirements against your Vertex AI setup and `@myk-org/pi-vertex-claude`. This matters for `AI_PROVIDER=claude` in particular, because that alias resolves to the `google-vertex-claude` provider — so Vertex is the path on which `claude` is expected to resolve at all.
 
 ### Transcript retention
 
@@ -617,7 +609,7 @@ The listing carries every provider the sidecar registers as accepting session AP
 
 An admin who wants the deployment credential in the encrypted store instead of the environment uses `Store API key` on that row, which calls `POST /api/admin/server-providers/{provider}/store-deployment-key` with only `{ "verification_model": "<model id>" }`: **nothing is pasted** — the server promotes the credential it already resolves for the provider, verifying it with a real sidecar turn before writing it, and the write is the same encrypted, generation-bumping, listing-capturing, selection-seeding store the add and rotate endpoints use. The response never contains the key, a prefix of it, or the variable's value, and the audit record names only the admin and the provider — as its own action id, `provider.key.promote`, so a promoted deployment credential is distinguishable from a key an admin typed (`provider.key.store`) or replaced (`provider.key.rotate`). Afterwards the row is an ordinary stored-key provider: `has_key` becomes `true`, `key_scoped_source` becomes `"stored"`, and `Rotate` / `Remove` replace the `Store API key` action. A provider with no resolvable credential (unset variable, unreadable manifest, no manifest entry) answers `404`, a provider that already has a stored key answers `409` (rotate instead), and a failed verification is a `200` with `ok: false` and nothing stored.
 
-A provider authenticated from the **environment** needs no manifest at all. Builtin and registered providers are resolved the same way: RootCoz derives the variable name from the provider ID — uppercased, every non-alphanumeric character folded to `_`, suffixed with `_API_KEY` — so `openai` reads `OPENAI_API_KEY`, `xai` reads `XAI_API_KEY`, `mistral` reads `MISTRAL_API_KEY`, and a registered provider `my-gateway` reads `MY_GATEWAY_API_KEY`. `google` (and the `gemini` alias) is the documented exception: `GEMINI_API_KEY` is read first and `GOOGLE_API_KEY` second. Only variables that are set and non-empty resolve, and their values are never logged or persisted. Such a provider's live listing is captured and refreshed exactly like an env-referenced manifest key — `has_key` stays `false`, `key_scoped_source` is `"deployment"`, and `Refresh models` is offered; with the variable unset nothing resolves, so the row keeps its static catalog and offers no `Refresh models`. Cursor's `acpx-`/`cli-` agents are not resolved from `CURSOR_API_KEY` (their auth is the CLI), and a provider the manifest declares is keyed by the manifest, not by an ambient variable.
+A provider authenticated from the **environment** needs no manifest at all. Builtin and registered providers are resolved the same way: RootCoz derives the variable name from the provider ID — uppercased, every non-alphanumeric character folded to `_`, suffixed with `_API_KEY` — so `openai` reads `OPENAI_API_KEY`, `xai` reads `XAI_API_KEY`, `mistral` reads `MISTRAL_API_KEY`, and a registered provider `my-gateway` reads `MY_GATEWAY_API_KEY`. `google` (and the `gemini` alias) is the documented exception: `GEMINI_API_KEY` is read first and `GOOGLE_API_KEY` second. Only variables that are set and non-empty resolve, and their values are never logged or persisted. Such a provider's live listing is captured and refreshed exactly like an env-referenced manifest key — `has_key` stays `false`, `key_scoped_source` is `"deployment"`, and `Refresh models` is offered; with the variable unset nothing resolves, so the row keeps its static catalog and offers no `Refresh models`. A provider the manifest declares is keyed by the manifest, not by an ambient variable.
 
 #### Adding a custom provider
 
@@ -711,8 +703,7 @@ The Helm chart exists for the bootstrap-only variables, since those cannot be se
 | `ai.provider`, `ai.model` | `AI_PROVIDER`, `AI_MODEL` |
 | `ai.geminiApiKey` | `GEMINI_API_KEY` |
 | `ai.anthropicApiKey` | `ANTHROPIC_API_KEY` |
-| `ai.vertex.enabled`, `ai.vertex.projectId`, `ai.vertex.region`, `ai.vertex.serviceAccountKey` | `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, plus `GOOGLE_APPLICATION_CREDENTIALS` pointing at the mounted GCP key |
-| `ai.cursor.apiKey`, `ai.cursor.authJson` | `CURSOR_API_KEY` and the mounted Cursor `auth.json` |
+| `ai.vertex.enabled`, `ai.vertex.projectId`, `ai.vertex.region`, `ai.vertex.serviceAccountKey` | `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, plus `GOOGLE_APPLICATION_CREDENTIALS` pointing at the mounted GCP key |
 | `sidecar.agentDir.modelsJson`, `sidecar.agentDir.authJson`, `sidecar.agentDir.settingsJson` | `PI_SIDECAR_AGENT_DIR` pointing at a writable emptyDir at `/etc/pi-sidecar-agent`, populated by an initContainer from the rendered Secret (pi writes `models-store.json` next to `models.json`, so the dir must be writable); `sidecar.agentDir.env` adds Secret-backed env vars for `"$VAR"` API key references in `models.json` (omitting a key preserves its stored value on upgrade, `""` removes it; chart-managed variable names are rejected) |
 | `admin.key` | `ADMIN_KEY` |
 | `encryptionKey` | `ROOTCOZ_ENCRYPTION_KEY` |

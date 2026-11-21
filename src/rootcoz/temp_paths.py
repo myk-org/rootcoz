@@ -10,15 +10,17 @@ from __future__ import annotations
 import asyncio
 import enum
 import errno
+import hashlib
 import logging
 import os
 import stat
 import tempfile
+import threading
 import time
 import traceback
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from functools import partial
 from pathlib import Path
 from typing import NamedTuple
@@ -186,6 +188,85 @@ def delete_marker(path: Path) -> Path:
     to ``read``/``ls``/``find``/``grep``.
     """
     return path.parent / f".{path.name}.rootcoz-deleting"
+
+
+#: Suffix of pre-#622 sibling HTTP-tools credential dump files (``.<name>.rootcoz-http-tools.json``).
+LEGACY_HTTP_TOOLS_DUMP_SUFFIX = ".rootcoz-http-tools.json"
+
+
+def _unlink_regular_in_dir(dir_fd: int, name: str) -> bool:
+    """Unlink *name* inside *dir_fd* only if it is a regular file (never follows symlinks)."""
+    try:
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        logger.debug(
+            "cleanup: could not stat legacy dump %r (%s)", name, type(exc).__name__
+        )
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        logger.warning(
+            "cleanup: could not unlink legacy dump %r (error=%s errno=%s)",
+            name,
+            type(exc).__name__,
+            exc.errno,
+        )
+        return False
+    return True
+
+
+def purge_legacy_http_tools_dumps(directory: Path) -> int:
+    """Safely unlink all regular ``.*.rootcoz-http-tools.json`` files directly under *directory*."""
+    try:
+        dir_fd = os.open(
+            directory,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        logger.debug(
+            "cleanup: could not open %s to purge legacy dumps (%s)",
+            directory,
+            type(exc).__name__,
+        )
+        return 0
+    removed = 0
+    try:
+        try:
+            with os.scandir(dir_fd) as it:
+                candidates = [
+                    entry.name
+                    for entry in it
+                    if entry.name.startswith(".")
+                    and entry.name.endswith(LEGACY_HTTP_TOOLS_DUMP_SUFFIX)
+                ]
+        except OSError as exc:
+            logger.debug(
+                "cleanup: could not scan %s for legacy dumps (%s)",
+                directory,
+                type(exc).__name__,
+            )
+            return 0
+        for name in candidates:
+            if _unlink_regular_in_dir(dir_fd, name):
+                removed += 1
+    finally:
+        os.close(dir_fd)
+    if removed:
+        logger.info(
+            "cleanup: purged %d legacy HTTP tools dump file(s) under %s",
+            removed,
+            directory,
+        )
+    return removed
 
 
 def _human(nbytes: int) -> str:
@@ -409,6 +490,147 @@ def delete_tree(path: Path) -> DeleteResult:
     return DeleteResult(size, entries, failed)
 
 
+def _workspace_lock_path(workspace: Path) -> Path:
+    """Stable lock outside removable workspaces, including nested chat workspaces."""
+    key = hashlib.sha256(str(workspace.absolute()).encode()).hexdigest()
+    return Path(tempfile.gettempdir()) / f"rootcoz-locks-{os.getuid()}" / f"{key}.lock"
+
+
+def _check_lock_file(fd: int) -> None:
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+        or info.st_mode & 0o077
+    ):
+        raise OSError("unsafe workspace lock file")
+
+
+def _flock_until(fd: int, deadline: float | None, *, shared: bool = False) -> None:
+    import fcntl
+
+    mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+    if deadline is None:
+        fcntl.flock(fd, mode)
+        return
+    while True:
+        try:
+            fcntl.flock(fd, mode | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("workspace lock deadline") from None
+            time.sleep(min(0.01, remaining))
+
+
+def _reap_workspace_locks(directory: Path) -> None:
+    """Called under the stable exclusive directory gate; never unlink a held inode."""
+    import fcntl
+
+    for candidate in directory.glob("[0-9a-f]" * 64 + ".lock"):
+        try:
+            fd = os.open(candidate, os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW)
+        except OSError:
+            continue
+        try:
+            _check_lock_file(fd)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            on_disk = candidate.stat(follow_symlinks=False)
+            opened = os.fstat(fd)
+            if (on_disk.st_dev, on_disk.st_ino) == (opened.st_dev, opened.st_ino):
+                candidate.unlink()
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
+
+
+# Process-local fallback locks for platforms without :mod:`fcntl` (Windows).
+_fallback_locks_guard = threading.Lock()
+_fallback_locks: dict[str, threading.Lock] = {}
+
+
+def _fallback_workspace_lock(workspace: Path) -> threading.Lock:
+    key = str(workspace.resolve())
+    with _fallback_locks_guard:
+        lock = _fallback_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _fallback_locks[key] = lock
+        return lock
+
+
+@contextmanager
+def workspace_lock(workspace: Path, *, deadline: float | None = None) -> Iterator[None]:
+    """Serialize graph builds, queries, and cleanup per workspace across threads/processes.
+
+    POSIX platforms use an flock'd lock file; without :mod:`fcntl` (Windows),
+    falls back to process-local serialization keyed by workspace.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX platforms only
+        lock = _fallback_workspace_lock(workspace)
+        acquired = (
+            lock.acquire(timeout=max(0, deadline - time.monotonic()))
+            if deadline is not None
+            else lock.acquire()
+        )
+        if not acquired:
+            raise TimeoutError("workspace lock deadline")
+        try:
+            yield
+        finally:
+            lock.release()
+        return
+    path = _workspace_lock_path(workspace)
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    info = path.parent.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_mode & 0o077
+    ):
+        raise OSError("unsafe workspace lock directory")
+    # Readers hold the stable gate while opening/waiting for a workspace inode.
+    # A reaper cannot unlink an inode that a waiter has already opened.
+    gate_path = path.parent / ".directory.lock"
+    gate_fd = os.open(gate_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(gate_fd, "a+") as gate:
+        _check_lock_file(gate.fileno())
+        _flock_until(gate.fileno(), deadline, shared=True)
+        acquired = False
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "a+") as fh:
+                _check_lock_file(fh.fileno())
+                _flock_until(fh.fileno(), deadline)
+                acquired = True
+                fcntl.flock(gate.fileno(), fcntl.LOCK_UN)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fcntl.flock(gate.fileno(), fcntl.LOCK_UN)
+            if acquired and deadline is None:
+                # ponytail: skip cleanup when the global gate is busy; retry on
+                # the next release rather than delay callers (including queries).
+                try:
+                    fcntl.flock(gate.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    try:
+                        _reap_workspace_locks(path.parent)
+                    except OSError:
+                        logger.warning("Workspace lock reaping failed", exc_info=True)
+                    finally:
+                        fcntl.flock(gate.fileno(), fcntl.LOCK_UN)
+
+
 def reap_reusable_path(what: str, path: Path) -> DeleteResult | _Abandoned:
     """``delete_tree`` for a path whose earlier delete abandoned, under its lock.
 
@@ -417,12 +639,11 @@ def reap_reusable_path(what: str, path: Path) -> DeleteResult | _Abandoned:
     like ``reap_graph``: on timeout :data:`ABANDON` leaves the tree *and* its
     marker for the next create's recovery, because the builder still owns them.
     """
-    # Local imports: ``graft`` imports this module at import time.
+    # Local import: ``graft`` imports this module at import time.
     from rootcoz.engine.graft import GRAPH_LOCK_SECONDS
-    from rootcoz.engine.http_mcp import _workspace_install_lock
 
     try:
-        with _workspace_install_lock(
+        with workspace_lock(
             path.resolve(), deadline=time.monotonic() + GRAPH_LOCK_SECONDS
         ):
             return delete_tree(path)

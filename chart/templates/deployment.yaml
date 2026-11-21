@@ -1,6 +1,5 @@
 {{- include "rootcoz.validate" . -}}
 {{- $gcloudKey := include "rootcoz.gcloudServiceAccountKey" . -}}
-{{- $cursorAuth := include "rootcoz.cursorAuthJson" . -}}
 {{- $sidecarAgent := include "rootcoz.sidecarAgentSecretData" . -}}
 {{- /* Resolved credentials Secret data (chart values + existing-Secret fallbacks),
        resolved once and reused for both the checksum and the envFrom gate. */ -}}
@@ -41,9 +40,6 @@ spec:
         checksum/encryption: {{ printf "%s\n%s" .Values.encryptionKey .Release.Name | sha256sum }}
         {{- if and .Values.ai.vertex.enabled $gcloudKey }}
         checksum/gcloud: {{ $gcloudKey | sha256sum }}
-        {{- end }}
-        {{- if $cursorAuth }}
-        checksum/cursor-auth: {{ $cursorAuth | sha256sum }}
         {{- end }}
         {{- if $sidecarAgent }}
         checksum/sidecar-agent: {{ $sidecarAgent | sha256sum }}
@@ -201,11 +197,6 @@ spec:
               mountPath: /gcloud-credentials
               readOnly: true
             {{- end }}
-            {{- if $cursorAuth }}
-            - name: cursor-auth
-              mountPath: /home/appuser/.cursor-auth
-              readOnly: true
-            {{- end }}
             {{- if $sidecarAgent }}
             - name: sidecar-agent
               mountPath: /etc/pi-sidecar-agent
@@ -232,11 +223,6 @@ spec:
         - name: gcloud-credentials
           secret:
             secretName: {{ include "rootcoz.gcloudSecretName" . }}
-        {{- end }}
-        {{- if $cursorAuth }}
-        - name: cursor-auth
-          secret:
-            secretName: {{ include "rootcoz.cursorAuthSecretName" . }}
         {{- end }}
         {{- if $sidecarAgent }}
         - name: sidecar-agent

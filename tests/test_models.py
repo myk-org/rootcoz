@@ -799,24 +799,16 @@ class TestAiConfigEntry:
 
     @pytest.mark.parametrize(
         "provider",
-        ["claude", "gemini", "cursor"],
+        ["claude", "gemini", "openai"],
     )
     def test_valid_providers(self, provider: str) -> None:
         """Test all valid AI providers are accepted."""
         entry = AiConfigEntry(ai_provider=provider, ai_model="model-1")
         assert entry.ai_provider == provider
 
-    @pytest.mark.parametrize(
-        ("legacy", "provider"),
-        [
-            ("cursor-cli", "cli-cursor"),
-            ("claude-cli", "cli-claude"),
-            ("gemini-cli", "cli-gemini"),
-        ],
-    )
-    def test_legacy_cli_providers_normalize(self, legacy: str, provider: str) -> None:
-        entry = AiConfigEntry(ai_provider=legacy, ai_model="model-1")
-        assert entry.ai_provider == provider
+    def test_provider_normalizes_case_and_whitespace(self) -> None:
+        entry = AiConfigEntry(ai_provider="  OpenAI  ", ai_model="model-1")
+        assert entry.ai_provider == "openai"
 
     def test_catalog_provider_is_retained_for_sidecar_validation(self) -> None:
         """Provider/model membership is validated against the live sidecar catalog."""
@@ -1285,13 +1277,13 @@ class TestBaseAnalysisRequestPeerFields:
             job_name="j",
             build_number=1,
             peer_ai_configs=[
-                AiConfigEntry(ai_provider="cursor", ai_model="gpt-5.4-xhigh"),
-                AiConfigEntry(ai_provider="gemini", ai_model="pro"),
+                AiConfigEntry(ai_provider="openai", ai_model="gpt-5.4"),
+                AiConfigEntry(ai_provider="gemini", ai_model="gemini-2.5-pro"),
             ],
         )
         assert req.peer_ai_configs is not None
         assert len(req.peer_ai_configs) == 2
-        assert req.peer_ai_configs[0].ai_provider == "cursor"
+        assert req.peer_ai_configs[0].ai_provider == "openai"
 
     def test_max_rounds_lower_bound(self) -> None:
         """Test that peer_analysis_max_rounds rejects 0."""

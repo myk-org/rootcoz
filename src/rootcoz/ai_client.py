@@ -261,7 +261,7 @@ def _active_server_provider_entries() -> frozenset[str] | None:
     """Admin-selected active server providers (public-normalized); None = all.
 
     Each saved entry is normalized through :func:`public_provider_name`, so a
-    public picker name (``claude``) and a legacy catalog ID (``cli-claude``)
+    public picker name (``claude``) and a catalog ID (``google-vertex-claude``)
     saved by an earlier admin both resolve to the same canonical form that
     catalog-provider comparisons use.  Case is preserved here; resolving it
     against the catalog is :func:`is_server_provider_active`'s job.
@@ -299,7 +299,8 @@ def is_server_provider_active(provider: str) -> bool:
 
     Both sides of the comparison go through :func:`public_provider_name`:
     admins save public picker names (``claude``) while catalog and grant paths
-    hold raw provider IDs (``cli-claude``) — one canonical form matches both.
+    hold raw provider IDs (``google-vertex-claude``) — one canonical form
+    matches both.
     Saved entries are resolved against the current catalog before matching:
     an exact match wins, a unique case-insensitive match resolves to that
     catalog provider, and an ambiguous match (two catalog providers differing
@@ -472,7 +473,7 @@ def server_credential_providers(
 
     Keys carry both spellings so each caller can match its own form — the
     public name (the admin picker, ``claude``) and the normalized raw id (the
-    Server providers card, ``cli-claude``). Values are public names, so
+    Server providers card, ``google-vertex-claude``). Values are public names, so
     ``sorted(set(values))`` is the picker's option list: one entry per provider
     even when a stored row and a credential disagree on casing (the card folds
     providers the same way), and the manifest's declared spelling wins — it is
@@ -725,8 +726,6 @@ async def _collect_server_redact_keys(
         *_ambient_api_key_vars(public_provider_name(provider)),
     }:
         keys.append(os.environ.get(name, "").strip())
-    if is_cursor_provider(normalize_provider(provider)):
-        keys.append(os.environ.get("CURSOR_API_KEY", "").strip())
     providers = _agent_manifest()
     if providers:
         wanted = {
@@ -753,23 +752,13 @@ async def _collect_server_redact_keys(
     return tuple(dict.fromkeys(key for key in keys if key))
 
 
-# Pi-sidecar's catalog is the provider/model contract.  These aliases only
-# preserve unambiguous legacy spelling; friendly provider names are resolved
-# against the selected model below and never choose a default route.
-_LEGACY_PROVIDER_ALIASES: dict[str, str] = {
-    "cursor-cli": "cli-cursor",
-    "claude-cli": "cli-claude",
-    "gemini-cli": "cli-gemini",
-}
-
 # Friendly provider names and the exact catalog providers each may resolve to.
 # One table serves route validation (:func:`resolve_catalog_pair`) and the
-# reverse mapping a public surface needs: the API only ever exposes
-# ``claude``/``gemini``/``cursor``, never a ``cli-*`` catalog ID.
+# reverse mapping a public surface needs: friendly aliases map to native API
+# catalog IDs.
 _LEGACY_PROVIDER_TARGETS: dict[str, tuple[str, ...]] = {
-    "gemini": ("google", "cli-gemini"),
-    "claude": ("google-vertex-claude", "cli-claude"),
-    "cursor": ("acpx-cursor", "cli-cursor"),
+    "gemini": ("google",),
+    "claude": ("google-vertex-claude",),
 }
 _PUBLIC_PROVIDER_NAMES: dict[str, str] = {
     provider_id: name
@@ -781,8 +770,8 @@ _PUBLIC_PROVIDER_NAMES: dict[str, str] = {
 def public_provider_name(provider: str) -> str:
     """Return the public name of a catalog provider ID (identity if unknown).
 
-    ``cli-claude`` -> ``claude``; ``acpx-cursor`` -> ``cursor``.  Anything the
-    table does not know is already public and passes through unchanged.
+    ``google-vertex-claude`` -> ``claude``; ``google`` -> ``gemini``.  Anything
+    the table does not know is already public and passes through unchanged.
     """
     return _PUBLIC_PROVIDER_NAMES.get(normalize_provider(provider), provider)
 
@@ -792,22 +781,6 @@ def public_provider_name(provider: str) -> str:
 _model_catalog_cache: list[dict[str, Any]] | None = None
 _model_catalog_generation = 0
 _model_catalog_lock = asyncio.Lock()
-
-# Cached cursor auth probe: (monotonic_ts, status_dict)
-_cursor_auth_cache: tuple[float, dict[str, Any]] | None = None
-_CURSOR_AUTH_CACHE_TTL_SEC = 60.0
-# Browser `agent login` expires. CURSOR_API_KEY does NOT — when set in env it keeps working.
-_CURSOR_BROWSER_LOGIN_EXPIRED_HINT = (
-    "Cursor browser login (`agent login`) expired or is missing. "
-    "Set CURSOR_API_KEY on the server (does not expire; always works when set), "
-    "or re-run `agent login` on the host and restart the sidecar. "
-    "Browser login cannot be auto-refreshed."
-)
-_CURSOR_KEY_SET_BUT_UNAVAILABLE_HINT = (
-    "CURSOR_API_KEY is set (that key does not expire) but Cursor models are "
-    "unavailable. Check the key is visible to the sidecar process, restart "
-    "the sidecar, and verify network to Cursor APIs."
-)
 
 # Every refusal sentence starts with this marker: it is the one non-retryable
 # signal (engine/core.py), the prefix the send-time mapper recognises and the
@@ -850,11 +823,10 @@ _REFUSAL_TEMPLATES = (
         " the sidecar's reason."
     ),
 )
-# Fixed sentences rootcoz builds whole: the whitelisted sidecar literals, the
-# Cursor legacy hint, and the picker reason.
+# Fixed sentences rootcoz builds whole: the whitelisted sidecar literals and
+# the picker reason.
 _OWN_REFUSAL_SENTENCES = (
     *(f"{SESSION_REFUSAL_MARKER}: {literal}" for literal in _SIDECAR_REFUSAL_LITERALS),
-    f"{SESSION_REFUSAL_MARKER}: {_CURSOR_BROWSER_LOGIN_EXPIRED_HINT}",
     SESSION_UNSUPPORTED_REASON,
 )
 # Each variable bounded to the shape ``_session_refusal`` can put there, so a
@@ -916,18 +888,17 @@ RESOURCE_REPO_BROWSE_HINT = (
 
 
 def normalize_provider(provider: str) -> str:
-    """Normalize provider name (lowercase + legacy *-cli aliases → canonical)."""
-    p = (provider or "").lower().strip()
-    return _LEGACY_PROVIDER_ALIASES.get(p, p)
+    """Normalize provider name (lowercase + strip)."""
+    return (provider or "").lower().strip()
 
 
 def _catalog_provider_spelling(provider_ids: Any, provider: str) -> str:
     """Adopt the catalog's exact spelling for a provider ID, case-insensitively.
 
-    ``normalize_provider()`` lowercases built-in aliases, but a custom agent-dir
+    ``normalize_provider()`` lowercases built-in names, but a custom agent-dir
     provider may be registered with mixed case (e.g. ``MyGateway``). Matching
     case-insensitively and returning the catalog's spelling keeps sessions
-    working with the exact ID the sidecar registered while built-in alias
+    working with the exact ID the sidecar registered while built-in
     normalization stays intact. The comparison normalizes both sides: the input
     may already carry a spelling adopted from a cached catalog, and the
     refreshed catalog may spell the same provider differently. Zero or
@@ -941,21 +912,8 @@ def _catalog_provider_spelling(provider_ids: Any, provider: str) -> str:
     return next(iter(matches)) if len(matches) == 1 else provider
 
 
-def _source_for_sidecar(provider: str) -> str:
-    if provider.startswith("cli-"):
-        return "cli"
-    if provider.startswith("acpx-"):
-        return "acpx"
-    return "api"
-
-
 # Marks model IDs taken from the bundled snapshot rather than a live listing.
 _SNAPSHOT_SOURCE = "snapshot"
-
-
-def is_cursor_provider(provider: str) -> bool:
-    """Whether a sidecar provider uses Cursor diagnostics."""
-    return provider == "cursor" or provider.endswith("-cursor")
 
 
 def build_friendly_catalog(
@@ -972,7 +930,7 @@ def build_friendly_catalog(
                 "id": model,
                 "name": entry.get("name") or model,
                 "provider": provider,
-                "source": _source_for_sidecar(provider),
+                "source": "api",
             }
         )
     return result
@@ -1618,9 +1576,7 @@ def deployment_provider_credentials(
        *mentioning* a provider is not declaring its key — an entry holding
        only ``modelOverrides`` (or any other key-less content) changes model
        metadata, it does not authenticate anything, so pi's own environment
-       resolution still applies (#389). Cursor's ``acpx-``/``cli-`` agents are
-       skipped too: they authenticate through the CLI, not through
-       ``CURSOR_API_KEY``.
+       resolution still applies (#389).
 
     Unset/empty variables and literal keys are skipped. Key material is never
     logged — provider names only, at DEBUG so a page-load read does not log
@@ -1675,11 +1631,7 @@ def deployment_provider_credentials(
         resolved[provider] = key
     ambient: list[str] = []
     for provider in _cached_catalog_provider_ids():
-        # Cursor's agents authenticate through acpx / the CLI login, so
-        # CURSOR_API_KEY is not an ambient listing credential — out of scope.
-        if provider.lower() in declared or is_cursor_provider(
-            normalize_provider(provider)
-        ):
+        if provider.lower() in declared:
             continue
         for var in _ambient_api_key_vars(provider):
             key = os.environ.get(var, "").strip()
@@ -1780,7 +1732,7 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                 "id": model,
                 "name": row.get("name") or model,
                 "provider": provider,
-                "source": _source_for_sidecar(provider),
+                "source": "api",
                 "capabilities": row.get("capabilities") or {},
             }
             for model, row in sorted(scoped_rows.items())
@@ -1874,8 +1826,8 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
             listing = discovery["modelListingSupported"]
             status[provider] = {"has_api_key": True, "modelListingSupported": listing}
             # Without a listing the only IDs we can offer come from the frozen
-            # snapshot, so tag them as such. `api`/`cli`/`acpx` would claim these
-            # came from a live source and hide how old they are.
+            # snapshot, so tag them as such. `api` would claim these came from
+            # a live source and hide how old they are.
             entries = (
                 discovery["models"]
                 if listing
@@ -1912,9 +1864,7 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                         "provider": provider,
                         "id": entry["id"],
                         "name": entry.get("name") or entry["id"],
-                        "source": _source_for_sidecar(provider)
-                        if listing
-                        else _SNAPSHOT_SOURCE,
+                        "source": "api" if listing else _SNAPSHOT_SOURCE,
                         "credential_sources": ["user"],
                         "can_use_server_providers": allowed,
                         "verified": listing,
@@ -2045,147 +1995,6 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     raise ValueError(f"Unknown Pi-sidecar provider/model pair: {provider}/{model}")
 
 
-def _parse_agent_status_text(text: str) -> str | None:
-    """Return auth reason from `agent status` output, or None if looks OK."""
-    lower = text.lower()
-    if any(
-        s in lower
-        for s in (
-            "authentication required",
-            "not authenticated",
-            "not logged in",
-            "please run 'agent login'",
-            'please run "agent login"',
-            "agent login' first",
-        )
-    ):
-        return "auth_expired"
-    if "logged in" in lower or "authenticated" in lower:
-        return None
-    return "unavailable"
-
-
-async def probe_cursor_auth(
-    *, force: bool = False, model_count: int | None = None
-) -> dict[str, Any]:
-    """Probe Cursor CLI/ACPX auth health for admin UI.
-
-    Browser ``agent login`` expires and cannot be auto-refreshed.
-    ``CURSOR_API_KEY`` does **not** expire — when set in the server/sidecar
-    env it keeps working. Prefer the API key for Dev/prod.
-
-    Args:
-        force: Bypass the in-process probe cache.
-        model_count: When provided (e.g. from a concurrent ``list_models``
-            call), skip a second sidecar model enumeration.
-
-    Returns dict: ok, reason, hint, has_api_key, model_count.
-    """
-    global _cursor_auth_cache
-    now = time.monotonic()
-    if (
-        not force
-        and model_count is None
-        and _cursor_auth_cache is not None
-        and (now - _cursor_auth_cache[0]) < _CURSOR_AUTH_CACHE_TTL_SEC
-    ):
-        return dict(_cursor_auth_cache[1])
-
-    # When the caller already enumerated models, prefer that count over a
-    # cached probe that may reflect a previous catalog size.
-    if (
-        not force
-        and model_count is not None
-        and _cursor_auth_cache is not None
-        and (now - _cursor_auth_cache[0]) < _CURSOR_AUTH_CACHE_TTL_SEC
-        and _cursor_auth_cache[1].get("model_count") == model_count
-    ):
-        return dict(_cursor_auth_cache[1])
-
-    has_api_key = bool(os.environ.get("CURSOR_API_KEY", "").strip())
-    if model_count is None:
-        models = await list_models()
-        model_count = sum(
-            is_cursor_provider(str(model.get("provider", ""))) for model in models
-        )
-    if model_count > 0:
-        status: dict[str, Any] = {
-            "ok": True,
-            "reason": None,
-            "hint": None,
-            "has_api_key": has_api_key,
-            "model_count": model_count,
-        }
-        _cursor_auth_cache = (now, status)
-        return dict(status)
-
-    reason = "no_models"
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "agent",
-            "status",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=os.environ.copy(),
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
-        except TimeoutError:
-            proc.kill()
-            await proc.wait()
-            reason = "unavailable"
-            logger.warning("Cursor auth probe: agent status timed out")
-        else:
-            text = (stdout or b"").decode(errors="replace") + (stderr or b"").decode(
-                errors="replace"
-            )
-            parsed = _parse_agent_status_text(text)
-            if parsed:
-                reason = parsed
-            elif proc.returncode not in (0, None):
-                reason = "unavailable"
-            logger.info(
-                "Cursor auth probe: models=0 reason=%s returncode=%s has_api_key=%s",
-                reason,
-                proc.returncode,
-                has_api_key,
-            )
-    except FileNotFoundError:
-        reason = "agent_missing"
-        logger.warning("Cursor auth probe: agent binary not found on PATH")
-    except Exception:
-        reason = "unavailable"
-        logger.warning("Cursor auth probe failed", exc_info=True)
-
-    # Empty catalog without API key → browser login likely expired.
-    # CURSOR_API_KEY never expires; if key is set, do not label auth_expired.
-    if reason == "no_models" and not has_api_key:
-        reason = "auth_expired"
-    if reason == "auth_expired" and has_api_key:
-        reason = "api_key_not_applied"
-
-    if has_api_key:
-        hint = _CURSOR_KEY_SET_BUT_UNAVAILABLE_HINT
-    else:
-        hint = _CURSOR_BROWSER_LOGIN_EXPIRED_HINT
-
-    status = {
-        "ok": False,
-        "reason": reason,
-        "hint": hint,
-        "has_api_key": has_api_key,
-        "model_count": model_count,
-    }
-    _cursor_auth_cache = (now, status)
-    return dict(status)
-
-
-def clear_cursor_auth_cache() -> None:
-    """Clear cached cursor auth probe (e.g. after model refresh)."""
-    global _cursor_auth_cache
-    _cursor_auth_cache = None
-
-
 class SessionCreationRefused(RuntimeError):
     """A sidecar 4xx refusal at session creation, carrying its mapped sentence."""
 
@@ -2275,11 +2084,7 @@ def _session_refusal(status: int | None, body: str, provider: str, model: str) -
     if body in _SIDECAR_REFUSAL_LITERALS:
         sentence = f"{SESSION_REFUSAL_MARKER}: {body}"
     elif status in (401, 403):
-        # The rejected credential outranks the Cursor legacy hint: a 401/403 says
-        # the key itself was refused, not that a browser login expired.
         sentence = _REFUSAL_TEMPLATES[0].substitute(pair=f"{provider}/{model}")
-    elif is_cursor_provider(normalize_provider(provider)):
-        sentence = f"{SESSION_REFUSAL_MARKER}: {_CURSOR_BROWSER_LOGIN_EXPIRED_HINT}"
     else:
         sentence = _REFUSAL_TEMPLATES[1].substitute(
             pair=f"{provider}/{model}", status=status
@@ -2361,9 +2166,6 @@ def format_chat_ai_user_error(
     """Map raw sidecar/AI errors to user-friendly chat messages.
 
     Avoid matching the URL path ``/sessions`` as a lost chat session.
-    Cursor-specific remediation applies only to Cursor sidecar providers
-    (or Cursor-only markers like ``agent login`` / ``cursor_api_key`` appear).
-    Credential-state hints (whether ``CURSOR_API_KEY`` is set) are admin-only.
 
     A session refusal is delegated to :func:`_session_refusal`, so the
     start-time ``422`` and this send-time message carry byte-identical
@@ -2375,30 +2177,18 @@ def format_chat_ai_user_error(
         return "AI call failed. Please try again."
     # Our own sentence is final and outranks every marker check below:
     # re-deriving its cause would lose the status a 401 sentence no longer
-    # carries, and a Cursor refusal already names its own hint.
+    # carries.
     if _is_own_refusal_sentence(text):
         return text
     lower = text.lower()
 
     friendly = normalize_provider(ai_provider)
-    cursor_only_markers = ("agent login", "cursor_api_key")
     generic_auth_markers = (
         "authentication required",
         "not authenticated",
         "not logged in",
     )
-    is_cursor_marker = any(s in lower for s in cursor_only_markers)
-    is_generic_auth = any(s in lower for s in generic_auth_markers)
-
-    if is_cursor_marker or (is_generic_auth and is_cursor_provider(friendly)):
-        if not is_admin:
-            return "Cursor is unavailable. Contact an administrator."
-        has_api_key = bool(os.environ.get("CURSOR_API_KEY", "").strip())
-        if has_api_key:
-            return _CURSOR_KEY_SET_BUT_UNAVAILABLE_HINT
-        return _CURSOR_BROWSER_LOGIN_EXPIRED_HINT
-
-    if is_generic_auth:
+    if any(s in lower for s in generic_auth_markers):
         label = friendly or "AI"
         if not is_admin:
             return f"{label} authentication failed. Contact an administrator."
@@ -3641,11 +3431,9 @@ __all__ = [
     "ambient_api_key_var",
     "call_ai",
     "call_ai_once",
-    "clear_cursor_auth_cache",
     "format_chat_ai_user_error",
     "list_models",
     "normalize_provider",
-    "probe_cursor_auth",
     "public_provider_name",
     "resolve_catalog_pair",
 ]

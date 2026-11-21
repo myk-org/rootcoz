@@ -24,7 +24,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHART_DIR = REPO_ROOT / "chart"
-VALID_PROVIDERS = ("gemini", "claude", "cursor")
+VALID_PROVIDERS = ("gemini", "claude")
 _ADMIN_KEY_MIN_LENGTH = 16
 _GENERATED_FILENAME = "values.generated.yaml"
 _SECRETS_FILENAME = "values.secrets.yaml"  # pragma: allowlist secret
@@ -182,14 +182,6 @@ def _read_file(path: str) -> str:
     return file_path.read_text(encoding="utf-8")
 
 
-def _read_json_file(path: str) -> dict[str, Any]:
-    content = _read_file(path)
-    data = json.loads(content)
-    if not isinstance(data, dict):
-        raise TypeError(f"Expected JSON object in {path}")
-    return data
-
-
 def _dump_yaml(data: dict[str, Any]) -> str:
     """Intentionally dependency-free YAML serializer.
 
@@ -304,6 +296,7 @@ _GENERATED_SECRET_KEYS: list[tuple[str, ...]] = [
     ("encryptionKey",),
     ("ai", "geminiApiKey"),
     ("ai", "anthropicApiKey"),
+    # Cleanup-only: scrub legacy pre-#622 Cursor secrets even if setup aborts mid-run.
     ("ai", "cursor", "apiKey"),
     ("ai", "cursor", "authJson"),
     ("ai", "vertex", "serviceAccountKey"),
@@ -396,7 +389,6 @@ def _collect_ai(
     model_defaults = {
         "gemini": "gemini-2.5-pro",
         "claude": "claude-sonnet-4-20250514",
-        "cursor": "gpt-5",
     }
     saved_model = str(_nested_get(existing_generated, "ai", "model", default="") or "")
     saved_provider = str(
@@ -472,39 +464,7 @@ def _collect_ai(
                 ),
             )
     else:
-        existing_cursor_key = str(
-            _nested_get(existing_secrets, "ai", "cursor", "apiKey", default="") or ""
-        )
-        existing_auth = _nested_get(
-            existing_secrets, "ai", "cursor", "authJson", default=""
-        )
-        api_key = _prompt_secret(
-            "Cursor API key", required=False, existing=existing_cursor_key
-        )
-        if api_key:
-            secrets["ai"]["cursor"] = {"apiKey": api_key}
-
-        if existing_auth:
-            keep_auth = _prompt_yes_no("Keep existing Cursor auth.json?", default=True)
-            if keep_auth:
-                secrets["ai"].setdefault("cursor", {})["authJson"] = existing_auth
-            else:
-                auth_path = _prompt("Path to Cursor auth.json (optional)", "")
-                if auth_path:
-                    secrets["ai"].setdefault("cursor", {})["authJson"] = (
-                        _read_json_file(auth_path)
-                    )
-        else:
-            auth_path = _prompt("Path to Cursor auth.json (optional)", "")
-            if auth_path:
-                secrets["ai"].setdefault("cursor", {})["authJson"] = _read_json_file(
-                    auth_path
-                )
-
-        if not secrets["ai"].get("cursor"):
-            raise ValueError(
-                "Cursor provider requires an API key and/or auth.json file"
-            )
+        raise ValueError(f"Unsupported AI provider: {provider}")
 
     return generated, secrets
 

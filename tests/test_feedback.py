@@ -1631,18 +1631,21 @@ class TestAiAttribution:
         assert self._AI_MARKER in result.body
         assert self._NO_AI_MARKER not in result.body
 
-    async def test_cli_provider_id_is_published_as_its_public_name(self, settings):
-        """Catalog `cli-*` IDs never leak; the public API names the provider."""
+    async def test_catalog_provider_id_is_published_as_its_public_name(self, settings):
+        """Internal catalog IDs never leak; the public API names the provider."""
         req = FeedbackRequest(description="The button is broken")
         with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
             preview = await generate_feedback_preview(
-                req, settings, ai_provider="cli-claude", ai_model="sonnet-4-5"
+                req,
+                settings,
+                ai_provider="google-vertex-claude",
+                ai_model="sonnet-4-5",
             )
         assert "(claude / sonnet-4-5)" in preview.body
-        assert "cli-" not in preview.body
+        assert "google-vertex-claude" not in preview.body
         body = await _posted_body(preview.title, preview.body, preview.labels)
         assert "(claude / sonnet-4-5)" in body
-        assert "cli-" not in body
+        assert "google-vertex-claude" not in body
 
     async def test_create_replaces_client_supplied_attribution(self):
         spoofed = (
@@ -2074,20 +2077,20 @@ class TestFeedbackAttributionEndpoints:
         assert resp.status_code == 200
         assert "(claude / test-model)" in resp.json()["body"]
 
-    def test_preview_endpoint_never_publishes_a_cli_provider_id(
+    def test_preview_endpoint_never_publishes_internal_catalog_provider_id(
         self, _init_db, temp_db_path, _make_client
     ):
-        """The public API exposes `claude`, never the catalog `cli-claude`."""
+        """The public API exposes `claude`, never the catalog `google-vertex-claude`."""
         for client in _make_client(
             temp_db_path,
             github_token=_TEST_GITHUB_TOKEN,
-            ai_provider="cli-claude",
+            ai_provider="google-vertex-claude",
             ai_model="test-model",
         ):
             with (
                 patch(
                     "rootcoz.main._validate_catalog_pair",
-                    AsyncMock(return_value=("cli-claude", "test-model")),
+                    AsyncMock(return_value=("google-vertex-claude", "test-model")),
                 ) as _pair,
                 patch("rootcoz.feedback.call_ai_once") as mock_ai,
             ):
@@ -2101,7 +2104,7 @@ class TestFeedbackAttributionEndpoints:
         assert resp.status_code == 200
         body = resp.json()["body"]
         assert "(claude / test-model)" in body
-        assert "cli-" not in body
+        assert "google-vertex-claude" not in body
 
     def test_create_endpoint_attribution_is_server_resolved(
         self, _init_db, temp_db_path, _make_client

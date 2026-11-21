@@ -483,7 +483,7 @@ export interface AiModel {
   id: string
   name: string
   provider: string
-  /** acpx | cli | api | snapshot — catalog metadata only; not sent on analyze.
+  /** Catalog metadata only (e.g. `api` | `snapshot`); not sent on analyze.
    *  `snapshot` means the ID came from a bundled fallback catalog, not a live listing. */
   source?: string
   credential_sources?: Array<'user' | 'server'>
@@ -501,9 +501,6 @@ export interface AiModel {
 
 /** Response shape from GET /api/ai-models (no provider filter) */
 export interface ProviderStatus {
-  ok?: boolean
-  reason?: string | null
-  hint?: string | null
   has_api_key?: boolean
   modelListingSupported?: boolean
   model_count?: number

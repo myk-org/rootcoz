@@ -14,7 +14,6 @@ import inspect
 import json
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -37,34 +36,27 @@ GRAPH_TOOLS = [
 
 @pytest.fixture()
 def stubbed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Indexing and the MCP install are stubbed: this is about assembly only."""
+    """Indexing is stubbed: this is about assembly only."""
     indexed: list[Path] = []
-    installed: list[tuple[Path, list[dict]]] = []
 
     async def fake_index(
         workspace: Path, job_id: str = "", *, deadline: float | None = None
     ) -> None:
         indexed.append(workspace)
 
-    async def fake_install(workspace: Path, tools: list[dict]) -> None:
-        installed.append((workspace, list(tools)))
-
     monkeypatch.setattr(session_tools, "index_workspace_graph", fake_index)
-    monkeypatch.setattr(
-        session_tools, "install_http_tools_mcp_best_effort_async", fake_install
-    )
     monkeypatch.setattr(
         "rootcoz.engine.graft_http.graph_http_tools",
         lambda workspace, job_id, **_kwargs: list(GRAPH_TOOLS),
     )
-    return indexed, installed
+    return indexed
 
 
 @pytest.mark.asyncio
 async def test_graph_tools_are_added_on_top_of_endpoint_tools(
     stubbed, tmp_path: Path
 ) -> None:
-    indexed, installed = stubbed
+    indexed = stubbed
     tools = await session_tools.build_session_tools(
         builtin=list(ANALYSIS_BUILTIN_TOOLS),
         custom_base=list(HISTORY_TOOLS),
@@ -78,7 +70,6 @@ async def test_graph_tools_are_added_on_top_of_endpoint_tools(
     assert {tool["name"] for tool in GRAPH_TOOLS} <= set(names)
     assert len(tools.custom) == len(HISTORY_TOOLS) + len(GRAPH_TOOLS)
     assert indexed == [tmp_path]
-    assert installed and installed[0][1] == tools.custom
 
 
 @pytest.mark.asyncio
@@ -154,9 +145,6 @@ async def test_the_graph_peek_does_not_block_the_event_loop(
             await asyncio.sleep(0.01)
 
     monkeypatch.setattr("rootcoz.engine.graft_http.graph_http_tools", slow_peek)
-    monkeypatch.setattr(
-        session_tools, "install_http_tools_mcp_best_effort_async", AsyncMock()
-    )
 
     beat = asyncio.create_task(tick())
     try:
@@ -175,7 +163,7 @@ async def test_the_graph_peek_does_not_block_the_event_loop(
 
 @pytest.mark.asyncio
 async def test_graph_can_be_disabled(stubbed, tmp_path: Path) -> None:
-    indexed, _ = stubbed
+    indexed = stubbed
     tools = await session_tools.build_session_tools(
         builtin=list(ANALYSIS_BUILTIN_TOOLS),
         custom_base=list(HISTORY_TOOLS),
@@ -247,9 +235,6 @@ async def test_skill_is_installed_where_the_session_runs(
 
     monkeypatch.setattr(session_tools, "index_workspace_graph", fake_index)
     monkeypatch.setattr(
-        session_tools, "install_http_tools_mcp_best_effort_async", AsyncMock()
-    )
-    monkeypatch.setattr(
         "rootcoz.engine.graft_http.graph_http_tools",
         lambda workspace, job_id, **_kwargs: list(GRAPH_TOOLS),
     )
@@ -278,11 +263,6 @@ async def test_indexing_logs_the_job_on_its_outcome_line(
     duplicate filter, so only the first run in a process ever appeared.
     """
     records: list[str] = []
-    monkeypatch.setattr(
-        session_tools,
-        "install_http_tools_mcp_best_effort_async",
-        AsyncMock(),
-    )
     monkeypatch.setattr(
         "rootcoz.engine.graft_http.cloned_graph_roots",
         lambda workspace: {"repo": tmp_path / "repo"},

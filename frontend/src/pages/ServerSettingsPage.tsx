@@ -49,10 +49,9 @@ import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
 import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
-import { CursorAuthBanner } from '@/components/shared/CursorAuthBanner'
 import { TestResultBanner } from '@/components/shared/TestResultBanner'
 import { useProviderModels } from '@/hooks/useProviderModels'
-import { useCursorAuthStatus, useProviderCatalog } from '@/lib/useProviderOptions'
+import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { normalizeProvider } from '@/lib/aiProviders'
 import { isAnalysisAiAvailable, analysisAiUnavailablePart, type AnalysisAiUnavailablePart } from '@/lib/analysisAi'
 import { ServerProvidersCard } from '@/components/shared/ServerProvidersCard'
@@ -737,7 +736,6 @@ export function ServerSettingsPage() {
     : null
   const modelListingProvider = aiProviderKeys.includes(normalizeProvider(effectiveAiProvider)) ? effectiveAiProvider : ''
   const { models: aiModels, refresh: refreshModels, refreshing: refreshingModels } = useProviderModels(modelListingProvider)
-  const cursorAuthStatus = useCursorAuthStatus()
 
   // Additional repos structured editor — same draft contract as the peers.
   const [reposDraft, setReposDraft] = useState<RepoWithId[] | null>(null)
@@ -1862,11 +1860,6 @@ export function ServerSettingsPage() {
               <JiraOauthUrlRow
                 cloudId={state.settings.find(s => s.key === 'atlassian_oauth_cloud_id')?.value ?? ''}
               />
-            )}
-            {category === 'Analysis' && cursorAuthStatus && (
-              <div className="mb-3">
-                <CursorAuthBanner status={cursorAuthStatus} />
-              </div>
             )}
             <div className="divide-y divide-border-default">
               {rowSettings.map((setting) => (

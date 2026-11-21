@@ -132,7 +132,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | `Data & retention` | `audit_retention_days`, `audit_max_rows`, `audit_auth_failure_max_per_minute`, `results_retention_days`, `results_max_rows`, `pi_sidecar_transcripts_max_age_days`, `pi_sidecar_transcripts_max_size_mb` |
    | `Repos & workspace` | `tests_repo_url`, `tests_repo_token`, `additional_repos`, `max_concurrent_repo_clones`, `chat_clone_depth`, `repo_clone_timeout_seconds`, `max_workspace_graph_mb` |
    | `Logging` | `log_level`, `log_max_bytes`, `log_backup_count`, `log_min_free_bytes`, `pi_sidecar_log_level` |
-   | `Advanced` | `sidecar_host`, `sidecar_port`, `sidecar_url`, `acpx_agents`, `cli_agents`, `node_binary`, `pi_sidecar_transcripts_dir` |
+   | `Advanced` | `sidecar_host`, `sidecar_port`, `sidecar_url`, `node_binary`, `pi_sidecar_transcripts_dir` |
 
    Every setting carries a description; it opens as a tooltip on the setting's label on hover or keyboard focus. A setting without one fails the test suite, so no row ships bare.
 
@@ -163,7 +163,7 @@ That creates an active operator who can submit analyses, and one server setting 
 
    Everything else applies to the running server as soon as you save. The exceptions are the server-only settings, which this page cannot save at all: `PUT /api/admin/settings` rejects every one of them with `400 Server-only settings (env var only)`, so they must be set in the deployment environment instead. They are `admin_key` (bootstrap secret for the `admin` superuser), `db_path`, and `debug`. A setting described elsewhere on this page as editable, or as needing only a restart, is still rejected here if it appears in that list — the restart-required distinction only applies to settings that can be saved at all.
 
-   > **Note:** Saving an empty value is an explicit blank override, not a reset. The empty value is stored in the database and beats the environment variable — this is how you clear a setting the deployment environment still sets (e.g. `CLI_AGENTS`). To fall back to the environment variable or default instead, use the row's reset action (DELETE), which removes the override. Non-string settings (booleans, integers) reject empty saves with a 400 error.
+   > **Note:** Saving an empty value is an explicit blank override, not a reset. The empty value is stored in the database and beats the environment variable — this is how you clear a setting the deployment environment still sets (e.g. `PI_SIDECAR_LOG_LEVEL`). To fall back to the environment variable or default instead, use the row's reset action (DELETE), which removes the override. Non-string settings (booleans, integers) reject empty saves with a 400 error.
 
 11. **Review and reset individual settings.**
 

@@ -1,10 +1,9 @@
 """One place that decides how an AI session gets its tools.
 
-Before this module, four call sites hand-copied the same four steps — pick the
-builtin list, build the endpoint-specific tools, add the read-only code graph,
-install the CLI MCP config — and each copy drifted. The graph reached chat and
-non-peer analysis but not peer analysis, which is why a repo with
-``peer_ai_configs`` got no map at all.
+Before this module, four call sites hand-copied the same steps — pick the
+builtin list, build the endpoint-specific tools, add the read-only code graph —
+and each copy drifted. The graph reached chat and non-peer analysis but not
+peer analysis, which is why a repo with ``peer_ai_configs`` got no map at all.
 
 Every analysis, peer, chat and admin-chat session now calls
 :func:`build_session_tools`, so adding a tool is a one-line change that reaches
@@ -20,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 from rootcoz import get_child_logger
-from rootcoz.engine.http_mcp import install_http_tools_mcp_best_effort_async
 
 logger = get_child_logger(__name__)
 
@@ -193,12 +191,12 @@ async def build_session_tools(
     index_deadline: float | None = None,
     wait_for_index: bool = True,
 ) -> SessionTools:
-    """Assemble every tool a session gets, and install the CLI MCP config.
+    """Assemble every tool a session gets.
 
     Args:
         builtin: Builtin tool names for this session kind.
         custom_base: Endpoint-specific tools (history/classify, chat tools, …).
-        workspace: The session's working directory (used for the MCP install).
+        workspace: The session's working directory.
         job_id: Analysis job id; the graph server is scoped to it.
         repos: Clone mapping when the caller knows it. Falls back to the
             workspace itself, which is where chat keeps its clones.
@@ -266,7 +264,6 @@ async def build_session_tools(
                 graph_root,
             )
         custom.extend(graph_tools)
-    await install_http_tools_mcp_best_effort_async(Path(workspace), custom)
     return SessionTools(builtin=list(builtin), custom=custom, graph_root=graph_root)
 
 

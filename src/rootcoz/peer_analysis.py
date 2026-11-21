@@ -9,7 +9,7 @@ import re
 from collections import Counter
 from collections.abc import Coroutine
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast, get_args
+from typing import Any, TypedDict, get_args
 
 from pi_sidecar_client import (
     get_sidecar_client,
@@ -1202,10 +1202,7 @@ async def analyze_failure_group_with_peers(
             max_rounds=max_rounds,
             ai_configs=[
                 AiConfigEntry(
-                    ai_provider=cast(
-                        Literal["claude", "gemini", "cursor"],
-                        main_ai_provider,
-                    ),
+                    ai_provider=main_ai_provider,
                     ai_model=main_ai_model,
                 ),
                 *peer_ai_configs,

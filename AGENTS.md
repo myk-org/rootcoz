@@ -91,7 +91,7 @@ uvx --with tox-uv tox -e chart      # Helm chart only
 
 - **Backend**: Python + FastAPI + SQLite (aiosqlite)
 - **Frontend**: Vite + React 19 + TypeScript + Tailwind CSS + shadcn/ui (in `/frontend/`)
-- **AI Integration**: Pi SDK sidecar — Node.js service wrapping the Pi coding agent SDK. Provides Claude (via Vertex), Cursor (via acpx), Gemini, and optional CLI models under the same provider names when `CLI_AGENTS` is set (same pattern as `ACPX_AGENTS`). No bash in analysis/chat tool lists. `AI_PROVIDER` env var selects provider (`claude` / `gemini` / `cursor`).
+- **AI Integration**: Pi SDK sidecar — Node.js service wrapping the Pi coding agent SDK. Provides Claude (via Vertex or Anthropic API), Gemini (via Google API), and other native API or custom providers discovered by pi-sidecar. No bash in analysis/chat tool lists. `AI_PROVIDER` env var selects a provider (`claude`, `gemini`, or any exact sidecar provider ID).
 - **CLI**: `rootcoz` CLI tool for querying the API — run `rootcoz --help` for available commands. Sub-commands include `results`, `history`, `comments`, `classifications`, `metadata`, `failure`, `chat`, `reports`, `config`, `auth`, `admin`, `admin-chat`
 
 ### Backend Module Layout
@@ -130,7 +130,6 @@ src/rootcoz/
   ai_client.py              # AI provider constants and usage recording setup
   sidecar-helper/            # Pi SDK sidecar service (Node.js/TypeScript)
     src/server.ts           # Thin wrapper calling @myk-org/pi-sidecar startSidecar()
-    src/http-tools-mcp.ts   # Stdio MCP server wrapping HTTP custom tools for CLI/acpx
   cli/                      # CLI client (rootcoz command)
   transcripts.py           # pi-sidecar session transcript access: dir constant,
                             # UUID session-id gate (traversal-safe), env bridge
@@ -258,7 +257,7 @@ prompt = f"Here is the data: {content}"
 AI chat sessions MUST use restricted tool sets — **never give bash access**.
 
 - **Allowed builtin tools**: `["read", "ls", "find", "grep", "subagent"]` — filesystem browsing + delegating to project-provided agents
-- **Data access**: Use HTTP-backed custom tools via pi-sidecar (pi-sidecar ≥4.3.4). CLI/acpx nested agents do not inherit those tools — rootcoz writes the same path-specific HTTP tool list as cwd MCP (`.cursor/mcp.json`, `.mcp.json`, `.gemini/settings.json`) executed by `sidecar-helper` `http-tools-mcp.js`. Sidecar 4.3.4+ points nested CLI `--workspace` at the session cwd so those files load. These are runtime CLI discovery files, not `.rootcoz/` repo customization. Rule 2598216's four-tool restriction applies to the analysis **builtin** list, not the separate authenticated HTTP `custom_tools`: existing history lookup and `classify_test_pattern` remain available through `analysis_http_tools()` and MCP. The read-only code-graph tools (`graft_find_code`, `graft_find_all`, `graft_file_api`, `graft_trace_calls`, `graft_repo_map`, `graft_check_freshness`) are available to **analysis and chat alike** — they are custom tools, never builtins, so the four-tool analysis list is unchanged and nothing writable or executable is added; they are built by one shared function (`graft_http.graph_http_tools`), the workspace is indexed once per process, and a stale, partial or unavailable graph degrades to `read`/`ls`/`find`/`grep`. No `subagent` in analysis builtins. Empty or unusable tool lists remove the managed `rootcoz-http` entry and credential dump. Analysis, job chat, and admin chat each pass their existing builder output (Jira/GitHub only when credentials exist).
+- **Data access**: Use HTTP-backed custom tools via pi-sidecar (pi-sidecar ≥4.3.4) directly — no cwd MCP files are written. Rule 2598216's four-tool restriction applies to the analysis **builtin** list, not the separate authenticated HTTP `custom_tools`: existing history lookup and `classify_test_pattern` remain available through `analysis_http_tools()`. The read-only code-graph tools (`graft_find_code`, `graft_find_all`, `graft_file_api`, `graft_trace_calls`, `graft_repo_map`, `graft_check_freshness`) are available to **analysis and chat alike** — they are custom tools, never builtins, so the four-tool analysis list is unchanged and nothing writable or executable is added; they are built by one shared function (`graft_http.graph_http_tools`), the workspace is indexed once per process, and a stale, partial or unavailable graph degrades to `read`/`ls`/`find`/`grep`. No `subagent` in analysis builtins. Analysis, job chat, and admin chat each pass their existing builder output (Jira/GitHub only when credentials exist).
 - **Never**: `bash`, `exec`, `write`, `edit` — the AI must not execute arbitrary commands or modify files
 - Custom tools define exactly which API endpoints the AI can call — nothing else is reachable
 - Per-job chat tools: `get_job_result`, `get_job_comments`, `get_job_tests`, `search_jira`, `get_jira_issue`, `search_github_issues`, `get_github_issue` (conditional on user credentials)
@@ -376,10 +375,8 @@ Node.js service running inside the same container, wrapping the Pi coding agent 
 **Architecture:**
 - HTTP API on `127.0.0.1:9100` (localhost only, `0.0.0.0` in `DEV_MODE`)
 - Extensions loaded by path (not from settings.json — no orchestrator):
-  - `acpx-provider` — Cursor models via `acpx` CLI
   - `pi-vertex-claude` — Claude models via Google Vertex AI
-  - `cli-provider` — CLI agent models via local pi CLI (enabled by `CLI_AGENTS` env var)
-- Built-in providers: Google (Gemini), Anthropic (Claude via API key)
+- Built-in and custom providers: Google (Gemini), Anthropic (Claude via API key), and any other native API or agent-dir custom providers exposed by pi-sidecar
 - `SettingsManager.inMemory()` — no settings.json discovery
 
 **Session lifecycle:**
@@ -397,10 +394,10 @@ Node.js service running inside the same container, wrapping the Pi coding agent 
 - `call_ai()` — multi-turn AI call (caller manages session lifecycle)
 - `AIResult.record_usage()` — record token usage to DB
 - `_iter_sse_events()` / `_STREAM_TERMINAL_EVENTS` — chat consumes these with a **concurrent** `_prompt_safely` POST instead of `stream_prompt()`, because `stream_prompt()` discards the `AIResult` and with it the usage row the reply must record. The prompt result stays authoritative; the feed only supplies fragments and `turn_end.text`
-- Provider mapping: `cursor` → `acpx-cursor` (default) or `cli-cursor` (when the chosen model is from CLI / `CLI_AGENTS`); `claude` → `google-vertex-claude` or `cli-claude`; `gemini` → `google` or `cli-gemini`. Public API uses only `claude` / `gemini` / `cursor` — never `*-cli` provider names.
+- Provider mapping: `claude` → `google-vertex-claude`; `gemini` → `google`; all other native API and custom sidecar providers use their exact provider ID directly.
 
 **Container integration:**
-- Dockerfile: sidecar build stage, `acpx` CLI installed globally
+- Dockerfile: sidecar build stage (bundles `@myk-org/pi-sidecar` and `@trailhq/trail-code`)
 - Entrypoint: starts sidecar in background, compiles TypeScript in dev mode
 - Process supervision: trap + monitor kills container if sidecar dies
 - Healthcheck covers both Python backend and sidecar
@@ -428,7 +425,7 @@ Gating/admin controls (lockout thresholds, allow-lists, enable/disable) are secu
 
 ### Bundled Dependencies Are Requirements
 
-Anything the container image ships — Node.js, `acpx`, `@trailhq/trail-code` (`trail`), the Pi SDK sidecar — is a **hard requirement**, not a maybe-present dependency. Do not add fallback binaries, dual package names, "try X then Y" branches, or degraded modes for their absence: the image guarantees them, and a host install is the operator's responsibility (documented under Prerequisites). A missing bundled tool should fail visibly, not silently reduce capability.
+Anything the container image ships — Node.js, `@trailhq/trail-code` (`trail`), the Pi SDK sidecar — is a **hard requirement**, not a maybe-present dependency. Do not add fallback binaries, dual package names, "try X then Y" branches, or degraded modes for their absence: the image guarantees them, and a host install is the operator's responsibility (documented under Prerequisites). A missing bundled tool should fail visibly, not silently reduce capability.
 
 ### Logging
 
@@ -484,7 +481,7 @@ When adding a new analysis setting:
 
 **Helm chart parity (bootstrap-only):** When adding environment variables that **cannot** be configured via Server Settings UI, also update the Helm chart:
 
-- Sidecar AI keys (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `CURSOR_API_KEY`, Vertex/Cursor mount paths)
+- Sidecar AI keys (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, Vertex mount path)
 - Bootstrap secrets (`ADMIN_KEY`, `ROOTCOZ_ENCRYPTION_KEY`)
 - Container runtime env (`XDG_*`, auto-derived `SECURE_COOKIES`, `PUBLIC_BASE_URL` derivation)
 - Routing templates (Route/Ingress)

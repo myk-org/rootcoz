@@ -9,7 +9,7 @@
 
 - Docker with Docker Compose for the local recipe, or Helm 3 plus `kubectl` or `oc` for the cluster recipes
 - A cluster with a `ReadWriteOnce` PersistentVolume provisioner for the SQLite data volume
-- One AI provider credential: `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` (or a Vertex service account key). `CURSOR_API_KEY` alone is not enough — the bundled Compose file leaves `CURSOR_API_KEY`, `ACPX_AGENTS`, and `CLI_AGENTS` commented out, so a Cursor deployment needs those uncommented and `ACPX_AGENTS` (or `CLI_AGENTS`) set before Cursor models are discovered.
+- One AI provider credential: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, a Vertex service account key, or another provider key configured for pi-sidecar
 - An admin API key of at least 16 characters if you want to set `admin.key` yourself; otherwise the interactive setup script requires one and plain `helm install` auto-generates it
 - `openssl`, only for the self-signed certificate in the Ingress recipe
 
@@ -590,7 +590,7 @@ kubectl exec -n rootcoz deploy/rootcoz -- python -c \
   These two keys are enforced on first install only. Add them to `values.generated.yaml`.
 
 - `ai.geminiApiKey is required when ai.provider is gemini`
-  Add the matching credential key for your provider: `ai.geminiApiKey`, `ai.anthropicApiKey`, or `ai.cursor.apiKey`.
+  Add the matching credential key for your provider: `ai.geminiApiKey`, `ai.anthropicApiKey`, or `ai.vertex.serviceAccountKey`.
 
 - `ADMIN_KEY not found in existing secret and admin.key not set in values`
   The credentials Secret was edited or deleted outside Helm. Restore the key by setting `admin.key` in values to match your original key, or reinstall from scratch.

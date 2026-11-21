@@ -580,7 +580,9 @@ async def test_normalised_alias_is_not_a_conflict(monkeypatch, tmp_path):
     rig.clone_gate = asyncio.Event()
     try:
         await main.init_chat("job", _request(), _body(provider="claude"))
-        deduped = await main.init_chat("job", _request(), _body(provider="cli-claude"))
+        deduped = await main.init_chat(
+            "job", _request(), _body(provider="google-vertex-claude")
+        )
         assert deduped["ready"] is False
     finally:
         rig.clone_gate.set()

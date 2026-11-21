@@ -19,7 +19,6 @@ async def test_user_selection_does_not_fall_back_when_key_disappears(
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
     monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
     monkeypatch.setattr(chat, "create_session_safely", create)
-    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     monkeypatch.setattr(chat, "get_sidecar_client", lambda: object())
     choice = ai_client._selected_credential_source.set("user")
     try:

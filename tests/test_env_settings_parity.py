@@ -58,12 +58,12 @@ def test_bridge_writes_only_overrides_and_quotes_values(bridge):
         {
             "SIDECAR_HOST": "127.0.0.1",
             "SIDECAR_PORT": None,
-            "ACPX_AGENTS": "a b,c",  # value with a space must survive `source`
+            "NODE_BINARY": "/opt/my node/bin/node",  # value with a space must survive `source`
         }
     )
     content = bridge.read_text()
     assert "SIDECAR_HOST=127.0.0.1" in content
-    assert "ACPX_AGENTS='a b,c'" in content
+    assert "NODE_BINARY='/opt/my node/bin/node'" in content
     assert "SIDECAR_PORT" not in content  # no override → no assignment
 
 
@@ -88,7 +88,7 @@ def test_save_sidecar_settings_writes_bridge_and_warns_on_non_loopback(client, b
             "settings": {
                 "sidecar_host": "0.0.0.0",
                 "sidecar_port": "9200",
-                "acpx_agents": "cursor",
+                "pi_sidecar_log_level": "debug",
             }
         },
     )
@@ -98,8 +98,92 @@ def test_save_sidecar_settings_writes_bridge_and_warns_on_non_loopback(client, b
     content = bridge.read_text()
     assert "SIDECAR_HOST=0.0.0.0" in content
     assert "SIDECAR_PORT=9200" in content
-    assert "ACPX_AGENTS=cursor" in content
+    assert "PI_SIDECAR_LOG_LEVEL=debug" in content
     assert "RECORD_TRANSCRIPTS" not in content  # no override for it
+
+
+@pytest.mark.asyncio
+async def test_stale_removed_db_setting_rows_do_not_crash_startup_or_settings_api(
+    tmp_path, monkeypatch
+):
+    """Upgrade safety (#622): init_db one-time migration deletes stale
+    acpx_agents/cli_agents/cursor_api_key rows idempotently, and
+    load_db_settings + settings API still ignore unknown keys cleanly without
+    dropping valid DB overrides."""
+    from rootcoz.config import load_db_settings
+
+    db_path = tmp_path / "upgrade.db"
+    monkeypatch.setattr(storage, "DB_PATH", db_path)
+    monkeypatch.setenv("ADMIN_KEY", "parity-bootstrap-key")
+    monkeypatch.setenv("SECURE_COOKIES", "false")
+    monkeypatch.setenv("DB_PATH", str(db_path))
+    clear_db_settings_cache()
+    clear_settings_cache()
+
+    await storage.init_db()
+    # Simulate a pre-#622 database: seed legacy rows and clear the migration
+    # marker so the next init_db() runs the one-time cleanup migration.
+    await storage.set_server_settings_batch(
+        {
+            "acpx_agents": "cursor",
+            "cli_agents": "claude,gemini",
+            "cursor_api_key": "stale-secret",  # pragma: allowlist secret
+            "ai_provider": "claude",
+        },
+        updated_by="pre-622-admin",
+    )
+    async with storage._connect_db() as db:
+        await db.execute(
+            "DELETE FROM _migrations_applied WHERE key = ?",
+            ("remove_legacy_agent_settings_v1",),
+        )
+        await db.commit()
+
+    try:
+        # 1. init_db migration removes the 3 obsolete rows and keeps valid ones.
+        await storage.init_db()
+        stored_after_migration = await storage.get_server_settings()
+        assert "acpx_agents" not in stored_after_migration
+        assert "cli_agents" not in stored_after_migration
+        assert "cursor_api_key" not in stored_after_migration
+        assert stored_after_migration["ai_provider"]["value"] == "claude"
+
+        # Migration is idempotent (re-running init_db is a safe no-op).
+        await storage.init_db()
+        assert set((await storage.get_server_settings()).keys()) == {"ai_provider"}
+
+        # 2. Even if an unknown row exists in server_settings, load_db_settings
+        # and the settings API ignore it cleanly without dropping valid overrides.
+        await storage.set_server_settings_batch(
+            {"unknown_future_setting": "ignored-value"},
+            updated_by="pre-622-admin",
+        )
+        await load_db_settings()
+        settings = get_settings()
+        assert settings.ai_provider == "claude"
+        assert not hasattr(settings, "acpx_agents")
+        assert not hasattr(settings, "cli_agents")
+        assert not hasattr(settings, "cursor_api_key")
+        assert not hasattr(settings, "unknown_future_setting")
+
+        with TestClient(app) as test_client:
+            listed = test_client.get("/api/admin/settings", headers=_admin_headers())
+            assert listed.status_code == 200
+            keys = {item["key"] for item in listed.json()}
+            assert "acpx_agents" not in keys
+            assert "cli_agents" not in keys
+            assert "cursor_api_key" not in keys
+            assert "unknown_future_setting" not in keys
+
+            exported = test_client.get(
+                "/api/admin/settings/export", headers=_admin_headers()
+            )
+            assert exported.status_code == 200
+            exported_settings = exported.json()["settings"]
+            assert exported_settings == {"ai_provider": "claude"}
+    finally:
+        clear_db_settings_cache()
+        clear_settings_cache()
 
 
 def test_save_loopback_sidecar_host_has_no_warning(client, bridge):
@@ -1527,8 +1611,6 @@ _EXPECTED_CATEGORIES: dict[str, set[str]] = {
         "sidecar_host",
         "sidecar_port",
         "sidecar_url",
-        "acpx_agents",
-        "cli_agents",
         "node_binary",
         "pi_sidecar_transcripts_dir",
     },
@@ -1563,7 +1645,7 @@ _JIRA_ALWAYS_VISIBLE = {
 
 
 def test_settings_categories_match_the_agreed_tabs():
-    """Every one of the 122 settings sits in its agreed tab (#585)."""
+    """Every one of the 120 settings sits in its agreed tab (#585, #622)."""
     actual = {cat: set(fields) for cat, fields in main._SETTINGS_CATEGORIES.items()}
     assert actual == _EXPECTED_CATEGORIES
     # Tab order is the page order — pinned so a reorder is a visible change.
@@ -1578,7 +1660,7 @@ def test_settings_categories_match_the_agreed_tabs():
     placed = [key for fields in _EXPECTED_CATEGORIES.values() for key in fields]
     assert len(placed) == len(set(placed)), "a setting sits in two tabs"
     assert set(placed) == set(Settings.model_fields)
-    assert len(placed) == 122
+    assert len(placed) == 120
 
 
 def test_every_setting_has_a_description():

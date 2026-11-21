@@ -4,11 +4,10 @@ import { useSSE } from '@/lib/useSSE'
 import { Button } from '@/components/ui/button'
 import { AnalysisModelNotice, AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { isAnalysisAiAvailable } from '@/lib/analysisAi'
-import { useProviderCatalog, useCursorAuthStatus } from '@/lib/useProviderOptions'
+import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
 import { useAuth } from '@/lib/auth'
 import { useAiSelection } from '@/lib/useAiSelection'
-import { CursorAuthBanner } from '@/components/shared/CursorAuthBanner'
 import { formatDuration, parseApiTimestamp, INVALID_DATE_FALLBACK } from '@/lib/utils'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -174,7 +173,6 @@ export function ChatUI({
   const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultProvider, defaultModel, { respectCleared: false })
   const { canUseServerProviders, canUseFreeProviders, role } = useAuth()
   const { providers, providerStatus } = useProviderCatalog()
-  const cursorAuthStatus = useCursorAuthStatus()
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
   const [copiedAll, setCopiedAll] = useState(false)
@@ -784,12 +782,6 @@ export function ChatUI({
             </Button>
           </div>
         </div>
-
-        {cursorAuthStatus && aiProvider === 'cursor' && (
-          <div className="px-6 pt-3 shrink-0">
-            <CursorAuthBanner status={cursorAuthStatus} />
-          </div>
-        )}
 
         {!canUseServerProviders && !canUseFreeProviders && !sessionStarted && (
           <div className="px-6 pt-2">

@@ -1,8 +1,8 @@
 """Process-local, loopback-only HTTP bridge for read-only Graft queries.
 
-The bearer token lives in memory and in the existing private HTTP MCP dump,
-never in an agent prompt or a workspace file. Only registered cloned roots may
-be queried. No Rootcoz API route is installed.
+The bearer token lives in memory only (passed to sidecar custom tools), never
+in an agent prompt or a workspace file. Only registered cloned roots may be
+queried. No Rootcoz API route is installed.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ _REQUIRED = {
     "graft_file_api": ("path",),
     "graft_trace_calls": ("symbol",),
 }
-_SKILL_LOCATIONS = (".pi", ".agents", ".cursor", ".claude", ".gemini")
+_SKILL_LOCATIONS = (".pi", ".agents", ".claude", ".gemini")
 logger = get_child_logger(__name__)
 _MAX_BODY = 8192
 _MAX_RESULT = 65536

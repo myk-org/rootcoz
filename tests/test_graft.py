@@ -41,12 +41,12 @@ def _builder_holding(workspace: Path) -> Iterator[threading.Event]:
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    from rootcoz.engine.http_mcp import _workspace_install_lock
+    from rootcoz.temp_paths import workspace_lock
 
     entered, release = threading.Event(), threading.Event()
 
     def build() -> None:
-        with _workspace_install_lock(workspace):
+        with workspace_lock(workspace):
             entered.set()
             assert release.wait(3)
 
@@ -653,14 +653,14 @@ def test_indexed_roots_waits_for_reindex(tmp_path, monkeypatch):
 def test_query_lock_deadline_boundary_returns_timeout(tmp_path, monkeypatch):
     import fcntl
 
-    from rootcoz.engine import http_mcp
+    from rootcoz import temp_paths
 
     workspace = tmp_path / "workspace"
     (workspace / "code").mkdir(parents=True)
     git(workspace / "code", "init")
     graft._root(workspace).mkdir()
-    monkeypatch.setattr(http_mcp.tempfile, "gettempdir", lambda: str(tmp_path))
-    path = http_mcp._install_lock_path(workspace)
+    monkeypatch.setattr(temp_paths.tempfile, "gettempdir", lambda: str(tmp_path))
+    path = temp_paths._workspace_lock_path(workspace)
     path.parent.mkdir(mode=0o700)
     with path.open("a+") as holder:
         path.chmod(0o600)
@@ -676,8 +676,8 @@ def test_query_lock_deadline_boundary_returns_timeout(tmp_path, monkeypatch):
             if seconds < 0:
                 raise ValueError("sleep length must be non-negative")
 
-        monkeypatch.setattr(http_mcp.time, "monotonic", clock)
-        monkeypatch.setattr(http_mcp.time, "sleep", sleep)
+        monkeypatch.setattr(temp_paths.time, "monotonic", clock)
+        monkeypatch.setattr(temp_paths.time, "sleep", sleep)
         assert graft.query_repo(workspace, "code", "repo_map", {}, deadline=100.0) == {
             "status": "failed",
             "reason": "TimeoutError",
@@ -698,9 +698,9 @@ def test_query_lock_wait_is_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr(graft, "QUERY_SECONDS", 0.05)
 
     def hold():
-        from rootcoz.engine.http_mcp import _workspace_install_lock
+        from rootcoz.temp_paths import workspace_lock
 
-        with _workspace_install_lock(workspace):
+        with workspace_lock(workspace):
             entered.set()
             assert release.wait(3)
 

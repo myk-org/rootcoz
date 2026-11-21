@@ -613,9 +613,6 @@ async def test_chat_call_rotated_mid_flight_cannot_publish_session(
         )
         monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
         monkeypatch.setattr(
-            chat, "install_http_tools_mcp_best_effort_async", AsyncMock()
-        )
-        monkeypatch.setattr(
             chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
         )
         monkeypatch.setattr(
@@ -675,9 +672,6 @@ async def test_revoked_server_grant_mid_call_does_not_publish_reply(
             "job", "", "completed", {"status": "completed", "result": {}}
         )
         monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
-        monkeypatch.setattr(
-            chat, "install_http_tools_mcp_best_effort_async", AsyncMock()
-        )
         monkeypatch.setattr(
             chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
         )
@@ -800,7 +794,6 @@ async def _run_turn(
     )
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: tmp_path)
     monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
-    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     monkeypatch.setattr(
         chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
     )
@@ -941,7 +934,6 @@ async def test_credential_rotation_preserves_server_reply_in_flight(
     )
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: tmp_path)
     monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
-    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     monkeypatch.setattr(
         chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
     )
@@ -1081,9 +1073,6 @@ async def test_unrelated_or_noop_change_does_not_abort_chat(
         )
         monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
         monkeypatch.setattr(
-            chat, "install_http_tools_mcp_best_effort_async", AsyncMock()
-        )
-        monkeypatch.setattr(
             chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
         )
         monkeypatch.setattr(
@@ -1189,9 +1178,6 @@ async def test_abort_between_status_check_and_completion_preserves_reason(
             {"status": "completed", "summary": "test", "failures": []},
         )
         monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
-        monkeypatch.setattr(
-            chat, "install_http_tools_mcp_best_effort_async", AsyncMock()
-        )
         monkeypatch.setattr(
             chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
         )

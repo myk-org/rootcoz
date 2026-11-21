@@ -95,7 +95,7 @@ def write_sidecar_env_bridge(values: dict[str, str | None]) -> None:
     nothing is assigned for that var, so the deployment environment
     (compose/Helm) controls the sidecar. An empty string is an explicit
     empty override (#352): the var IS assigned empty, which beats the
-    deployment env (e.g. clearing ``CLI_AGENTS`` while the container env
+    deployment env (e.g. clearing ``PI_SIDECAR_LOG_LEVEL`` while the container env
     still sets it). Values are shell-quoted: a value containing spaces
     must survive ``source`` under ``set -e``.
 

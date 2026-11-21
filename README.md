@@ -12,7 +12,7 @@ The published package's `postinstall` records an install event and spawns a tele
 
 ## Prerequisites
 
-Provider IDs and models are discovered from Pi-sidecar. Install and authenticate the corresponding provider CLI or API credentials; see [docs](https://myk-org.github.io/rootcoz/ai-provider-setup.html) for setup details. Users can manage their own session-scoped API keys in Settings → AI provider keys or via `rootcoz auth ai-keys list|set|delete` (use `set --stdin` for piped input). Keys are encrypted at rest, never displayed again, and override server credentials only for a matching provider; without a user key, server authentication still applies. Only providers explicitly advertising session API-key capability appear. Vertex ADC/service accounts, OAuth, and CLI/browser logins remain server-managed. This feature requires pi-sidecar 4.6.0 or newer for session-key support and provider capability metadata ([pi-config #830](https://github.com/myk-org/pi-config/issues/830)); when that metadata is unavailable, key configuration fails closed.
+Provider IDs and models are discovered from Pi-sidecar. Configure the API or Vertex AI credentials for the providers you want to use; see [docs](https://myk-org.github.io/rootcoz/configuration-reference.html) for setup details. Users can manage their own session-scoped API keys in Settings → AI provider keys or via `rootcoz auth ai-keys list|set|delete` (use `set --stdin` for piped input). Keys are encrypted at rest, never displayed again, and override server credentials only for a matching provider; without a user key, server authentication still applies. Only providers explicitly advertising session API-key capability appear. Vertex ADC/service accounts and OAuth logins remain server-managed. This feature requires pi-sidecar 4.6.0 or newer for session-key support and provider capability metadata ([pi-config #830](https://github.com/myk-org/pi-config/issues/830)); when that metadata is unavailable, key configuration fails closed.
 
 ## Quick Start
 
@@ -35,7 +35,7 @@ For Prow-only deployments, set `PROW_URL` and `GCS_BUCKET` instead of (or in add
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_CONCURRENT_AI_CALLS` | `3` | Maximum concurrent AI CLI processes. Prevents OOM with heavy models. |
+| `MAX_CONCURRENT_AI_CALLS` | `3` | Maximum concurrent AI calls. Prevents OOM with heavy models. |
 | `MAX_CONCURRENT_REPO_CLONES` | `10` | Maximum simultaneous additional-repository clones, configurable by admins in Server Settings → Server. Does not limit the number of repos. |
 
 `MAX_CONCURRENT_AI_CALLS` can be set via any of the supported interfaces:
@@ -75,7 +75,7 @@ Jobs can omit `gcs_prefix`; RootCoz auto-resolves it via prowjob.json or the Pro
 - **AI-Powered Failure Analysis** — Classifies test failures as code issues or product bugs
 - **Multi-CI Support** — Analyzes builds from Jenkins, Prow (GCS artifacts), or raw JUnit XML input with a unified pipeline
 - **Full Test Visibility** — Stores and displays all test outcomes (passed, skipped, failed) from CI sources. Zero-failure jobs are handled as a fast path with no AI overhead.
-- **AI Token Usage Tracking** — Track token consumption, costs, and duration for all AI CLI calls. Admin dashboard shows usage by provider/model/time period with CSV export.
+- **AI Token Usage Tracking** — Track token consumption, costs, and duration for all AI calls. Admin dashboard shows usage by provider/model/time period with CSV export.
 - **Public OpenAPI** — `/openapi.json`, `/docs`, and `/redoc` are available without authentication
 - **Sparse result fields** — `GET /results/{job_id}?fields=status,result.summary,...` returns only allowlisted paths (full values). Discover paths via `GET /api/results/fields` or `rootcoz results fields`
 - **Reports access flag** — Non-admins need `can_view_reports` (admin grant / `rootcoz admin users set-can-view-reports`) to call `/api/reports/*` and `rootcoz reports`

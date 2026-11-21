@@ -264,7 +264,7 @@ _PeersOpt = Annotated[
     typer.Option(
         "--peers",
         help='Peer AI configs as "provider:model,provider:model" '
-        '(e.g. "cursor:gpt-5.4-xhigh,gemini:gemini-2.5-pro").',
+        '(e.g. "claude:claude-sonnet-4-6,gemini:gemini-2.5-pro").',
     ),
 ]
 _PeerMaxRoundsOpt = Annotated[

@@ -57,11 +57,6 @@ ai:
     region: us-east5
     # GCP service account JSON key (secret, mounted at /gcloud-credentials)
     serviceAccountKey: ""
-  cursor:
-    # When provider=cursor → CURSOR_API_KEY (secret)
-    apiKey: ""
-    # Cursor auth.json content (secret, mounted at /home/appuser/.cursor-auth/auth.json)
-    authJson: ""
 
 # Datadog event exporter (optional) → DATADOG_API_KEY and DATADOG_APP_KEY,
 # both stored in the credentials Secret. The v2 event intake requires the

@@ -148,15 +148,6 @@ if [ "${1:-}" = "--exit-check" ]; then
     _run_app bash -c "trap '' TERM; : > \"$4\"; while [ ! -f \"$_check_release\" ]; do sleep 0.01; done; exit $_check_code"
 fi
 
-# Cursor auth: create config dir (owned by runtime UID so chmod works)
-# and symlink auth.json to the PVC mount for persistence
-if [ -d /home/appuser/.cursor-auth ]; then
-    _cursor_cfg="${XDG_CONFIG_HOME:-/home/appuser/.config}/cursor"
-    mkdir -p "$_cursor_cfg"
-    chmod 0700 "$_cursor_cfg"
-    ln -sf /home/appuser/.cursor-auth/auth.json "$_cursor_cfg/auth.json"
-fi
-
 # Resolve PORT with a default so the exec-form CMD (which cannot expand
 # shell variables) gets the correct bind port at runtime.
 export PORT="${PORT:-8000}"
@@ -209,8 +200,9 @@ if [ -f /app/sidecar-helper/dist/server.js ]; then
     export SIDECAR_URL="${SIDECAR_URL:-http://127.0.0.1:${SIDECAR_PORT}}"
     mkdir -p "$PI_SIDECAR_TRANSCRIPTS_DIR" 2>/dev/null || echo "[sidecar] WARN: cannot create transcripts dir" >&2
     # Subagent extension falls back to spawning `pi` when argv[1] is unset;
-    # keep the CLI on PATH so that path works in the container.
-    export PATH="/app/sidecar-helper/node_modules/.bin:${PATH}"
+    # keep only the allowlisted sidecar bin dir (trail, pi) on PATH so
+    # transitive npm binaries (e.g. acpx) are not exposed.
+    export PATH="/app/sidecar-helper/bin:${PATH}"
     # NODE_BINARY comes from the DB bridge sourced above (node_binary
     # setting) or the deployment env — launching with it here is what makes
     # the saved setting take effect on restart.

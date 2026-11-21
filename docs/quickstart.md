@@ -5,7 +5,7 @@ You want RootCoz running fast so you can move from failing CI output to a report
 ## Prerequisites
 
 - Docker with Docker Compose
-- One AI credential for `claude`, `gemini`, or `cursor`
+- One AI credential (for example `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or Vertex AI credentials)
 - For Jenkins: a job name, build number, and Jenkins access
 - For Prow: a job name, build ID, and access to the relevant Prow/GCS location
 - For JUnit XML: a `.xml` file or raw JUnit XML text
@@ -37,7 +37,7 @@ curl http://localhost:8000/health
 
 XML submissions open the result directly. Jenkins and Prow submissions open a live status page first, then redirect to the report when analysis completes.
 
-> **Note:** The Docker image already includes the supported AI CLIs. For a first run, you only need one working provider credential plus `AI_PROVIDER` and `AI_MODEL`.
+> **Note:** The Docker image already bundles the Pi SDK sidecar. For a first run, you only need one working provider credential plus `AI_PROVIDER` and `AI_MODEL`.
 
 
 > **Warning:** `DEFAULT_USER_ROLE=operator` and `REQUIRE_APPROVAL=false` are convenient for a local trial. For a shared deployment, keep approval enabled and manage roles deliberately. See [Managing Users and Server Settings](manage-users-and-server-settings.html) for details.
@@ -46,7 +46,7 @@ XML submissions open the result directly. Jenkins and Prow submissions open a li
 
 1. Prepare `.env`.
 
-   Start from `.env.example`. It already sets `AI_PROVIDER`, `AI_MODEL`, and an `ANTHROPIC_API_KEY` placeholder — replace the model and key with your own, or switch to `GEMINI_API_KEY` or `CURSOR_API_KEY`. Then add the two quickstart lines shown above.
+   Start from `.env.example`. It already sets `AI_PROVIDER`, `AI_MODEL`, and an `ANTHROPIC_API_KEY` placeholder — replace the model and key with your own, or switch to `GEMINI_API_KEY` (or another provider supported by pi-sidecar). Then add the two quickstart lines shown above.
 
    | If your first analysis is... | Add before startup | You can also enter it in `New Analysis` |
    | --- | --- | --- |
@@ -56,9 +56,8 @@ XML submissions open the result directly. Jenkins and Prow submissions open a li
 
    | AI provider | Credential variable |
    | --- | --- |
-   | Claude | `ANTHROPIC_API_KEY` |
+   | Anthropic / Claude | `ANTHROPIC_API_KEY` (or Vertex AI credentials for `claude` / `google-vertex-claude`) |
    | Gemini | `GEMINI_API_KEY` |
-   | Cursor | `CURSOR_API_KEY` |
 
    > **Warning:** The bundled Compose file uses example Jenkins values when you do not override them. Replace those placeholders before you submit a Jenkins run, or type the correct values into the form for that specific submission.
 

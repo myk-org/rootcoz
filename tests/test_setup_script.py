@@ -209,28 +209,39 @@ def test_collect_ai_claude_vertex() -> None:
         os.unlink(sa_path)
 
 
-def test_collect_ai_cursor_api_key() -> None:
-    """Cursor provider with API key only."""
-    user_inputs = iter(["cursor", "", ""])  # provider, model, auth.json path (empty)
+def test_collect_ai_rejects_cursor_provider(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Removed 'cursor' provider is rejected and re-prompted until valid."""
+    assert "cursor" not in setup.VALID_PROVIDERS
+    # "cursor" is rejected, then "gemini" is accepted with default model
+    user_inputs = iter(["cursor", "gemini", ""])
     with (
         patch("builtins.input", side_effect=user_inputs),
-        patch("getpass.getpass", return_value="cursor-key-789"),
+        patch("getpass.getpass", return_value="gem-key-789"),
     ):
         generated, secrets = setup._collect_ai()
 
-    assert generated["ai"]["provider"] == "cursor"
-    assert secrets["ai"]["cursor"]["apiKey"] == "cursor-key-789"  # pragma: allowlist secret  # fmt: skip
+    out = capsys.readouterr().out
+    assert "Choose one of: gemini, claude" in out
+    assert generated["ai"]["provider"] == "gemini"
+    assert "cursor" not in secrets["ai"]
+    assert secrets["ai"]["geminiApiKey"] == "gem-key-789"  # pragma: allowlist secret
 
 
-def test_collect_ai_cursor_no_creds_raises() -> None:
-    """Cursor with no API key and no auth.json raises ValueError."""
-    user_inputs = iter(["cursor", "", ""])  # provider, model, auth.json path (empty)
+def test_collect_ai_falls_back_when_existing_provider_was_cursor() -> None:
+    """Upgrading from a saved 'cursor' provider defaults back to 'gemini'."""
+    existing_gen = {"ai": {"provider": "cursor", "model": "gpt-5"}}
+    user_inputs = iter(["", ""])  # accept fallback provider + model defaults
     with (
         patch("builtins.input", side_effect=user_inputs),
-        patch("getpass.getpass", return_value=""),  # blank key
-        pytest.raises(ValueError, match="(?i)cursor"),
+        patch("getpass.getpass", return_value="gem-key-upgrade"),
     ):
-        setup._collect_ai()
+        generated, secrets = setup._collect_ai(existing_gen, {})
+
+    assert generated["ai"]["provider"] == "gemini"
+    assert generated["ai"]["model"] == "gemini-2.5-pro"
+    assert "cursor" not in secrets["ai"]
 
 
 def test_collect_ai_gemini_empty_key_raises() -> None:
@@ -793,3 +804,46 @@ def test_resolve_output_paths_creates_dir() -> None:
         assert gen == base / setup._GENERATED_FILENAME
         assert sec == base / setup._SECRETS_FILENAME
         assert stat.S_IMODE(base.stat().st_mode) == 0o700
+
+
+def test_main_scrubs_legacy_cursor_secrets_before_ai_prompts_complete() -> None:
+    """Legacy pre-#622 Cursor secrets in values.generated.yaml are scrubbed even if setup aborts mid-run."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir)
+        gen = out / setup._GENERATED_FILENAME
+        meta = out / setup._SETUP_META_FILENAME
+        setup._write_values(meta, {"release": "r", "namespace": "n"}, secret=False)
+        setup._write_values(
+            gen,
+            {
+                "route": {"enabled": False},
+                "ingress": {"enabled": False, "tls": {"enabled": False}},
+                "ai": {
+                    "provider": "cursor",
+                    "cursor": {
+                        "apiKey": "legacy-cursor-key",  # pragma: allowlist secret
+                        "authJson": {
+                            "accessToken": "legacy-tok"  # pragma: allowlist secret
+                        },
+                    },
+                },
+            },
+            secret=False,
+        )
+        user_inputs = iter(["", "", "clusterip"])
+        with (
+            patch(
+                "sys.argv",
+                ["helm-setup.py", "--skip-helm", "--output-dir", str(out)],
+            ),
+            patch("builtins.input", side_effect=user_inputs),
+            patch.object(setup, "_collect_ai", side_effect=ValueError("aborted")),
+            patch("shutil.which", return_value=None),
+            pytest.raises(SystemExit),
+        ):
+            setup.main()
+
+        loaded = yaml.safe_load(gen.read_text())
+        cursor_cfg = loaded.get("ai", {}).get("cursor", {})
+        assert "apiKey" not in cursor_cfg
+        assert "authJson" not in cursor_cfg

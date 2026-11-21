@@ -110,7 +110,7 @@ describe('useAiSelection', () => {
 
   it('treats a fallback provider the catalog does not serve as no selection', async () => {
     // The stored server default names a provider this server no longer has (#591).
-    await mount({ provider: 'cursor', model: 'cursor:cursor-grok-4.6-high' })
+    await mount({ provider: 'removed-provider', model: 'removed-model' })
     await waitFor(() => expect(requestedPaths()).toContain('/api/ai-models'))
     expect(pair()).toBe('/')
     // No model listing may be requested for a provider absent from the catalog —
@@ -122,12 +122,12 @@ describe('useAiSelection', () => {
 
   it('offers the catalog providers when the fallback is unavailable, instead of a dead selection', async () => {
     const user = userEvent.setup()
-    render(<PickerHarness provider="cursor" model="cursor:cursor-grok-4.6-high" />)
+    render(<PickerHarness provider="removed-provider" model="removed-model" />)
     await waitFor(() => expect(requestedPaths()).toContain('/api/ai-models'))
     const trigger = screen.getByRole('combobox', { name: 'AI Provider' })
     // No provider selected: the dead provider's name never reaches the trigger.
     await waitFor(() => expect(trigger).toHaveTextContent('Select provider...'))
-    expect(trigger).not.toHaveTextContent('cursor')
+    expect(trigger).not.toHaveTextContent('removed-provider')
     await user.click(trigger)
     const options = (await screen.findAllByRole('option')).map((option) => option.textContent).join(' ')
     expect(options).toMatch(/claude/i)
@@ -181,16 +181,16 @@ describe('useAiSelection', () => {
     // The backend keeps the provider in the catalog with an empty model list and reports
     // modelListingSupported: false, so the provider key exists and a manual pair is usable.
     catalog = {
-      providers: { cursor: [] },
-      provider_status: { cursor: { has_api_key: true, modelListingSupported: false } },
+      providers: { openrouter: [] },
+      provider_status: { openrouter: { has_api_key: true, modelListingSupported: false } },
     }
-    await mount({ provider: 'cursor', model: 'cursor:manual-only' })
-    await waitFor(() => expect(pair()).toBe('cursor/cursor:manual-only'))
+    await mount({ provider: 'openrouter', model: 'openrouter/manual-only' })
+    await waitFor(() => expect(pair()).toBe('openrouter/openrouter/manual-only'))
     expect(screen.getByTestId('settled').textContent).toBe('settled')
   })
 
   it('keeps an in-progress draft even when the fallback is unavailable', async () => {
-    await mount({ provider: 'cursor', model: 'cursor:cursor-grok-4.6-high' })
+    await mount({ provider: 'removed-provider', model: 'removed-model' })
     await waitFor(() => expect(pair()).toBe('/'))
     await click('pick provider')
     await waitFor(() => expect(pair()).toBe('claude/'))

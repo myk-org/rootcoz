@@ -787,12 +787,12 @@ def _builder_holding(path: Path) -> Iterator[None]:
     """Hold ``path``'s workspace install lock in another thread, as a builder does."""
     from concurrent.futures import ThreadPoolExecutor
 
-    from rootcoz.engine.http_mcp import _workspace_install_lock
+    from rootcoz.temp_paths import workspace_lock
 
     entered, release = threading.Event(), threading.Event()
 
     def build() -> None:
-        with _workspace_install_lock(path.resolve()):
+        with workspace_lock(path.resolve()):
             entered.set()
             assert release.wait(3)
 
@@ -1252,3 +1252,40 @@ async def test_clearing_a_chat_that_never_ran_is_a_clean_noop(tmp_path, caplog) 
     assert "capture control reached caplog" in caplog.text
     assert "could not write the delete marker" not in caplog.text, caplog.text
     assert not never_created.parent.exists(), "the cleanup created the missing parent"
+
+
+def test_legacy_http_tools_dump_cleanup_unlinks_regular_files_only(tmp_path) -> None:
+    """Pre-#622 ``.*.rootcoz-http-tools.json`` dumps are purged safely without following symlinks."""
+    from rootcoz.temp_paths import purge_legacy_http_tools_dumps
+
+    dump = tmp_path / ".workspace-old.rootcoz-http-tools.json"
+    dump.write_text('{"tools": []}', encoding="utf-8")
+    keep = tmp_path / ".workspace-old.rootcoz-deleting"
+    keep.write_text("", encoding="utf-8")
+
+    # Symlinked dump file and directory with matching suffix must not be touched.
+    secret_target = tmp_path / "outside.json"
+    secret_target.write_text("keep", encoding="utf-8")
+    symlink_dump = tmp_path / ".workspace-link.rootcoz-http-tools.json"
+    symlink_dump.symlink_to(secret_target)
+    dir_dump = tmp_path / ".workspace-dir.rootcoz-http-tools.json"
+    dir_dump.mkdir()
+
+    # Symlinked parent directory must not be traversed.
+    real_dir = tmp_path / "real-parent"
+    real_dir.mkdir()
+    real_dump = real_dir / ".nested.rootcoz-http-tools.json"
+    real_dump.write_text("{}", encoding="utf-8")
+    link_dir = tmp_path / "link-parent"
+    link_dir.symlink_to(real_dir)
+
+    assert purge_legacy_http_tools_dumps(link_dir) == 0
+    assert purge_legacy_http_tools_dumps(tmp_path / "missing-dir") == 0
+    assert purge_legacy_http_tools_dumps(tmp_path) == 1
+    assert not dump.exists()
+    assert purge_legacy_http_tools_dumps(tmp_path) == 0
+    assert keep.exists()
+    assert symlink_dump.is_symlink()
+    assert secret_target.read_text(encoding="utf-8") == "keep"
+    assert dir_dump.is_dir()
+    assert real_dump.exists()

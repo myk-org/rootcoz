@@ -46,15 +46,48 @@ def _no_host_deployment_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     ("raw", "canonical"),
     [
-        ("cursor-cli", "cli-cursor"),
-        ("claude-cli", "cli-claude"),
-        ("gemini-cli", "cli-gemini"),
         (" OPENAI ", "openai"),
-        ("cli-cursor", "cli-cursor"),
+        ("Google", "google"),
+        ("  google-vertex-claude  ", "google-vertex-claude"),
     ],
 )
 def test_normalize_provider(raw: str, canonical: str) -> None:
     assert normalize_provider(raw) == canonical
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "removed_provider",
+    [
+        "cursor",
+        "cursor-cli",
+        "claude-cli",
+        "gemini-cli",
+        "cli-claude",
+        "cli-gemini",
+        "cli-cursor",
+        "acpx-cursor",
+    ],
+)
+async def test_resolve_catalog_pair_rejects_removed_cli_acpx_cursor_providers(
+    monkeypatch: pytest.MonkeyPatch, removed_provider: str
+) -> None:
+    """Removed CLI/ACPX/Cursor providers and aliases are rejected cleanly."""
+    ai_client.update_model_catalog(None)
+    monkeypatch.setattr(
+        ai_client,
+        "_list_models_raw",
+        AsyncMock(
+            return_value=[
+                {"provider": "google-vertex-claude", "id": "claude-sonnet-4-6"},
+                {"provider": "google", "id": "gemini-2.5-pro"},
+                {"provider": "openai", "id": "gpt-5.4"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    with pytest.raises(ValueError, match="Unknown Pi-sidecar provider/model pair"):
+        await ai_client.resolve_catalog_pair(removed_provider, "claude-sonnet-4-6")
 
 
 @pytest.mark.parametrize(
@@ -126,7 +159,7 @@ async def test_provider_discovery_transport_failure_denies_key_capability(
 def test_build_catalog_groups_duplicate_model_ids_by_exact_provider() -> None:
     catalog = [
         {"id": "shared-model", "name": "OpenAI", "provider": "openai"},
-        {"id": "shared-model", "name": "Cursor", "provider": "cli-cursor"},
+        {"id": "shared-model", "name": "Anthropic", "provider": "anthropic"},
     ]
 
     assert ai_client.build_friendly_catalog(catalog) == {
@@ -138,12 +171,12 @@ def test_build_catalog_groups_duplicate_model_ids_by_exact_provider() -> None:
                 "source": "api",
             }
         ],
-        "cli-cursor": [
+        "anthropic": [
             {
                 "id": "shared-model",
-                "name": "Cursor",
-                "provider": "cli-cursor",
-                "source": "cli",
+                "name": "Anthropic",
+                "provider": "anthropic",
+                "source": "api",
             }
         ],
     }
@@ -152,7 +185,7 @@ def test_build_catalog_groups_duplicate_model_ids_by_exact_provider() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("provider", "model"),
-    [("openai", "gpt-5.4"), ("cli-cursor", "cursor:cursor-grok-4.6-high")],
+    [("openai", "gpt-5.4"), ("google-vertex-claude", "claude-sonnet-4-6")],
 )
 async def test_call_ai_passes_exact_catalog_pair_to_sidecar(
     monkeypatch: pytest.MonkeyPatch, tmp_path, provider: str, model: str
@@ -877,176 +910,24 @@ def test_format_chat_ai_user_error_true_session_not_found() -> None:
     assert "session expired" in msg.lower()
 
 
-def test_format_chat_ai_user_error_auth_admin() -> None:
-    msg = ai_client.format_chat_ai_user_error(
-        "Error: Authentication required. Please run 'agent login' first",
-        is_admin=True,
-        ai_provider="cursor",
-    )
-    assert "CURSOR_API_KEY" in msg
-    assert "does not expire" in msg or "agent login" in msg.lower()
-
-
-def test_format_chat_ai_user_error_auth_non_admin_no_key_leak() -> None:
-    msg = ai_client.format_chat_ai_user_error(
-        "Error: Authentication required. Please run 'agent login' first",
-        is_admin=False,
-        ai_provider="cursor",
-    )
-    assert "CURSOR_API_KEY" not in msg
-    assert "administrator" in msg.lower()
-
-
-def test_format_chat_ai_user_error_generic_auth_not_cursor() -> None:
+def test_format_chat_ai_user_error_generic_auth_admin() -> None:
     msg = ai_client.format_chat_ai_user_error(
         "Error: Authentication required",
         is_admin=True,
         ai_provider="claude",
     )
-    assert "CURSOR_API_KEY" not in msg
     assert "claude" in msg.lower()
-    assert "cursor is unavailable" not in msg.lower()
+    assert "server settings" in msg.lower()
 
 
-def test_format_chat_ai_user_error_generic_auth_non_admin_claude() -> None:
+def test_format_chat_ai_user_error_generic_auth_non_admin() -> None:
     msg = ai_client.format_chat_ai_user_error(
         "Error: not authenticated",
         is_admin=False,
         ai_provider="gemini",
     )
-    assert "CURSOR_API_KEY" not in msg
     assert "gemini" in msg.lower()
-    assert "cursor" not in msg.lower()
-
-
-def test_parse_agent_status_auth_expired() -> None:
-    assert (
-        ai_client._parse_agent_status_text("Not logged in. Run agent login.")
-        == "auth_expired"
-    )
-    assert ai_client._parse_agent_status_text("Logged in as user@example.com") is None
-
-
-@pytest.mark.asyncio
-async def test_probe_cursor_auth_ok_when_models(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ai_client.clear_cursor_auth_cache()
-
-    async def fake_list(_provider: str = ""):
-        return [{"id": "cursor:default[]", "provider": "cursor", "source": "acpx"}]
-
-    monkeypatch.setattr(ai_client, "list_models", fake_list)
-    status = await ai_client.probe_cursor_auth(force=True)
-    assert status["ok"] is True
-    assert status["model_count"] == 1
-
-
-@pytest.mark.asyncio
-async def test_probe_cursor_auth_uses_fresh_model_count_over_stale_cache(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When callers pass model_count, do not return a stale cached probe."""
-    ai_client.clear_cursor_auth_cache()
-    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-
-    async def empty_list(_provider: str = ""):
-        return []
-
-    class FakeProc:
-        returncode = 1
-
-        async def communicate(self):
-            return b"Not logged in\n", b""
-
-        def kill(self):
-            return None
-
-        async def wait(self):
-            return 1
-
-    async def fake_exec(*_a, **_k):
-        return FakeProc()
-
-    monkeypatch.setattr(ai_client, "list_models", empty_list)
-    monkeypatch.setattr(ai_client.asyncio, "create_subprocess_exec", fake_exec)
-    stale = await ai_client.probe_cursor_auth(force=True)
-    assert stale["ok"] is False
-    assert stale["model_count"] == 0
-
-    # Fresh catalog from /api/ai-models: pass count without force — must refresh.
-    fresh = await ai_client.probe_cursor_auth(model_count=3)
-    assert fresh["ok"] is True
-    assert fresh["model_count"] == 3
-
-
-@pytest.mark.asyncio
-async def test_probe_cursor_auth_expired_when_empty_no_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ai_client.clear_cursor_auth_cache()
-    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-
-    async def fake_list(_provider: str = ""):
-        return []
-
-    class FakeProc:
-        returncode = 1
-
-        async def communicate(self):
-            return b"Not logged in\n", b""
-
-        def kill(self):
-            return None
-
-        async def wait(self):
-            return 1
-
-    async def fake_exec(*_a, **_k):
-        return FakeProc()
-
-    monkeypatch.setattr(ai_client, "list_models", fake_list)
-    monkeypatch.setattr(ai_client.asyncio, "create_subprocess_exec", fake_exec)
-    status = await ai_client.probe_cursor_auth(force=True)
-    assert status["ok"] is False
-    assert status["reason"] == "auth_expired"
-    assert status["has_api_key"] is False
-    assert "does not expire" in status["hint"]
-
-
-@pytest.mark.asyncio
-async def test_probe_cursor_auth_key_set_never_auth_expired(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """CURSOR_API_KEY does not expire — never label auth_expired when key is set."""
-    ai_client.clear_cursor_auth_cache()
-    monkeypatch.setenv("CURSOR_API_KEY", "test-key-not-real")
-
-    async def fake_list(_provider: str = ""):
-        return []
-
-    class FakeProc:
-        returncode = 1
-
-        async def communicate(self):
-            return b"Not logged in\n", b""
-
-        def kill(self):
-            return None
-
-        async def wait(self):
-            return 1
-
-    async def fake_exec(*_a, **_k):
-        return FakeProc()
-
-    monkeypatch.setattr(ai_client, "list_models", fake_list)
-    monkeypatch.setattr(ai_client.asyncio, "create_subprocess_exec", fake_exec)
-    status = await ai_client.probe_cursor_auth(force=True)
-    assert status["ok"] is False
-    assert status["reason"] == "api_key_not_applied"
-    assert status["has_api_key"] is True
-    assert "does not expire" in status["hint"]
+    assert "administrator" in msg.lower()
 
 
 class _FakeResponse:
@@ -1427,7 +1308,6 @@ async def test_collect_server_redact_keys_cold_catalog_and_manifest(
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "keys.db")
     await storage.init_db()
     ambient = "sk-" + "ambient" + "9" * 20
-    cursor = "cursor-key-" + "c" * 20
     literal = "literal-manifest-" + "m" * 20
     referenced = "referenced-manifest-" + "r" * 20
     agent_dir = tmp_path / "agent"
@@ -1443,14 +1323,12 @@ async def test_collect_server_redact_keys_cold_catalog_and_manifest(
         )
     )
     monkeypatch.setenv("OPENAI_API_KEY", ambient)
-    monkeypatch.setenv("CURSOR_API_KEY", cursor)
     monkeypatch.setenv("CUSTOM_GATEWAY_KEY", referenced)
     monkeypatch.setattr(ai_client, "_sidecar_agent_dir", lambda: agent_dir)
     # Cold catalog: ambient eligibility is usually derived from this cache.
     ai_client.update_model_catalog(None)
 
     assert ambient in await ai_client._collect_server_redact_keys("openai")
-    assert cursor in await ai_client._collect_server_redact_keys("cli-cursor")
     assert literal in await ai_client._collect_server_redact_keys("openai")
     assert referenced in await ai_client._collect_server_redact_keys("mygateway")
 

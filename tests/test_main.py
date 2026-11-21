@@ -2978,7 +2978,7 @@ class TestAppLifespan:
         from rootcoz import main
 
         # Unrelated startup work opens the database too, and would re-create it.
-        monkeypatch.setattr(main, "_safe_preload_cursor_models", AsyncMock())
+        monkeypatch.setattr(main, "_safe_preload_sidecar_models", AsyncMock())
         started = asyncio.Event()
         release = asyncio.Event()
         real_denorm = main.backfill_results_denorm
@@ -10976,6 +10976,43 @@ class TestStartupWorkspaceReclaim:
         assert len(events) == 1
         assert events[0]["outcome"] == "failure"
         assert events[0]["details"]["survived"] == 1
+
+    async def test_startup_reclaim_purges_legacy_http_tools_dumps(
+        self, _no_host_temp_root, tmp_path, initialized_db
+    ) -> None:
+        """Upgraded hosts purge stale pre-#622 HTTP tools dumps across temp roots."""
+        from rootcoz import main as main_mod
+
+        base = _no_host_temp_root
+        base.mkdir(parents=True, exist_ok=True)
+        await _seed_job_row("live")
+
+        # 1. Analysis workspace sibling dump under rootcoz_temp_base()
+        base_dump = base / ".workspace-old.rootcoz-http-tools.json"
+        base_dump.write_text('{"token": "old"}', encoding="utf-8")
+
+        # 2. Chat job sibling dump + per-user dump inside a KEPT live chat workspace
+        live_chat = _seed_tree(tmp_path / "rootcoz-chat-live", entry="sessions.txt")
+        chat_root_dump = tmp_path / ".rootcoz-chat-live.rootcoz-http-tools.json"
+        chat_root_dump.write_text('{"token": "old"}', encoding="utf-8")
+        nested_user_dump = live_chat / ".alice.rootcoz-http-tools.json"
+        nested_user_dump.write_text('{"token": "old"}', encoding="utf-8")
+
+        # 3. Symlinked dump must not be followed or removed
+        outside = tmp_path / "do-not-delete.json"
+        outside.write_text("keep", encoding="utf-8")
+        symlink_dump = base / ".symlink.rootcoz-http-tools.json"
+        symlink_dump.symlink_to(outside)
+
+        await main_mod._reclaim_abandoned_workspaces({"live"})
+
+        assert not base_dump.exists()
+        assert not chat_root_dump.exists()
+        assert not nested_user_dump.exists()
+        assert live_chat.exists()
+        assert (live_chat / "sessions.txt").exists()
+        assert symlink_dump.is_symlink()
+        assert outside.read_text(encoding="utf-8") == "keep"
 
 
 class TestAnalysisWorkspaceReap:
@@ -19039,8 +19076,8 @@ class TestRefreshAiModelsEndpoint:
         assert response.status_code == 502
 
 
-class TestCursorProviderStatusGating:
-    """#374: Cursor status only when the catalog contains a Cursor provider."""
+class TestAiModelsListingStatus:
+    """Tests for GET /api/ai-models and POST /api/admin/ai-models/refresh."""
 
     @staticmethod
     def _request(*, is_admin: bool) -> SimpleNamespace:
@@ -19065,14 +19102,11 @@ class TestCursorProviderStatusGating:
 
     @pytest.mark.parametrize("is_admin", [True, False])
     @pytest.mark.asyncio
-    async def test_list_all_omits_cursor_without_cursor_provider(
+    async def test_list_all_returns_providers_and_listing_status(
         self, monkeypatch, is_admin: bool
     ) -> None:
-        """A catalog without Cursor reports no cursor status and skips the probe."""
         from rootcoz import main
 
-        probe = AsyncMock(return_value={"ok": False, "reason": "auth_expired"})
-        monkeypatch.setattr(main, "probe_cursor_auth", probe)
         catalog = {"EnMaaS": [{"provider": "EnMaaS", "id": "m1"}]}
         monkeypatch.setattr(
             main, "scoped_models_for_request", AsyncMock(return_value=catalog)
@@ -19083,163 +19117,14 @@ class TestCursorProviderStatusGating:
         data = await main.list_ai_models(self._request(is_admin=is_admin), provider="")
 
         assert data["providers"] == catalog
-        assert "cursor" not in data["provider_status"]
         assert data["provider_status"]["EnMaaS"]["modelListingSupported"] is True
-        probe.assert_not_awaited()
 
-    @pytest.mark.parametrize("cursor_provider", ["cursor", "acpx-cursor"])
-    @pytest.mark.parametrize("is_admin", [True, False])
     @pytest.mark.asyncio
-    async def test_list_all_reports_cursor_provider_with_zero_models(
-        self, monkeypatch, is_admin: bool, cursor_provider: str
+    async def test_list_single_provider_has_no_provider_status(
+        self, monkeypatch
     ) -> None:
-        """A present Cursor provider with no models still reports its status."""
         from rootcoz import main
 
-        raw = {
-            "ok": False,
-            "reason": "auth_expired",
-            "hint": "login expired",
-            "has_api_key": False,
-            "model_count": 0,
-        }
-        probe = AsyncMock(return_value=raw)
-        monkeypatch.setattr(main, "probe_cursor_auth", probe)
-        catalog = {
-            cursor_provider: [],
-            "EnMaaS": [{"provider": "EnMaaS", "id": "m1"}],
-        }
-        monkeypatch.setattr(
-            main, "scoped_models_for_request", AsyncMock(return_value=catalog)
-        )
-        self._patch_listing(monkeypatch, {})
-
-        data = await main.list_ai_models(self._request(is_admin=is_admin), provider="")
-
-        status = data["provider_status"]["cursor"]
-        if is_admin:
-            probe.assert_awaited_once_with(model_count=0)
-            assert status == raw
-        else:
-            probe.assert_not_awaited()
-            assert status == {
-                "ok": False,
-                "reason": "unavailable",
-                "hint": "Cursor is unavailable. Contact an administrator.",
-                "model_count": 0,
-            }
-
-    @pytest.mark.parametrize("is_admin", [True, False])
-    @pytest.mark.asyncio
-    async def test_list_all_drops_listed_cursor_without_cursor_provider(
-        self, monkeypatch, is_admin: bool
-    ) -> None:
-        """A user-credential cursor listing cannot invent a Cursor banner."""
-        from rootcoz import main
-
-        probe = AsyncMock(return_value={"ok": False, "reason": "auth_expired"})
-        monkeypatch.setattr(main, "probe_cursor_auth", probe)
-        catalog = {"EnMaaS": [{"provider": "EnMaaS", "id": "m1"}]}
-        monkeypatch.setattr(
-            main, "scoped_models_for_request", AsyncMock(return_value=catalog)
-        )
-        self._patch_listing(
-            monkeypatch,
-            {
-                "cursor": {
-                    "has_api_key": True,
-                    "modelListingSupported": True,
-                    "model_count": 0,
-                },
-                "EnMaaS": {"modelListingSupported": True},
-            },
-        )
-
-        data = await main.list_ai_models(self._request(is_admin=is_admin), provider="")
-
-        assert "cursor" not in data["provider_status"]
-        assert data["provider_status"]["EnMaaS"]["modelListingSupported"] is True
-        probe.assert_not_awaited()
-
-    @pytest.mark.parametrize("cursor_provider", ["cursor", "acpx-cursor"])
-    @pytest.mark.parametrize("is_admin", [True, False])
-    @pytest.mark.asyncio
-    async def test_list_all_reports_cursor_with_cursor_provider(
-        self, monkeypatch, is_admin: bool, cursor_provider: str
-    ) -> None:
-        """Cursor-present shape stays: admin probe shape, non-admin coarse shape."""
-        from rootcoz import main
-
-        raw = {
-            "ok": False,
-            "reason": "auth_expired",
-            "hint": "login expired",
-            "has_api_key": True,
-            "model_count": 2,
-        }
-        probe = AsyncMock(return_value=raw)
-        monkeypatch.setattr(main, "probe_cursor_auth", probe)
-        cursor_models = [
-            {"provider": cursor_provider, "id": "c1"},
-            {"provider": cursor_provider, "id": "c2"},
-        ]
-        monkeypatch.setattr(
-            main,
-            "scoped_models_for_request",
-            AsyncMock(
-                return_value={
-                    cursor_provider: cursor_models,
-                    "EnMaaS": [{"provider": "EnMaaS", "id": "m1"}],
-                }
-            ),
-        )
-        self._patch_listing(monkeypatch, {})
-
-        data = await main.list_ai_models(self._request(is_admin=is_admin), provider="")
-
-        status = data["provider_status"]["cursor"]
-        if is_admin:
-            probe.assert_awaited_once_with(model_count=2)
-            assert status["has_api_key"] is True
-            assert status["reason"] == "auth_expired"
-        else:
-            probe.assert_not_awaited()
-            assert status == {
-                "ok": True,
-                "reason": None,
-                "hint": None,
-                "model_count": 2,
-            }
-
-    @pytest.mark.asyncio
-    async def test_list_cursor_provider_keeps_status(self, monkeypatch) -> None:
-        """Single-provider Cursor listing is unchanged."""
-        from rootcoz import main
-
-        monkeypatch.setattr(
-            main, "probe_cursor_auth", AsyncMock(return_value={"ok": True})
-        )
-        monkeypatch.setattr(
-            main,
-            "scoped_models_for_request",
-            AsyncMock(return_value={"cursor": [{"provider": "cursor", "id": "c1"}]}),
-        )
-        self._patch_listing(monkeypatch, {})
-
-        data = await main.list_ai_models(
-            self._request(is_admin=True), provider="cursor"
-        )
-
-        assert data["provider"] == "cursor"
-        assert data["provider_status"]["cursor"]["ok"] is True
-
-    @pytest.mark.asyncio
-    async def test_list_non_cursor_provider_has_no_status(self, monkeypatch) -> None:
-        """Single-provider non-Cursor listing never carries provider_status."""
-        from rootcoz import main
-
-        probe = AsyncMock(return_value={"ok": True})
-        monkeypatch.setattr(main, "probe_cursor_auth", probe)
         monkeypatch.setattr(
             main,
             "scoped_models_for_request",
@@ -19252,23 +19137,15 @@ class TestCursorProviderStatusGating:
         )
 
         assert "provider_status" not in data
-        probe.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_refresh_omits_cursor_without_cursor_provider(
+    async def test_refresh_returns_models_without_provider_status(
         self, monkeypatch
     ) -> None:
-        """Admin refresh skips the probe and the cursor key without Cursor."""
         from rootcoz import main
 
         mock_models = [{"provider": "EnMaaS", "id": "m1", "name": "M1"}]
-        probe = AsyncMock(return_value={"ok": False, "reason": "auth_expired"})
-        monkeypatch.setattr(main, "probe_cursor_auth", probe)
         monkeypatch.setattr(main, "update_model_catalog", lambda models: None)
-        monkeypatch.setattr(main, "clear_cursor_auth_cache", lambda: None)
-        monkeypatch.setattr(
-            main, "registered_provider_ids", AsyncMock(return_value=set())
-        )
         monkeypatch.setattr(
             main,
             "capture_deployment_provider_listings",
@@ -19283,7 +19160,6 @@ class TestCursorProviderStatusGating:
         assert data["models"] == mock_models
         assert data["count"] == 1
         assert "provider_status" not in data
-        probe.assert_not_awaited()
 
     @pytest.mark.parametrize(
         "registry_payload",
@@ -19316,101 +19192,6 @@ class TestCursorProviderStatusGating:
 
         assert response.status_code == 200
         assert response.json()["models"] == mock_models
-
-    @pytest.mark.parametrize("cursor_provider", ["cursor", "acpx-cursor"])
-    @pytest.mark.asyncio
-    async def test_refresh_reports_registered_cursor_with_zero_models(
-        self, monkeypatch, cursor_provider: str
-    ) -> None:
-        """A registered Cursor provider with zero refreshed models is probed."""
-        from rootcoz import main
-
-        raw = {"ok": False, "reason": "auth_expired", "hint": "login expired"}
-        probe = AsyncMock(return_value=raw)
-        monkeypatch.setattr(main, "probe_cursor_auth", probe)
-        monkeypatch.setattr(main, "update_model_catalog", lambda models: None)
-        monkeypatch.setattr(main, "clear_cursor_auth_cache", lambda: None)
-        monkeypatch.setattr(
-            main, "registered_provider_ids", AsyncMock(return_value={cursor_provider})
-        )
-        monkeypatch.setattr(
-            main,
-            "capture_deployment_provider_listings",
-            AsyncMock(return_value={}),
-        )
-        with patch("pi_sidecar_client.get_sidecar_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.refresh_models.return_value = []
-            mock_get_client.return_value = mock_client
-            data = await main.refresh_ai_models(self._request(is_admin=True))
-
-        probe.assert_awaited_once_with(force=True)
-        assert data["provider_status"]["cursor"] == raw
-
-    @pytest.mark.parametrize("cursor_provider", ["cursor", "acpx-cursor"])
-    @pytest.mark.asyncio
-    async def test_refresh_reports_cursor_with_cursor_provider(
-        self, monkeypatch, cursor_provider: str
-    ) -> None:
-        """Admin refresh keeps the forced Cursor probe when Cursor is present."""
-        from rootcoz import main
-
-        mock_models = [{"provider": cursor_provider, "id": "c1", "name": "C1"}]
-        raw = {"ok": True, "reason": None, "hint": None, "has_api_key": False}
-        probe = AsyncMock(return_value=raw)
-        monkeypatch.setattr(main, "probe_cursor_auth", probe)
-        monkeypatch.setattr(main, "update_model_catalog", lambda models: None)
-        monkeypatch.setattr(main, "clear_cursor_auth_cache", lambda: None)
-        monkeypatch.setattr(
-            main, "registered_provider_ids", AsyncMock(return_value=set())
-        )
-        monkeypatch.setattr(
-            main,
-            "capture_deployment_provider_listings",
-            AsyncMock(return_value={}),
-        )
-        with patch("pi_sidecar_client.get_sidecar_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.refresh_models.return_value = mock_models
-            mock_get_client.return_value = mock_client
-            data = await main.refresh_ai_models(self._request(is_admin=True))
-
-        probe.assert_awaited_once_with(force=True)
-        assert data["provider_status"]["cursor"] == raw
-
-
-class TestCursorStatusForClient:
-    """Tests for _cursor_status_for_client credential redaction."""
-
-    def test_admin_keeps_has_api_key(self) -> None:
-        from rootcoz.main import _cursor_status_for_client
-
-        raw = {
-            "ok": False,
-            "reason": "auth_expired",
-            "hint": "login expired",
-            "has_api_key": False,
-            "model_count": 0,
-        }
-        out = _cursor_status_for_client(raw, is_admin=True)
-        assert out["has_api_key"] is False
-        assert out["reason"] == "auth_expired"
-        assert out["hint"] == "login expired"
-
-    def test_non_admin_strips_credential_state(self) -> None:
-        from rootcoz.main import _cursor_status_for_client
-
-        raw = {
-            "ok": False,
-            "reason": "api_key_not_applied",
-            "hint": "CURSOR_API_KEY is set but unavailable",
-            "has_api_key": True,
-            "model_count": 0,
-        }
-        out = _cursor_status_for_client(raw, is_admin=False)
-        assert "has_api_key" not in out
-        assert out["reason"] == "unavailable"
-        assert "administrator" in out["hint"].lower()
 
 
 @pytest.mark.asyncio

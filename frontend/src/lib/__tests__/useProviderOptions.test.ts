@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   _resetProviderCatalogCacheForTests,
   resetProviderCatalogCache,
-  useCursorAuthStatus,
   useEnabledProviders,
   useProviderCatalog,
   useProviderOptions,
@@ -49,7 +48,6 @@ describe('useProviderCatalog shared fetch', () => {
 
     const a = renderHook(() => useProviderCatalog())
     const b = renderHook(() => useEnabledProviders())
-    const c = renderHook(() => useCursorAuthStatus())
 
     expect(getMock).toHaveBeenCalledTimes(1)
     expect(getMock).toHaveBeenCalledWith('/api/ai-models')
@@ -57,26 +55,25 @@ describe('useProviderCatalog shared fetch', () => {
     await act(async () => {
       resolveGet({
         providers: {
-          cursor: [{ id: 'cursor:1', name: 'One' }],
+          openai: [{ id: 'gpt-5', name: 'GPT-5' }],
           claude: [],
           gemini: [],
         },
         provider_status: {
-          cursor: { ok: false, reason: 'unavailable', hint: 'down' },
+          openai: { has_api_key: true, modelListingSupported: true, model_count: 1 },
         },
       })
     })
 
     await waitFor(() => {
-      expect(a.result.current.enabled).toEqual(['cursor'])
-      expect(b.result.current).toEqual(['cursor'])
-      expect(c.result.current?.ok).toBe(false)
+      expect(a.result.current.enabled).toEqual(['openai'])
+      expect(b.result.current).toEqual(['openai'])
+      expect(a.result.current.providerStatus.openai?.has_api_key).toBe(true)
     })
 
     expect(getMock).toHaveBeenCalledTimes(1)
     a.unmount()
     b.unmount()
-    c.unmount()
   })
 
   it('normalizes mixed-case provider IDs so lookups via normalizeProvider resolve', async () => {
@@ -102,7 +99,10 @@ describe('useProviderCatalog shared fetch', () => {
         foo: [{ id: 'other-model', credential_sources: ['server'], verified: true }],
         openai: [{ id: 'gpt-5', credential_sources: ['server'], verified: true }],
       },
-      provider_status: { Foo: { ok: true }, foo: { ok: false } },
+      provider_status: {
+        Foo: { has_api_key: true, modelListingSupported: true },
+        foo: { has_api_key: true, modelListingSupported: false },
+      },
     }))
     const { result } = renderHook(() => useProviderCatalog())
     // Ambiguous case-variant IDs are unusable downstream (the backend
@@ -188,10 +188,10 @@ describe('useProviderCatalog shared fetch', () => {
     unmount()
   })
 
-  it('does not add diagnostic-only cursor to provider options', async () => {
+  it('does not add status-only providers to provider options', async () => {
     getMock.mockResolvedValue({
       providers: { openai: [{ id: 'gpt-5', name: 'GPT 5' }] },
-      provider_status: { cursor: { ok: false, reason: 'unavailable', hint: 'down' } },
+      provider_status: { openrouter: { has_api_key: true, modelListingSupported: false } },
     })
     const { result } = renderHook(() => useProviderOptions())
 
@@ -202,30 +202,30 @@ describe('useProviderCatalog shared fetch', () => {
     getMock
       .mockResolvedValueOnce({
         providers: {
-          cursor: [{ id: 'cursor:1', name: 'One' }],
+          openai: [{ id: 'gpt-5', name: 'GPT-5' }],
           claude: [],
           gemini: [],
         },
         provider_status: {
-          cursor: { ok: false, reason: 'unavailable', hint: 'stale' },
+          openai: { has_api_key: true, modelListingSupported: false },
         },
       })
       .mockResolvedValueOnce({
         providers: {
-          cursor: [{ id: 'cursor:1', name: 'One' }],
+          openai: [{ id: 'gpt-5', name: 'GPT-5' }],
           claude: [{ id: 'claude:1', name: 'Sonnet' }],
           gemini: [],
         },
         provider_status: {
-          cursor: { ok: true, reason: null, hint: null },
+          openai: { has_api_key: true, modelListingSupported: true, model_count: 1 },
         },
       })
 
     const { result, unmount } = renderHook(() => useProviderCatalog())
 
     await waitFor(() => {
-      expect(result.current.enabled).toEqual(['cursor'])
-      expect(result.current.providerStatus.cursor?.ok).toBe(false)
+      expect(result.current.enabled).toEqual(['openai'])
+      expect(result.current.providerStatus.openai?.modelListingSupported).toBe(false)
     })
     expect(getMock).toHaveBeenCalledTimes(1)
 
@@ -235,10 +235,10 @@ describe('useProviderCatalog shared fetch', () => {
 
     await waitFor(() => {
       expect(result.current.enabled).toEqual(
-        expect.arrayContaining(['cursor', 'claude']),
+        expect.arrayContaining(['openai', 'claude']),
       )
       expect(result.current.enabled).toHaveLength(2)
-      expect(result.current.providerStatus.cursor?.ok).toBe(true)
+      expect(result.current.providerStatus.openai?.modelListingSupported).toBe(true)
     })
     expect(getMock).toHaveBeenCalledTimes(2)
     unmount()

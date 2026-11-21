@@ -23,21 +23,20 @@ describe('completeAiPairOverride', () => {
 })
 
 describe('analysisAiUnavailablePart', () => {
-  const cursorModels: Record<string, AiModel[]> = {
-    'cli-cursor': [{ id: 'cursor:cursor-grok-4.6-high', name: 'Grok', provider: 'cli-cursor', credential_sources: ['server'], verified: true }],
+  const catalogModels: Record<string, AiModel[]> = {
+    openai: [{ id: 'gpt-5', name: 'GPT-5', provider: 'openai', credential_sources: ['server'], verified: true }],
   }
 
-  it('names the provider when only a synthetic status key matches', () => {
-    // The backend adds `provider_status.cursor` whenever any Cursor-family provider
-    // is registered, while `providers` only carries the real ids. The picker never
-    // lists a bare `cursor`, so the notice must not blame the model (#591).
-    const status = { cursor: { ok: true, reason: null, hint: null, model_count: 1 } }
-    expect(analysisAiUnavailablePart(cursorModels, status, 'cursor', 'cursor:cursor-grok-4.6-high')).toBe('provider')
+  it('names the provider when only a status key matches', () => {
+    // `providers` is what the picker offers; a status-only entry without a catalog
+    // provider must still blame the provider, not the model (#591).
+    const status = { 'removed-provider': { has_api_key: true, modelListingSupported: true, model_count: 0 } }
+    expect(analysisAiUnavailablePart(catalogModels, status, 'removed-provider', 'some-model')).toBe('provider')
   })
 
   it('still names the model when the catalog lists the provider', () => {
-    expect(analysisAiUnavailablePart(cursorModels, {}, 'cli-cursor', 'cursor:other')).toBe('model')
-    expect(analysisAiUnavailablePart(cursorModels, {}, 'cli-cursor', 'cursor:cursor-grok-4.6-high')).toBe('model')
+    expect(analysisAiUnavailablePart(catalogModels, {}, 'openai', 'other-model')).toBe('model')
+    expect(analysisAiUnavailablePart(catalogModels, {}, 'openai', 'gpt-5')).toBe('model')
   })
 })
 

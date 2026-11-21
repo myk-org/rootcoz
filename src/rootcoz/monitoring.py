@@ -389,7 +389,7 @@ def _compute_component_versions() -> dict[str, Any]:
     else:
         versions.update(dict.fromkeys(_SIDECAR_COMPONENT_PACKAGES))
 
-    for key, binary in (("node", "node"), ("acpx", "acpx")):
+    for key, binary in (("node", "node"),):
         if shutil.which(binary) is None:
             versions[key] = None
             continue

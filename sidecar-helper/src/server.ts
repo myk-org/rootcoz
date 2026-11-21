@@ -46,7 +46,7 @@ function resolvePiCli(): string {
 
 process.argv[1] = resolvePiCli();
 
-// rootcoz requires pi-coding-agent >= 0.84.0 (http-tools MCP contract).
+// rootcoz requires pi-coding-agent >= 0.84.0.
 // pi-sidecar's own MIN_PI_VERSION floor may be lower, so enforce ours here.
 const MIN_PI_VERSION = "0.84.0";
 
@@ -92,6 +92,11 @@ function assertPiVersion(): void {
 }
 
 assertPiVersion();
+
+// CLI and ACPX providers are not supported in rootcoz; clear any stale env
+// vars so @myk-org/pi-sidecar cannot re-enable them.
+delete process.env.ACPX_AGENTS;
+delete process.env.CLI_AGENTS;
 
 import { startSidecar } from "@myk-org/pi-sidecar";
 

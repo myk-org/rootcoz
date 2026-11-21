@@ -133,7 +133,7 @@ export function useEnabledProviders(): string[] {
 }
 
 /**
- * Models catalog + provider_status (e.g. cursor auth).
+ * Models catalog + per-provider listing capability status.
  *
  * The catalog already carries a `credential_sources` list per model and the
  * per-user server grant, so one request serves every consumer: a granted user
@@ -186,33 +186,18 @@ export function useProviderCatalog(): {
 }
 
 /**
- * Provider dropdown options: providers with models, plus current selection,
- * plus providers with a non-ok status (e.g. Cursor auth expired — keep visible).
+ * Provider dropdown options: catalog providers plus any current selection.
  */
 export function useProviderOptions(
   currentValues: string | string[] | undefined = undefined,
 ): AiProviderOption[] {
-  const { providerKeys, providerStatus } = useProviderCatalog()
+  const { providerKeys } = useProviderCatalog()
   const currentKey = Array.isArray(currentValues)
     ? currentValues.join('\0')
     : (currentValues ?? '')
 
   return useMemo(() => {
     const current = currentKey ? currentKey.split('\0') : []
-    const knownProviders = new Set([...providerKeys, ...current])
-    const keepVisible = Object.entries(providerStatus)
-      .filter(([id, st]) => st && st.ok === false && knownProviders.has(id))
-      .map(([id]) => id)
-    return buildProviderOptions(providerKeys, [...current, ...keepVisible])
-  }, [providerKeys, currentKey, providerStatus])
-}
-
-/**
- * Cursor auth banner copy when provider_status.cursor.ok === false.
- */
-export function useCursorAuthStatus(): ProviderStatus | null {
-  const { providerStatus } = useProviderCatalog()
-  const st = providerStatus.cursor
-  if (!st || st.ok) return null
-  return st
+    return buildProviderOptions(providerKeys, current)
+  }, [providerKeys, currentKey])
 }
