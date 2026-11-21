@@ -28760,6 +28760,15 @@ async def _migrate_legacy_admin_artifacts() -> None:
         )
         return
 
+    from rootcoz.temp_paths import sanitize_path_part
+
+    users = await storage.list_users()
+    sanitized_to_users: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for user in users:
+        uname = str(user.get("username", ""))
+        if uname:
+            sanitized_to_users[sanitize_path_part(uname)].append(user)
+
     for entry in entries:
         name = entry.name
         if (
@@ -28769,9 +28778,16 @@ async def _migrate_legacy_admin_artifacts() -> None:
             or not entry.is_dir()
         ):
             continue
-        row = await storage.get_user_by_username(name)
-        if row is not None:
-            target_dir = _get_admin_artifacts_dir(name, owner_id=int(row["id"]))
+        matches = sanitized_to_users.get(name, [])
+        # Migrate only when a single DB account maps unambiguously to this
+        # sanitized legacy directory name; purge orphaned (0) or colliding
+        # (>1, e.g. `a..b` and `a_b`) directories rather than risking cross-
+        # account disclosure.
+        if len(matches) == 1:
+            row = matches[0]
+            target_dir = _get_admin_artifacts_dir(
+                str(row["username"]), owner_id=int(row["id"])
+            )
 
             def _move_dir(src: Path = entry, dst: Path = target_dir) -> None:
                 if src.is_symlink() or dst.parent.is_symlink() or dst.is_symlink():
@@ -28797,16 +28813,22 @@ async def _migrate_legacy_admin_artifacts() -> None:
                 await asyncio.to_thread(_move_dir)
                 logger.info(
                     "Admin chat: migrated legacy artifacts for '%s' to owner %s",
-                    name,
+                    row["username"],
                     row["id"],
                 )
             except OSError:
                 logger.warning(
                     "Admin chat: failed to migrate legacy artifacts for '%s'",
-                    name,
+                    row["username"],
                     exc_info=True,
                 )
         else:
+            if len(matches) > 1:
+                logger.warning(
+                    "Admin chat: purging ambiguous legacy artifact dir '%s' matching %d accounts",
+                    name,
+                    len(matches),
+                )
             await cleanup_off_loop(
                 f"legacy-artifacts:{name}", partial(delete_tree, entry)
             )

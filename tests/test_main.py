@@ -22818,11 +22818,14 @@ class TestUserLifecycleAndAdminSseRevocation:
         await storage.create_admin_user("existing-adm")
         await storage.create_user("demoted-adm", role="reviewer")
         await storage.create_admin_user("symlink-adm")
+        await storage.create_admin_user("a..b")
+        await storage.create_user("a_b", role="reviewer")
         row = await storage.get_user_by_username("existing-adm")
         assert row is not None
 
         legacy_id = "22222222-2222-4222-8222-222222222222"
         demoted_id = "33333333-3333-4333-8333-333333333333"
+        colliding_id = "44444444-4444-4444-8444-444444444444"
         active_legacy = main_module._ADMIN_ARTIFACTS_BASE / "existing-adm"
         active_legacy.mkdir(parents=True, exist_ok=True)
         (active_legacy / f"{legacy_id}.html").write_text(
@@ -22836,6 +22839,11 @@ class TestUserLifecycleAndAdminSseRevocation:
         orphan_legacy = main_module._ADMIN_ARTIFACTS_BASE / "deleted-adm"
         orphan_legacy.mkdir(parents=True, exist_ok=True)
         (orphan_legacy / "old.html").write_text("<h1>orphan</h1>", encoding="utf-8")
+        colliding_legacy = main_module._ADMIN_ARTIFACTS_BASE / "a_b"
+        colliding_legacy.mkdir(parents=True, exist_ok=True)
+        (colliding_legacy / f"{colliding_id}.html").write_text(
+            "<h1>ambiguous</h1>", encoding="utf-8"
+        )
 
         outside_dir = tmp_path / "outside-secret"
         outside_dir.mkdir()
@@ -22849,8 +22857,18 @@ class TestUserLifecycleAndAdminSseRevocation:
         assert not active_legacy.exists()
         assert not demoted_legacy.exists()
         assert not orphan_legacy.exists()
+        assert not colliding_legacy.exists()
         # Symlink target must never be moved or touched.
         assert outside_file.exists()
+
+        # Ambiguous sanitized dir (`a..b` vs `a_b`) must never be assigned to a_b.
+        await storage.change_user_role("a_b", "admin")
+        ab_req = SimpleNamespace(
+            state=SimpleNamespace(username="a_b", role="admin", is_admin=True)
+        )
+        with pytest.raises(HTTPException) as ab_exc:
+            await main_module.get_admin_chat_artifact(colliding_id, ab_req)
+        assert ab_exc.value.status_code == 404
 
         adm_req = SimpleNamespace(
             state=SimpleNamespace(username="existing-adm", role="admin", is_admin=True)
