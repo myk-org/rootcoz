@@ -41,6 +41,7 @@ from rootcoz.prow_validation import (
 from rootcoz.repository import RESERVED_REPO_NAMES
 from rootcoz.url_utils import (
     mask_stored_url,
+    strip_url_userinfo,
     validate_http_url,
     validate_public_https_url,
 )
@@ -875,9 +876,14 @@ class ChildJobAnalysis(BaseModel):
 
     @model_validator(mode="after")
     def _sync_build_url_aliases(self) -> ChildJobAnalysis:
-        self.build_url, self.jenkins_url = _apply_build_url_aliases(
+        build_url, jenkins_url = _apply_build_url_aliases(
             self.build_url, self.jenkins_url
         )
+        if build_url:
+            build_url = strip_url_userinfo(build_url)
+        if jenkins_url:
+            jenkins_url = strip_url_userinfo(jenkins_url)
+        self.build_url, self.jenkins_url = build_url, jenkins_url
         return self
 
 
@@ -1553,10 +1559,11 @@ class SetTrackedInRequest(_ChildJobFieldsValidator):
     @field_validator("url")
     @classmethod
     def validate_url(cls, v: str) -> str:
-        return (
+        validated = (
             validate_http_url(v, field_name="url", allowed_schemes=("http", "https"))
             or ""
         )
+        return strip_url_userinfo(validated) if validated else ""
 
 
 class ClassifyTestRequest(BaseModel):

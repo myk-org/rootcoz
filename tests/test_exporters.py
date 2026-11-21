@@ -1395,3 +1395,226 @@ class TestExporterModel:
             "allow_unreviewed_push": False,
         }
         assert isinstance(d["allow_unreviewed_push"], bool)
+
+
+class TestExportUrlCredentialStripping:
+    """Regression tests for #600: strip embedded URL userinfo across export paths."""
+
+    def test_export_context_strips_userinfo_from_all_urls(self):
+        ctx = ExportContext(
+            job_id="job-600",
+            job_name="child-suite",
+            build_number="5",
+            jenkins_url="https://ci_user:ci_secret_pw@jenkins.example.com/job/child-suite/5/",  # pragma: allowlist secret
+            failures=[{"test_name": "test_a"}],
+            report_url="https://rc_user:rc_secret@rootcoz.example.com/results/job-600",  # pragma: allowlist secret
+            tracked_in_links={
+                "test_a": [
+                    {
+                        "tracked_in_url": "https://jira_user:jira_secret@jira.example.com/browse/PROJ-1",  # pragma: allowlist secret
+                        "tracked_in_type": "jira",
+                    },
+                    {
+                        "url": "https://gh_user:gh_secret@github.com/org/repo/issues/9",  # pragma: allowlist secret
+                    },
+                ]
+            },
+        )
+        assert ctx.jenkins_url == "https://jenkins.example.com/job/child-suite/5/"
+        assert ctx.report_url == "https://rootcoz.example.com/results/job-600"
+        assert (
+            ctx.tracked_in_links["test_a"][0]["tracked_in_url"]
+            == "https://jira.example.com/browse/PROJ-1"
+        )
+        assert (
+            ctx.tracked_in_links["test_a"][1]["url"]
+            == "https://github.com/org/repo/issues/9"
+        )
+        for secret in ("ci_secret_pw", "rc_secret", "jira_secret", "gh_secret"):
+            assert secret not in repr(ctx)
+
+    def test_build_export_context_strips_child_jenkins_url_and_tracked_in_credentials(
+        self,
+    ):
+        import asyncio
+
+        from rootcoz.main import _build_export_context
+
+        result_data = {
+            "job_name": "parent-pipeline",
+            "build_number": 10,
+            "jenkins_url": "https://jenkins.example.com/job/parent-pipeline/10/",
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "child-suite",
+                    "build_number": 5,
+                    "jenkins_url": "https://ci_user:ci_secret_pw@jenkins.example.com/job/child-suite/5/",  # pragma: allowlist secret
+                    "failures": [{"test_name": "test_child_fail"}],
+                }
+            ],
+        }
+        with (
+            patch(
+                "rootcoz.main._extract_base_url",
+                return_value="https://rc_user:rc_secret@rootcoz.example.com",  # pragma: allowlist secret
+            ),
+            patch(
+                "rootcoz.main.storage.get_tracked_in_for_scope",
+                new_callable=AsyncMock,
+                return_value={
+                    "test_child_fail": [
+                        {
+                            "tracked_in_url": "https://jira_user:jira_secret@jira.example.com/browse/PROJ-1",  # pragma: allowlist secret
+                            "tracked_in_type": "jira",
+                            "tracked_in_by": "reviewer",
+                        }
+                    ]
+                },
+            ),
+            patch(
+                "rootcoz.main.storage.get_reviews_for_job",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
+                "rootcoz.main.storage.get_job_metadata",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            ctx = asyncio.run(
+                _build_export_context(
+                    job_id="job-child-600",
+                    result_data=result_data,
+                    settings=MagicMock(),
+                    child_job_name="child-suite",
+                    child_build_number=5,
+                    fetch_history=False,
+                    fetch_tracked_in_links=True,
+                )
+            )
+
+        assert ctx.jenkins_url == "https://jenkins.example.com/job/child-suite/5/"
+        assert (
+            ctx.report_url
+            == "https://rootcoz.example.com/results/job-child-600#child-child-suite-5"
+        )
+        assert (
+            ctx.tracked_in_links["test_child_fail"][0]["tracked_in_url"]
+            == "https://jira.example.com/browse/PROJ-1"
+        )
+        for secret in ("ci_user", "ci_secret_pw", "rc_secret", "jira_secret"):
+            assert secret not in repr(ctx)
+
+    def test_build_export_context_strips_parent_build_url_credentials(self):
+        import asyncio
+
+        from rootcoz.main import _build_export_context
+
+        result_data = {
+            "job_name": "parent-pipeline",
+            "build_number": 10,
+            "build_url": "https://ci_user:ci_secret_pw@jenkins.example.com/job/parent-pipeline/10/",  # pragma: allowlist secret
+            "failures": [],
+        }
+        with (
+            patch("rootcoz.main._extract_base_url", return_value=""),
+            patch(
+                "rootcoz.main.storage.get_job_metadata",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            ctx = asyncio.run(
+                _build_export_context(
+                    job_id="job-parent-600",
+                    result_data=result_data,
+                    settings=MagicMock(),
+                    fetch_history=False,
+                    fetch_tracked_in_links=False,
+                )
+            )
+
+        assert ctx.jenkins_url == "https://jenkins.example.com/job/parent-pipeline/10/"
+        assert ctx.report_url == ""
+
+    def test_child_job_analysis_jenkins_source_and_tracked_in_request_strip_userinfo(
+        self,
+    ):
+        from rootcoz.config import Settings
+        from rootcoz.models import ChildJobAnalysis, SetTrackedInRequest
+        from rootcoz.sources.jenkins_source import JenkinsSource, build_jenkins_url
+
+        assert (
+            build_jenkins_url(
+                "https://ci_user:ci_secret@jenkins.example.com",  # pragma: allowlist secret
+                "folder/child",
+                5,
+            )
+            == "https://jenkins.example.com/job/folder/job/child/5/"
+        )
+
+        settings = Settings(
+            jenkins_url="https://ci_user:ci_secret@jenkins.example.com",  # pragma: allowlist secret
+        )
+        source = JenkinsSource(
+            job_name="child-suite", build_number=5, settings=settings
+        )
+        assert source.build_url == "https://jenkins.example.com/job/child-suite/5/"
+
+        child = ChildJobAnalysis(
+            job_name="child-suite",
+            build_number=5,
+            jenkins_url="https://ci_user:ci_secret@jenkins.example.com/job/child-suite/5/",  # pragma: allowlist secret
+        )
+        assert child.build_url == "https://jenkins.example.com/job/child-suite/5/"
+        assert child.jenkins_url == "https://jenkins.example.com/job/child-suite/5/"
+
+        req = SetTrackedInRequest(
+            test_name="test_a",
+            url="https://jira_user:jira_secret@jira.example.com/browse/PROJ-1",  # pragma: allowlist secret
+            type="jira",
+        )
+        assert req.url == "https://jira.example.com/browse/PROJ-1"
+
+    async def test_storage_tracked_in_link_strips_userinfo(self, tmp_path):
+        from rootcoz import storage
+
+        db_path = tmp_path / "test_tracked_in.db"
+        with patch.object(storage, "DB_PATH", db_path):
+            await storage.init_db()
+            await storage.save_result(
+                "job-til-600", status="completed", result={"summary": "s"}
+            )
+            await storage.add_tracked_in_link(
+                job_id="job-til-600",
+                test_name="test_new",
+                url="https://jira_user:jira_secret@jira.example.com/browse/PROJ-1",  # pragma: allowlist secret
+                tracked_type="jira",
+            )
+            # Simulate a pre-existing legacy DB row that retained credentials
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO tracked_in_links "
+                    "(job_id, test_name, child_job_name, child_build_number, url, type, created_by) "
+                    "VALUES (?, ?, '', 0, ?, 'jira', 'legacy')",
+                    (
+                        "job-til-600",
+                        "test_legacy",
+                        "https://old_user:old_secret@jira.example.com/browse/PROJ-2",  # pragma: allowlist secret
+                    ),
+                )
+                await db.commit()
+
+            scoped = await storage.get_tracked_in_for_scope("job-til-600")
+            assert (
+                scoped["test_new"][0]["tracked_in_url"]
+                == "https://jira.example.com/browse/PROJ-1"
+            )
+            assert (
+                scoped["test_legacy"][0]["tracked_in_url"]
+                == "https://jira.example.com/browse/PROJ-2"
+            )
+            assert "jira_secret" not in repr(scoped)
+            assert "old_secret" not in repr(scoped)

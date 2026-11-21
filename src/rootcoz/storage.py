@@ -55,6 +55,7 @@ from rootcoz.models import (
     OverrideClassificationLiteral,
     PatternLiteral,
 )
+from rootcoz.url_utils import sanitize_http_href
 
 if TYPE_CHECKING:
     from rootcoz.issue_attachments import ValidatedAttachment
@@ -5979,6 +5980,7 @@ async def add_tracked_in_link(
     Returns:
         ID of the inserted row, or 0 if URL is empty.
     """
+    url = sanitize_http_href(url)
     if not url:
         return 0
     async with _connect_db() as db:
@@ -6068,7 +6070,7 @@ async def get_tracked_in_for_job(job_id: str) -> dict[str, list[dict[str, Any]]]
             result.setdefault(key, []).append(
                 {
                     "id": row["id"],
-                    "tracked_in_url": row["url"],
+                    "tracked_in_url": sanitize_http_href(row["url"]),
                     "tracked_in_type": row["type"],
                     "tracked_in_by": row["created_by"],
                 }
@@ -6119,7 +6121,7 @@ async def get_tracked_in_for_scope(
         for row in rows:
             result.setdefault(row["test_name"], []).append(
                 {
-                    "tracked_in_url": row["url"],
+                    "tracked_in_url": sanitize_http_href(row["url"]),
                     "tracked_in_type": row["type"],
                     "tracked_in_by": row["created_by"],
                 }
