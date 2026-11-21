@@ -220,35 +220,77 @@ def _scrub_credentials(target_dir: Path, repo_url: str | HttpUrl) -> None:
     tokens nor caller-supplied URL credentials (userinfo, query, fragment) remain
     on disk in .git/config, FETCH_HEAD, or reflogs.
     No-op if .git directory does not exist (e.g. clone failed before creating it).
+
+    Raises:
+        RuntimeError: If scrubbing ``remote.origin.url``, ``FETCH_HEAD``, or
+            ``.git/logs`` fails on an initialized git repository.
     """
     git_dir = target_dir / ".git"
     if not git_dir.exists():
         return
     clean_url = strip_url_credentials(str(repo_url))
-    git_executable = shutil.which("git")
-    if git_executable:
-        result = subprocess.run(
-            [git_executable, "remote", "set-url", "origin", clean_url],
-            cwd=target_dir,
-            check=False,
-            capture_output=True,
-        )
+    has_git_config = git_dir.is_file() or (
+        git_dir.is_dir() and not git_dir.is_symlink() and (git_dir / "config").is_file()
+    )
+    if has_git_config:
+        git_executable = Git.GIT_PYTHON_GIT_EXECUTABLE or shutil.which("git")
+        if not git_executable:
+            logger.warning(
+                "Cannot scrub repository credentials in %s: git executable not found",
+                target_dir,
+            )
+            raise RuntimeError(
+                "Cannot scrub repository credentials: git executable not found"
+            )
+        try:
+            result = subprocess.run(
+                [git_executable, "remote", "set-url", "origin", clean_url],
+                cwd=target_dir,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as exc:
+            logger.warning(
+                "Failed to launch git while scrubbing credentials in %s: %s",
+                target_dir,
+                exc,
+            )
+            raise RuntimeError(
+                f"Failed to launch git while scrubbing credentials in {target_dir}"
+            ) from exc
         if result.returncode != 0:
-            logger.debug(
+            logger.warning(
                 "git remote set-url origin returned %d while scrubbing %s",
                 result.returncode,
                 target_dir,
             )
+            raise RuntimeError(
+                f"Failed to scrub remote.origin.url in {target_dir} (exit {result.returncode})"
+            )
     if git_dir.is_dir() and not git_dir.is_symlink():
         fetch_head = git_dir / "FETCH_HEAD"
-        if not fetch_head.is_symlink():
+        if fetch_head.exists() and not fetch_head.is_symlink():
             try:
-                fetch_head.unlink(missing_ok=True)
-            except OSError:
-                logger.debug("Could not remove %s during credential scrub", fetch_head)
+                fetch_head.unlink()
+            except OSError as exc:
+                logger.warning(
+                    "Could not remove %s during credential scrub: %s", fetch_head, exc
+                )
+                raise RuntimeError(
+                    f"Failed to remove {fetch_head} during credential scrub"
+                ) from exc
         logs_dir = git_dir / "logs"
         if logs_dir.exists() and not logs_dir.is_symlink():
-            shutil.rmtree(logs_dir, ignore_errors=True)
+            try:
+                shutil.rmtree(logs_dir)
+            except OSError as exc:
+                logger.warning(
+                    "Could not remove %s during credential scrub: %s", logs_dir, exc
+                )
+                raise RuntimeError(
+                    f"Failed to remove {logs_dir} during credential scrub"
+                ) from exc
 
 
 def _staged_name(target_dir: Path) -> str:
@@ -688,6 +730,7 @@ class RepositoryManager:
         clone_dir = self.base_path / f"{repo_name}-{clone_id}"
         clone_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dirs.append(clone_dir)
+        failed = True
         try:
             _clone_by_ref_type(
                 str(repo_url),
@@ -697,8 +740,21 @@ class RepositoryManager:
                 log_prefix="Cloning repository",
                 deadline=time.monotonic() + _clone_timeout(),
             )
+            failed = False
         finally:
+            if failed:
+                try:
+                    _scrub_credentials(clone_dir, repo_url)
+                except OSError, RuntimeError:
+                    logger.warning(
+                        "Best-effort credential scrub failed on aborted clone %s",
+                        clone_dir,
+                    )
+        try:
             _scrub_credentials(clone_dir, repo_url)
+        except BaseException:
+            delete_tree(clone_dir)
+            raise
         return clone_dir
 
     def clone_into(
@@ -754,14 +810,22 @@ class RepositoryManager:
             )
             failed = False
         finally:
-            # Always scrub staging before rename or cleanup so neither injected
-            # tokens nor caller-supplied URL credentials remain in .git/config.
-            _scrub_credentials(staging, repo_url)
             if failed:
-                delete_tree(staging)
+                try:
+                    _scrub_credentials(staging, repo_url)
+                except OSError, RuntimeError:
+                    logger.warning(
+                        "Best-effort credential scrub failed on aborted clone staging %s",
+                        staging,
+                    )
+                finally:
+                    delete_tree(staging)
         try:
+            # Always scrub staging before moving into the workspace so neither
+            # injected tokens nor caller-supplied URL credentials survive.
+            _scrub_credentials(staging, repo_url)
             os.replace(staging, target_dir)
-        except OSError:
+        except BaseException:
             delete_tree(staging)
             raise
         # The shared ``.staging`` parent stays: removing it after our own rename

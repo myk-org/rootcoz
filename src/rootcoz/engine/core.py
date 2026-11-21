@@ -991,9 +991,77 @@ Do not skip these reads.
 """
 
 
-def _ignore_symlinks(directory: str, contents: list[str]) -> list[str]:
-    """Ignore symlinks during copytree to prevent escape attacks."""
-    return [c for c in contents if (Path(directory) / c).is_symlink()]
+def _copy_contained_tree(
+    repo_root: Path,
+    src_dir: Path,
+    workspace_root: Path,
+    dst_dir: Path,
+    *,
+    subdir: str,
+    dest_root: Path,
+    repo_name: str,
+) -> None:
+    """Recursively copy regular files from *src_dir* into *dst_dir* without following symlinks."""
+    if not _is_contained_dir(repo_root, src_dir) or not _is_safe_dest_dir(
+        workspace_root, dst_dir
+    ):
+        logger.warning(
+            "Skipping unsafe directory during .rootcoz/%s copy from '%s': %s",
+            subdir,
+            repo_name,
+            src_dir,
+        )
+        return
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    with os.scandir(src_dir) as entries:
+        for entry in sorted(entries, key=lambda e: e.name):
+            src_child = src_dir / entry.name
+            dst_child = dst_dir / entry.name
+            if entry.is_symlink():
+                logger.warning(
+                    "Skipping symlink during .rootcoz/%s copy from '%s': %s",
+                    subdir,
+                    repo_name,
+                    src_child,
+                )
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                _copy_contained_tree(
+                    repo_root,
+                    src_child,
+                    workspace_root,
+                    dst_child,
+                    subdir=subdir,
+                    dest_root=dest_root,
+                    repo_name=repo_name,
+                )
+            elif entry.is_file(follow_symlinks=False):
+                if not _is_contained_file(repo_root, src_child):
+                    logger.warning(
+                        "Skipping unsafe file during .rootcoz/%s copy from '%s': %s",
+                        subdir,
+                        repo_name,
+                        src_child,
+                    )
+                    continue
+                if dst_child.is_symlink() or not _is_safe_dest_dir(
+                    workspace_root, dst_child.parent
+                ):
+                    logger.warning(
+                        "Skipping unsafe destination during .rootcoz/%s copy from '%s': %s",
+                        subdir,
+                        repo_name,
+                        dst_child,
+                    )
+                    continue
+                if dst_child.exists():
+                    logger.warning(
+                        ".rootcoz/%s/%s from '%s' overwrites existing file",
+                        subdir,
+                        os.path.relpath(str(dst_child), str(dest_root)),
+                        repo_name,
+                    )
+                shutil.copy2(src_child, dst_child, follow_symlinks=False)
 
 
 def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) -> None:
@@ -1050,40 +1118,14 @@ def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) ->
                 )
                 continue
             try:
-
-                def _copy_with_overwrite_warning(
-                    src_path: str,
-                    dst_path: str,
-                    *,
-                    follow_symlinks: bool = False,
-                    subdir: str = subdir,
-                    dest: Path = dest,
-                    repo_name: str = repo_name,
-                ) -> None:
-                    """copy2 wrapper that warns when overwriting existing files."""
-                    if os.path.islink(src_path) or os.path.islink(dst_path):
-                        logger.warning(
-                            "Skipping symlink during .rootcoz/%s copy from '%s': %s",
-                            subdir,
-                            repo_name,
-                            src_path,
-                        )
-                        return
-                    if os.path.exists(dst_path):
-                        logger.warning(
-                            ".rootcoz/%s/%s from '%s' overwrites existing file",
-                            subdir,
-                            os.path.relpath(dst_path, str(dest)),
-                            repo_name,
-                        )
-                    shutil.copy2(src_path, dst_path, follow_symlinks=False)
-
-                shutil.copytree(
+                _copy_contained_tree(
+                    repo_path,
                     src,
+                    workspace,
                     dest,
-                    ignore=_ignore_symlinks,
-                    copy_function=_copy_with_overwrite_warning,
-                    dirs_exist_ok=True,
+                    subdir=subdir,
+                    dest_root=dest,
+                    repo_name=repo_name,
                 )
                 logger.info(
                     "Copied .rootcoz/%s/ from '%s' to workspace .pi/%s/",

@@ -2515,7 +2515,9 @@ class TestCopyRootcozPiResources:
         agents.mkdir()
         (agents / "agent.md").write_text("agent")
 
-        with patch("rootcoz.engine.core.shutil.copytree", side_effect=OSError("fail")):
+        with patch(
+            "rootcoz.engine.core._copy_contained_tree", side_effect=OSError("fail")
+        ):
             # Should not raise
             copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
 
@@ -2800,6 +2802,46 @@ class TestRootcozSymlinkHardening:
         assert "ROOTCOZ_HISTORY_PROMPT.md" in agent_gate
         assert "ROOTCOZ_PROMPT.md" in res_section
         assert "ROOTCOZ_HISTORY_PROMPT.md" in query_section
+
+    def test_nested_symlinked_subdir_and_dest_subdir_refused(self, tmp_path) -> None:
+        """Nested symlinked subdirs in .rootcoz/ or workspace/.pi/ cannot leak or escape."""
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        outside_src = tmp_path / "host-nested-secret"
+        outside_src.mkdir()
+        (outside_src / "leaked.md").write_text("NESTED_HOST_SECRET")
+
+        outside_dst = tmp_path / "host-dest-target"
+        outside_dst.mkdir()
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        # Pre-create a symlinked nested destination dir under workspace/.pi/skills/
+        (workspace / ".pi" / "skills").mkdir(parents=True)
+        (workspace / ".pi" / "skills" / "prelinked").symlink_to(outside_dst)
+
+        repo = workspace / "my-repo"
+        skills_nested = repo / ".rootcoz" / "skills" / "nested"
+        skills_nested.mkdir(parents=True)
+        (skills_nested / "good.md").write_text("legit nested skill")
+        (skills_nested / "escape_dir").symlink_to(outside_src)
+        (repo / ".rootcoz" / "skills" / "top_escape_dir").symlink_to(outside_src)
+        prelinked_src = repo / ".rootcoz" / "skills" / "prelinked"
+        prelinked_src.mkdir()
+        (prelinked_src / "write_attempt.md").write_text("should not escape")
+
+        copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
+
+        assert (
+            workspace / ".pi" / "skills" / "nested" / "good.md"
+        ).read_text() == "legit nested skill"
+        assert not (workspace / ".pi" / "skills" / "nested" / "escape_dir").exists()
+        assert not (workspace / ".pi" / "skills" / "top_escape_dir").exists()
+        assert not (outside_dst / "write_attempt.md").exists()
+        # Verify no copied file anywhere under workspace/.pi contains the secret
+        for f in (workspace / ".pi").rglob("*"):
+            if f.is_file() and not f.is_symlink():
+                assert "NESTED_HOST_SECRET" not in f.read_text(errors="ignore")
 
 
 class TestAnalyzeFailuresWorkspacePattern:

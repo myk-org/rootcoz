@@ -91,10 +91,22 @@ def ref_repo(tmp_path: Path) -> dict:
 
 
 def _init_creating_leaf(mock_repo_cls: MagicMock):
-    """Make the mocked ``Repo.init`` create what ``git init`` creates."""
+    """Make the mocked ``Repo.init`` create a real git dir with an origin remote."""
 
     def init(directory, **_kwargs):
-        (Path(directory) / ".git").mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(directory)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(directory),
+                "remote",
+                "add",
+                "origin",
+                "https://placeholder.invalid/repo",
+            ],
+            check=True,
+        )
         return mock_repo_cls.init.return_value
 
     return init
@@ -1332,6 +1344,7 @@ class TestCloneShaFlow:
             patch("rootcoz.repository.subprocess") as mock_subprocess,
         ):
             mock_run = mock_subprocess.run
+            mock_run.return_value.returncode = 0
             manager.clone_into(
                 "https://github.com/org/repo",
                 target,
@@ -2049,3 +2062,111 @@ class TestCredentialScrubbingHardening:
         assert "https://git.example.com/org/repo.git" in (
             target / ".git" / "config"
         ).read_text(encoding="utf-8")
+
+    def test_scrub_uses_git_python_executable_when_path_lacks_git(
+        self, ref_repo: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_scrub_credentials falls back to Git.GIT_PYTHON_GIT_EXECUTABLE when PATH lacks git."""
+        import shutil
+
+        real_git = shutil.which("git")
+        assert real_git is not None
+        cred_url = "https://alice:DUMMY_PATH_PASS@git.example.com/org/repo.git"  # pragma: allowlist secret
+
+        def fake_git_clone(url: str, clone_dir: Path, **_kwargs) -> None:
+            subprocess.run(
+                [
+                    real_git,
+                    "clone",
+                    "-q",
+                    "--depth",
+                    "1",
+                    ref_repo["url"],
+                    str(clone_dir),
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [real_git, "-C", str(clone_dir), "remote", "set-url", "origin", url],
+                check=True,
+            )
+
+        target = tmp_path / "workspace" / "repo"
+        target.parent.mkdir()
+        monkeypatch.setattr(git.cmd.Git, "GIT_PYTHON_GIT_EXECUTABLE", real_git)
+        with (
+            patch("rootcoz.repository._git_clone", side_effect=fake_git_clone),
+            patch("rootcoz.repository.shutil.which", return_value=None),
+        ):
+            RepositoryManager().clone_into(cred_url, target, depth=1)
+
+        config_text = (target / ".git" / "config").read_text(encoding="utf-8")
+        assert "DUMMY_PATH_PASS" not in config_text
+        assert "https://git.example.com/org/repo.git" in config_text
+
+    def test_clone_into_fails_closed_when_scrub_fails(
+        self, ref_repo: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If scrubbing fails after a clone, staging is deleted and target_dir is never populated."""
+        cred_url = "https://alice:DUMMY_FAIL_PASS@git.example.com/org/repo.git"  # pragma: allowlist secret
+
+        def fake_git_clone(url: str, clone_dir: Path, **_kwargs) -> None:
+            subprocess.run(
+                ["git", "clone", "-q", "--depth", "1", ref_repo["url"], str(clone_dir)],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(clone_dir), "remote", "set-url", "origin", url],
+                check=True,
+            )
+
+        target = tmp_path / "workspace" / "repo"
+        target.parent.mkdir()
+        monkeypatch.setattr(git.cmd.Git, "GIT_PYTHON_GIT_EXECUTABLE", None)
+        with (
+            patch("rootcoz.repository._git_clone", side_effect=fake_git_clone),
+            patch("rootcoz.repository.shutil.which", return_value=None),
+            pytest.raises(RuntimeError, match="git executable not found"),
+        ):
+            RepositoryManager().clone_into(cred_url, target, depth=1)
+
+        assert not target.exists()
+        assert not staging_of(target).exists()
+
+    def test_clone_into_deletes_staging_when_scrub_errors_on_failed_clone(
+        self, ref_repo: dict, tmp_path: Path
+    ) -> None:
+        """A scrub error after a failed clone must not mask the clone error or strand staging."""
+        cred_url = "https://alice:DUMMY_STRAND_PASS@git.example.com/org/repo.git"  # pragma: allowlist secret
+
+        def fake_clone_fail(url: str, staging_dir: Path, **_kwargs) -> None:
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "-q",
+                    "--depth",
+                    "1",
+                    ref_repo["url"],
+                    str(staging_dir),
+                ],
+                check=True,
+            )
+            raise GitCommandError(
+                ["git", "clone"], 128, stderr="fatal: simulated clone error"
+            )
+
+        target = tmp_path / "workspace" / "repo"
+        target.parent.mkdir()
+        with (
+            patch("rootcoz.repository._git_clone", side_effect=fake_clone_fail),
+            patch(
+                "rootcoz.repository._scrub_credentials",
+                side_effect=OSError("git spawn failed"),
+            ),
+            pytest.raises(GitCommandError, match="simulated clone error"),
+        ):
+            RepositoryManager().clone_into(cred_url, target, depth=1)
+
+        assert not target.exists()
+        assert not staging_of(target).exists()
