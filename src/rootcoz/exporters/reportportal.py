@@ -20,6 +20,7 @@ from reportportal_client import RPClient
 
 from rootcoz import get_child_logger
 from rootcoz.exporters.base import ExportContext, Exporter, ExporterResult
+from rootcoz.url_utils import sanitize_http_href
 
 if TYPE_CHECKING:
     from rootcoz.models import FailureAnalysis
@@ -302,7 +303,7 @@ class ReportPortalClient(Exporter):
             )
             return self._failure_result(msg)
 
-        jenkins_url = context.jenkins_url
+        jenkins_url = sanitize_http_href(context.jenkins_url)
         job_name = context.job_name
 
         logger.debug(
@@ -571,13 +572,17 @@ class ReportPortalClient(Exporter):
             AmbiguousLaunchError: Multiple launches matched by
                 description (URL query) and cannot be disambiguated.
         """
+        safe_jenkins_url = sanitize_http_href(jenkins_url)
+        if not safe_jenkins_url:
+            return None
+
         base = self._rp_client.base_url_v1
         url = f"{base}/launch"
 
         url_matches = self._paginate_get(
             url,
             {
-                "filter.cnt.description": jenkins_url,
+                "filter.cnt.description": safe_jenkins_url,
                 "page.size": 50,
                 "page.sort": "startTime,desc",
             },
@@ -587,7 +592,7 @@ class ReportPortalClient(Exporter):
             return url_matches[0]["id"]
 
         if len(url_matches) > 1:
-            raise AmbiguousLaunchError(len(url_matches), job_name, jenkins_url)
+            raise AmbiguousLaunchError(len(url_matches), job_name, safe_jenkins_url)
 
         return None
 
@@ -797,7 +802,8 @@ class ReportPortalClient(Exporter):
             }
 
             if push_rootcoz_url:
-                comment = f"See AI failure analysis under: [rootcoz Failure Analysis]({report_url})"
+                safe_report_url = sanitize_http_href(report_url)
+                comment = f"See AI failure analysis under: [rootcoz Failure Analysis]({safe_report_url})"
                 if pushed_by:
                     comment += f"\nPushed by {pushed_by}"
                 reviewer = reviewed_by.get(failure.test_name, "")
@@ -811,13 +817,16 @@ class ReportPortalClient(Exporter):
                 pbr = failure.analysis.product_bug_report
                 if pbr and not isinstance(pbr, bool) and pbr.jira_matches:
                     for jira_match in pbr.jira_matches:
+                        jira_url = sanitize_http_href(jira_match.url)
+                        if not jira_url:
+                            continue
                         external_issues.append(
                             {
-                                "url": jira_match.url,
+                                "url": jira_url,
                                 "btsProject": jira_match.key.split("-")[0]
                                 if "-" in jira_match.key
                                 else "",
-                                "btsUrl": jira_match.url,
+                                "btsUrl": jira_url,
                                 "ticketId": jira_match.key,
                             }
                         )
@@ -826,7 +835,9 @@ class ReportPortalClient(Exporter):
                 if tracked_in_links:
                     seen_urls = {ei["url"] for ei in external_issues}
                     for link in tracked_in_links.get(failure.test_name, []):
-                        link_url = link.get("tracked_in_url", "")
+                        link_url = sanitize_http_href(
+                            str(link.get("tracked_in_url", "") or "")
+                        )
                         if link_url and link_url not in seen_urls:
                             seen_urls.add(link_url)
                             bts_project, ticket_id = _extract_bts_fields(link_url)

@@ -630,10 +630,12 @@ def _restore_audit_health_counters() -> Generator[None]:
     """
     from rootcoz import monitoring, storage
 
+    monitoring.clear_health_cache()
     failures = monitoring._audit_write_failures
     suppressed = monitoring._audit_suppressed_auth_events
     undecodable = set(storage._undecodable_result_ids)
     yield
+    monitoring.clear_health_cache()
     monitoring._audit_write_failures = failures
     monitoring._audit_suppressed_auth_events = suppressed
     storage._undecodable_result_ids.clear()

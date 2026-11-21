@@ -22422,7 +22422,9 @@ class TestUserLifecycleAndAdminSseRevocation:
         resp = await main_module.get_admin_chat_artifact(
             saved["artifact_id"], alice_req
         )
-        assert resp.body == b"<h1>new-alice</h1>"
+        assert resp.body == (
+            main_module._ADMIN_ARTIFACT_CSP_META_TAG + "<h1>new-alice</h1>"
+        ).encode("utf-8")
 
         assert await storage.get_chat_messages("job-1", username="alice") == []
         presets = await storage.list_filter_presets("alice", "dashboard")

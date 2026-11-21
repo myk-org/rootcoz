@@ -10,10 +10,31 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Self
 
+from rootcoz.url_utils import sanitize_http_href
+
 #: The declared job-metadata dimensions exporters may tag with — the bounded,
 #: indexed ``job_metadata`` columns, never a free-form value. One list, so the
 #: Datadog series, the event tags and the push pipeline's fallback agree.
 JOB_METADATA_DIMENSIONS: tuple[str, ...] = ("team", "tier", "version")
+
+
+def _sanitize_tracked_in_links(
+    links_by_test: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Strip embedded URL credentials from every tracked-in link dict."""
+    sanitized: dict[str, list[dict[str, Any]]] = {}
+    for test_name, links in links_by_test.items():
+        clean_links: list[dict[str, Any]] = []
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            entry = dict(link)
+            for key in ("tracked_in_url", "url"):
+                if key in entry:
+                    entry[key] = sanitize_http_href(str(entry.get(key) or ""))
+            clean_links.append(entry)
+        sanitized[test_name] = clean_links
+    return sanitized
 
 
 @dataclass
@@ -57,6 +78,13 @@ class ExportContext:
     reviewed_by: dict[str, str] = field(default_factory=dict)
     analysis_timestamp: int | None = None
     job_metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Strip embedded URL credentials from every exported URL field."""
+        self.jenkins_url = sanitize_http_href(self.jenkins_url)
+        self.report_url = sanitize_http_href(self.report_url)
+        if self.tracked_in_links:
+            self.tracked_in_links = _sanitize_tracked_in_links(self.tracked_in_links)
 
 
 @dataclass

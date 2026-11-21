@@ -5,6 +5,7 @@ import copy
 import csv
 import hashlib
 import hmac
+import html
 import io
 import ipaddress
 import itertools
@@ -41,6 +42,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Literal, NoReturn, get_args
 from urllib.parse import quote as _urlquote
@@ -405,6 +407,7 @@ from rootcoz.url_utils import (
     mask_url_credentials_in_text,
     mask_url_value,
     redact_urls_in_text,
+    sanitize_http_href,
     strip_nonprintable,
     strip_url_credentials,
     strip_url_userinfo,
@@ -15514,7 +15517,7 @@ async def _build_export_context(
     Raises:
         ValueError: Invalid child job parameters.
     """
-    base_url = _extract_base_url()
+    base_url = sanitize_http_href(_extract_base_url()).rstrip("/")
     report_url = f"{base_url}/results/{job_id}" if base_url else ""
     # The top-level job name, read before scoping replaces result_data with
     # the child subtree: it is the fallback key for the job metadata.
@@ -15526,7 +15529,7 @@ async def _build_export_context(
     result_data, scope_job, scope_build = _resolve_push_scope(
         result_data, child_job_name, child_build_number
     )
-    if scope_job:
+    if scope_job and report_url:
         anchor = f"child-{_urlquote(scope_job, safe='')}-{scope_build}"
         report_url = f"{report_url}#{anchor}"
 
@@ -15630,7 +15633,9 @@ async def _build_export_context(
         job_id=job_id,
         job_name=result_data.get("job_name", ""),
         build_number=str(resolve_display_build_id(result_data)),
-        jenkins_url=result_data.get("jenkins_url", ""),
+        jenkins_url=sanitize_http_href(
+            str(result_data.get("build_url") or result_data.get("jenkins_url") or "")
+        ),
         failures=failures_data,
         report_url=report_url,
         child_job_name=child_job_name,
@@ -27906,6 +27911,97 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
 
 # -- Admin DB endpoints (used by admin chat tools) --
 
+# Fail-closed SQLite authorizer policy for admin chat DB inspection (#596).
+# Shared with ``admin_db_schema`` so schema discovery matches query access.
+_ADMIN_DB_ALLOWED_ACTIONS: frozenset[int] = frozenset(
+    {
+        sqlite3.SQLITE_SELECT,
+        sqlite3.SQLITE_READ,
+        sqlite3.SQLITE_FUNCTION,
+        *((sqlite3.SQLITE_RECURSIVE,) if hasattr(sqlite3, "SQLITE_RECURSIVE") else ()),
+    }
+)
+_ADMIN_DB_BLOCKED_FUNCTIONS: frozenset[str] = frozenset(
+    {
+        "load_extension",
+        "fts3_tokenizer",
+        "sqlite_offset",
+        "writefile",
+        "readfile",
+        "edit",
+    }
+)
+_ADMIN_DB_BLOCKED_TABLES: frozenset[str] = frozenset(
+    {
+        "server_settings",
+        "server_settings_history",
+    }
+)
+_ADMIN_DB_BLOCKED_COLUMNS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("users", "api_key_hash"),
+        ("server_ai_providers", "api_key_enc"),
+        ("sessions", "token"),
+        ("push_subscriptions", "p256dh_key"),
+        ("push_subscriptions", "auth_key"),
+        ("ai_session_sources", "claim_token"),
+        ("results", "result_json"),
+    }
+)
+
+
+def _is_blocked_admin_db_table(table: str) -> bool:
+    return table.lower() in _ADMIN_DB_BLOCKED_TABLES
+
+
+def _is_blocked_admin_db_column(table: str, column: str) -> bool:
+    t = table.lower()
+    c = column.lower()
+    return (
+        t in _ADMIN_DB_BLOCKED_TABLES
+        or (t, c) in _ADMIN_DB_BLOCKED_COLUMNS
+        or c.endswith("_enc")
+    )
+
+
+def _admin_db_authorizer(
+    action: int,
+    arg1: str | None,
+    arg2: str | None,
+    db_name: str | None,
+    source: str | None,
+) -> int:
+    """Fail-closed SQLite authorizer for ``admin_db_query`` (#596).
+
+    Permits only read-only SELECT/CTE queries, denies write/file/PRAGMA/ATTACH
+    operations (including ``VACUUM INTO``), blocks dangerous functions, and
+    blocks sensitive tables/columns regardless of SQL aliasing or expressions.
+    """
+    if action not in _ADMIN_DB_ALLOWED_ACTIONS:
+        return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_FUNCTION:
+        func_name = (arg2 or "").lower()
+        if not func_name or func_name in _ADMIN_DB_BLOCKED_FUNCTIONS:
+            return sqlite3.SQLITE_DENY
+    elif action == sqlite3.SQLITE_READ:
+        table = (arg1 or "").lower()
+        column = (arg2 or "").lower()
+        if _is_blocked_admin_db_table(table):
+            return sqlite3.SQLITE_DENY
+        if column and _is_blocked_admin_db_column(table, column):
+            return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
+def _sanitize_admin_db_value(value: Any) -> Any:
+    """Recursively apply ``strip_sensitive_from_response`` to decoded row dicts."""
+    if isinstance(value, dict):
+        stripped = strip_sensitive_from_response(value)
+        return {k: _sanitize_admin_db_value(v) for k, v in stripped.items()}
+    if isinstance(value, list):
+        return [_sanitize_admin_db_value(item) for item in value]
+    return value
+
 
 @app.get("/api/admin/db/schema", operation_id="adminDbSchema")
 async def admin_db_schema(request: Request) -> dict[str, Any]:
@@ -27933,6 +28029,8 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
         )
         for row in cursor.fetchall():
             table_name = row["name"]
+            if _is_blocked_admin_db_table(table_name):
+                continue
             cols = conn.execute(f"PRAGMA table_info({table_name})")
             columns = [
                 {
@@ -27942,6 +28040,7 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
                     "notnull": bool(c["notnull"]),
                 }
                 for c in cols.fetchall()
+                if not _is_blocked_admin_db_column(table_name, c["name"])
             ]
             count = conn.execute(
                 f"SELECT COUNT(*) as c FROM [{table_name}]"
@@ -28092,6 +28191,22 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
     sql_hash = hashlib.sha256(sql.encode()).hexdigest()
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    authorizer_denied = False
+
+    def _track_authorizer(
+        action: int,
+        arg1: str | None,
+        arg2: str | None,
+        db_name: str | None,
+        source: str | None,
+    ) -> int:
+        nonlocal authorizer_denied
+        decision = _admin_db_authorizer(action, arg1, arg2, db_name, source)
+        if decision != sqlite3.SQLITE_OK:
+            authorizer_denied = True
+        return decision
+
+    conn.set_authorizer(_track_authorizer)
     try:
         cursor = conn.execute(sql)
         rows = cursor.fetchall()
@@ -28116,36 +28231,52 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
             },
             request=request,
         )
-        # A row can carry a credential column (``github_token``, a key): mask the
-        # sensitive names in every row before the payload leaves the API, and
-        # let the shared response filter redact a ``request_params``-shaped one.
-        # Cell *text* is left verbatim — a row is data, and the URL masker would
-        # cut a value at its first ``?``/``#`` and drop its newlines (#581).
-        # The audit row above keeps the row *count* only, never the rows.
-        return strip_sensitive_from_response(
-            {
-                "columns": columns,
-                "rows": [
-                    mask_sensitive_fields(row, sanitize_text=False) for row in results
-                ],
-                "count": len(results),
-            }
-        )
+        # Scrub nested ``request_params``/``progress_log`` payloads inside any
+        # decoded row dicts first, then mask sensitive-named columns while
+        # leaving plain cell text verbatim (#581, #596).
+        sanitized_rows = [
+            mask_sensitive_fields(_sanitize_admin_db_value(row), sanitize_text=False)
+            for row in results
+        ]
+        return {
+            "columns": columns,
+            "rows": sanitized_rows,
+            "count": len(results),
+        }
     except sqlite3.Error as e:
+        is_auth_denied = (
+            authorizer_denied
+            or getattr(e, "sqlite_errorcode", None) == sqlite3.SQLITE_AUTH
+        )
+        if is_auth_denied:
+            logger.warning(
+                "Admin DB query blocked by SQLite authorizer for %s (sql_hash=%s): %s",
+                username,
+                sql_hash[:12],
+                e,
+            )
         # Any sqlite3 error, not only an operational one: a malformed statement
         # (``SELECT ?`` raises ``ProgrammingError``) is an attempt too, so it
         # leaves a failure row and the same 400 the client expects.
         await record_audit(
             action="admin.db_query",
             actor=username,
-            message=f"Admin '{username}' admin chat DB query failed",
+            message=(
+                f"Admin '{username}' admin chat DB query "
+                + ("denied" if is_auth_denied else "failed")
+            ),
             target_type="database",
-            outcome="failure",
-            details={"sql_hash": sql_hash},
+            outcome="denied" if is_auth_denied else "failure",
+            details=(
+                {"sql_hash": sql_hash, "reason": "not_authorized"}
+                if is_auth_denied
+                else {"sql_hash": sql_hash}
+            ),
             request=request,
         )
         raise HTTPException(status_code=400, detail=f"SQL Error: {e}")
     finally:
+        conn.set_authorizer(None)
         conn.close()
 
 
@@ -28876,6 +29007,334 @@ def _cleanup_admin_artifacts(
     return reclaimed
 
 
+_ADMIN_ARTIFACT_META_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:;"
+)
+_ADMIN_ARTIFACT_HTTP_CSP = f"{_ADMIN_ARTIFACT_META_CSP} sandbox"
+_ADMIN_ARTIFACT_CSP_META_TAG = (
+    f'<meta http-equiv="Content-Security-Policy" content="{_ADMIN_ARTIFACT_META_CSP}">'
+)
+_HTML_STRIP_WITH_CONTENT_TAGS: frozenset[str] = frozenset(
+    {
+        "script",
+        "iframe",
+        "object",
+        "applet",
+        "xmp",
+        "noembed",
+        "noframes",
+        "noscript",
+    }
+)
+_HTML_STRIP_VOID_TAGS: frozenset[str] = frozenset(
+    {"embed", "base", "link", "plaintext"}
+)
+_HTML_FOREIGN_CONTAINER_TAGS: frozenset[str] = frozenset({"svg", "math"})
+_HTML_FOREIGN_RAW_CONTENT_TAGS: frozenset[str] = frozenset(
+    {"style", "title", "textarea"}
+)
+_HTML_BLOCKED_META_HTTP_EQUIV: frozenset[str] = frozenset(
+    {"refresh", "content-security-policy", "set-cookie"}
+)
+_HTML_RESOURCE_URL_ATTRS: frozenset[str] = frozenset(
+    {
+        "src",
+        "srcset",
+        "poster",
+        "data",
+        "action",
+        "formaction",
+        "background",
+        "ping",
+        "codebase",
+        "cite",
+        "longdesc",
+        "archive",
+        "classid",
+        "usemap",
+        "dynsrc",
+        "lowsrc",
+    }
+)
+_HTML_HREF_ATTRS: frozenset[str] = frozenset({"href", "xlink:href"})
+_HTML_SAFE_DATA_IMAGE_PREFIXES: tuple[str, ...] = (
+    "data:image/png",
+    "data:image/jpeg",
+    "data:image/jpg",
+    "data:image/gif",
+    "data:image/webp",
+    "data:image/avif",
+    "data:image/bmp",
+    "data:image/x-icon",
+)
+_HTML_SAFE_CSS_DATA_PREFIXES: tuple[str, ...] = (
+    *_HTML_SAFE_DATA_IMAGE_PREFIXES,
+    "data:font/",
+)
+_HTML_SAFE_LINK_PREFIXES: tuple[str, ...] = (
+    "https://",
+    "http://",
+    "mailto:",
+    "#",
+)
+_HTML_ASCII_CTRL_WS_RE = re.compile(r"[\x00-\x20]+")
+_CSS_COMMENT_RE = re.compile(r"/\*.*?(?:\*/|$)", re.DOTALL)
+_CSS_HEX_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?")
+_CSS_CHAR_ESCAPE_RE = re.compile(r"\\([a-zA-Z@(-])")
+_CSS_IMPORT_RE = re.compile(r"@\s*import\b[^;]*(?:;|$)", re.IGNORECASE)
+_CSS_URL_RE = re.compile(r"url\s*\(([^)]*)\)", re.IGNORECASE)
+_CSS_IMAGE_SET_START_RE = re.compile(r"(?:-[a-z]+-)?image-set\s*\(", re.IGNORECASE)
+_CSS_EXPRESSION_RE = re.compile(r"expression\s*\(", re.IGNORECASE)
+
+
+def _normalize_html_url(value: str) -> str:
+    return _HTML_ASCII_CTRL_WS_RE.sub("", value).lower()
+
+
+def _decode_css_hex_escape(match: re.Match[str]) -> str:
+    codepoint = int(match.group(1), 16)
+    if codepoint == 0 or codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+        return "\ufffd"
+    ch = chr(codepoint)
+    # Never decode into HTML markup delimiters or CSS string/escape delimiters.
+    if ch in ("'", '"', "\\", "<", ">", "&"):
+        return match.group(0)
+    return ch
+
+
+def _strip_css_image_set(css: str) -> str:
+    """Replace CSS image-set(...) calls with 'none' in linear time (no ReDoS)."""
+    out: list[str] = []
+    pos = 0
+    length = len(css)
+    while pos < length:
+        match = _CSS_IMAGE_SET_START_RE.search(css, pos)
+        if match is None:
+            out.append(css[pos:])
+            break
+        out.append(css[pos : match.start()])
+        depth = 1
+        quote: str | None = None
+        idx = match.end()
+        while idx < length and depth > 0:
+            ch = css[idx]
+            if quote is not None:
+                if ch == "\\" and idx + 1 < length:
+                    idx += 2
+                    continue
+                if ch == quote:
+                    quote = None
+            elif ch in ("'", '"'):
+                quote = ch
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            idx += 1
+        out.append("none")
+        pos = idx
+    return "".join(out)
+
+
+def _is_allowed_html_url(tag: str, attr: str, value: str) -> bool:
+    normalized = _normalize_html_url(value)
+    if attr in _HTML_RESOURCE_URL_ATTRS:
+        # Only inline raster data: URIs on <img src> are allowed; strip all
+        # external resource loads and form submission endpoints.
+        return (
+            tag == "img"
+            and attr == "src"
+            and normalized.startswith(_HTML_SAFE_DATA_IMAGE_PREFIXES)
+        )
+    if attr in _HTML_HREF_ATTRS:
+        if tag == "a" and attr == "href":
+            return normalized.startswith(_HTML_SAFE_LINK_PREFIXES)
+        # Non-anchor href / xlink:href (e.g. SVG <use>, <image>) may only target
+        # in-document fragments, never external resources or scriptable schemes.
+        return normalized.startswith("#")
+    return True
+
+
+def _sanitize_inline_css(css: str) -> str:
+    """Strip CSS @import rules, legacy expression(), and external url()/image-set() loads."""
+    cleaned = _CSS_COMMENT_RE.sub("", css)
+    cleaned = _CSS_HEX_ESCAPE_RE.sub(_decode_css_hex_escape, cleaned)
+    cleaned = _CSS_CHAR_ESCAPE_RE.sub(r"\1", cleaned)
+    cleaned = _CSS_IMPORT_RE.sub("", cleaned)
+    cleaned = _CSS_EXPRESSION_RE.sub("blocked(", cleaned)
+
+    def _replace_url(match: re.Match[str]) -> str:
+        raw_target = match.group(1).strip().strip("\"'")
+        normalized = _normalize_html_url(raw_target)
+        if normalized.startswith("#") or normalized.startswith(
+            _HTML_SAFE_CSS_DATA_PREFIXES
+        ):
+            return match.group(0)
+        return "url()"
+
+    cleaned = _CSS_URL_RE.sub(_replace_url, cleaned)
+    return _strip_css_image_set(cleaned)
+
+
+class _AdminReportHTMLSanitizer(HTMLParser):
+    """Strip active HTML/external resources and inject a strict CSP meta tag (#606)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self._parts: list[str] = []
+        self._skip_stack: list[str] = []
+        self._csp_injected = False
+        self._before_head_eligible = True
+        self._seen_html_tag = False
+        self._in_style = False
+        self._foreign_depth = 0
+        self._doctype_end_idx: int | None = None
+
+    def _is_blocked_meta(self, attrs: list[tuple[str, str | None]]) -> bool:
+        for name, value in attrs:
+            if (
+                name.lower() == "http-equiv"
+                and (value or "").strip().lower() in _HTML_BLOCKED_META_HTTP_EQUIV
+            ):
+                return True
+        return False
+
+    def _filter_attrs(self, tag: str, attrs: list[tuple[str, str | None]]) -> str:
+        rendered: list[str] = []
+        for raw_name, value in attrs:
+            name = raw_name.lower()
+            if name.startswith("on") or name == "srcdoc":
+                continue
+            if (name in _HTML_RESOURCE_URL_ATTRS or name in _HTML_HREF_ATTRS) and (
+                value is None or not _is_allowed_html_url(tag, name, value)
+            ):
+                continue
+            if name == "style" and value is not None:
+                value = _sanitize_inline_css(value)
+            if value is None:
+                rendered.append(f" {name}")
+            else:
+                rendered.append(f' {name}="{html.escape(value, quote=True)}"')
+        return "".join(rendered)
+
+    def handle_decl(self, decl: str) -> None:
+        if self._skip_stack:
+            return
+        self._parts.append(f"<!{decl}>")
+        if (
+            self._doctype_end_idx is None
+            and self._before_head_eligible
+            and not self._seen_html_tag
+            and decl.lstrip().lower().startswith("doctype")
+        ):
+            self._doctype_end_idx = len(self._parts)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lower = tag.lower()
+        if lower in _HTML_STRIP_WITH_CONTENT_TAGS:
+            self._skip_stack.append(lower)
+            return
+        if self._skip_stack:
+            return
+        # Inside <svg>/<math>, HTML5 parses tags inside <style>/<title>/<textarea>
+        # as markup while Python's HTMLParser treats them as CDATA/RCDATA — drop them.
+        if self._foreign_depth > 0 and lower in _HTML_FOREIGN_RAW_CONTENT_TAGS:
+            self._skip_stack.append(lower)
+            return
+        if lower in _HTML_STRIP_VOID_TAGS:
+            return
+        if lower == "meta" and self._is_blocked_meta(attrs):
+            return
+        self._parts.append(f"<{lower}{self._filter_attrs(lower, attrs)}>")
+        if lower == "html":
+            self._seen_html_tag = True
+        elif lower == "head" and self._before_head_eligible and not self._csp_injected:
+            self._parts.append(_ADMIN_ARTIFACT_CSP_META_TAG)
+            self._csp_injected = True
+            self._before_head_eligible = False
+        else:
+            self._before_head_eligible = False
+        if lower in _HTML_FOREIGN_CONTAINER_TAGS:
+            self._foreign_depth += 1
+        if lower == "style":
+            self._in_style = True
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lower = tag.lower()
+        if self._skip_stack:
+            return
+        if (
+            lower in _HTML_STRIP_WITH_CONTENT_TAGS
+            or lower in _HTML_STRIP_VOID_TAGS
+            or lower == "style"
+            or (self._foreign_depth > 0 and lower in _HTML_FOREIGN_RAW_CONTENT_TAGS)
+        ):
+            return
+        if lower == "meta" and self._is_blocked_meta(attrs):
+            return
+        self._parts.append(f"<{lower}{self._filter_attrs(lower, attrs)} />")
+        if lower == "html":
+            self._seen_html_tag = True
+        else:
+            self._before_head_eligible = False
+
+    def handle_endtag(self, tag: str) -> None:
+        lower = tag.lower()
+        if self._skip_stack:
+            if lower in self._skip_stack:
+                while self._skip_stack:
+                    if self._skip_stack.pop() == lower:
+                        break
+            return
+        if lower in _HTML_STRIP_WITH_CONTENT_TAGS or lower in _HTML_STRIP_VOID_TAGS:
+            return
+        if lower == "style":
+            self._in_style = False
+        if lower in _HTML_FOREIGN_CONTAINER_TAGS and self._foreign_depth > 0:
+            self._foreign_depth -= 1
+        self._parts.append(f"</{lower}>")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_stack:
+            return
+        if data.strip():
+            self._before_head_eligible = False
+        if self._in_style:
+            data = _sanitize_inline_css(data).replace("<", r"\3c ")
+        self._parts.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        if self._skip_stack:
+            return
+        self._before_head_eligible = False
+        self._parts.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if self._skip_stack:
+            return
+        self._before_head_eligible = False
+        self._parts.append(f"&#{name};")
+
+    def handle_comment(self, data: str) -> None:
+        if self._skip_stack:
+            return
+        self._parts.append(f"<!--{data}-->")
+
+    def render(self) -> str:
+        if not self._csp_injected:
+            insert_at = self._doctype_end_idx or 0
+            self._parts.insert(insert_at, _ADMIN_ARTIFACT_CSP_META_TAG)
+        return "".join(self._parts)
+
+
+def _sanitize_admin_report_html(raw_html: str) -> str:
+    """Sanitize an admin chat HTML report before saving it to disk (#606)."""
+    parser = _AdminReportHTMLSanitizer()
+    parser.feed(raw_html)
+    parser.close()
+    return parser.render()
+
+
 class SaveArtifactRequest(BaseModel):
     html_content: str = Field(..., min_length=1, max_length=5_000_000)
     filename: str = Field(..., min_length=1, max_length=255)
@@ -28903,6 +29362,10 @@ async def save_admin_chat_artifact(
     if not safe_filename.endswith(".html"):
         safe_filename += ".html"
 
+    sanitized_html = await asyncio.to_thread(
+        _sanitize_admin_report_html, body.html_content
+    )
+
     artifact_id = str(uuid.uuid4())
 
     async def _write_artifact() -> None:
@@ -28912,7 +29375,7 @@ async def save_admin_chat_artifact(
         artifact_path = artifacts_dir / f"{artifact_id}.html"
         try:
             await asyncio.to_thread(
-                artifact_path.write_text, body.html_content, encoding="utf-8"
+                artifact_path.write_text, sanitized_html, encoding="utf-8"
             )
         except OSError as exc:
             logger.exception("Failed to save artifact")
@@ -28929,9 +29392,10 @@ async def save_admin_chat_artifact(
         await _write_artifact()
 
     logger.info(
-        "Admin chat: saved artifact %s (%d chars) for %s",
+        "Admin chat: saved artifact %s (%d chars, sanitized=%d chars) for %s",
         artifact_id,
         len(body.html_content),
+        len(sanitized_html),
         username,
     )
 
@@ -28982,6 +29446,8 @@ async def get_admin_chat_artifact(
         media_type="text/html",
         headers={
             "Content-Disposition": f'attachment; filename="{download_filename}"',
+            "Content-Security-Policy": _ADMIN_ARTIFACT_HTTP_CSP,
+            "X-Content-Type-Options": "nosniff",
         },
     )
 

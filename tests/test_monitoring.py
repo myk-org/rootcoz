@@ -22,6 +22,7 @@ from rootcoz.monitoring import (
     check_db,
     check_jenkins,
     check_reportportal,
+    clear_health_cache,
     dispatch_alert,
     health_up_from_status,
     read_data_usage,
@@ -153,6 +154,40 @@ class TestHealthChecks:
 
     async def test_check_db_failure(self):
         result = await check_db("/nonexistent/path/db.sqlite")
+        assert result["status"] == "error"
+        assert "detail" in result
+
+    @pytest.mark.parametrize("journal_mode", ["DELETE", "WAL"])
+    async def test_check_db_succeeds_during_active_write_transaction(
+        self, temp_db_path, journal_mode
+    ):
+        """Read-only health probe must not contend on SQLite's write lock."""
+        import aiosqlite
+
+        async with aiosqlite.connect(str(temp_db_path)) as writer:
+            cur = await writer.execute(f"PRAGMA journal_mode={journal_mode}")
+            await cur.fetchone()
+            await writer.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER)")
+            await writer.commit()
+
+            # Hold SQLite's writer lock in a separate connection.
+            await writer.execute("BEGIN IMMEDIATE")
+            await writer.execute("INSERT INTO items VALUES (1)")
+            try:
+                result = await asyncio.wait_for(
+                    check_db(str(temp_db_path)),
+                    timeout=1.5,
+                )
+            finally:
+                await writer.execute("ROLLBACK")
+
+        assert result == {"status": "ok"}
+
+    async def test_check_db_corrupt_file_returns_error(self, tmp_path):
+        """Read-only probe still detects corrupt database files."""
+        corrupt_db = tmp_path / "corrupt.db"
+        corrupt_db.write_bytes(b"not a valid sqlite database header")
+        result = await check_db(str(corrupt_db))
         assert result["status"] == "error"
         assert "detail" in result
 
@@ -457,6 +492,168 @@ class TestHealthChecks:
             ):
                 await check_ai_provider()
             probe.assert_awaited_once_with(url, ok_below=300)
+
+    async def test_build_health_response_coalesces_concurrent_and_ttl_calls(
+        self, temp_db_path
+    ):
+        """Burst calls coalesce via single-flight lock and reuse the short-TTL cache."""
+        settings = MagicMock()
+        settings.jenkins_url = "https://jenkins.example.com"
+        settings.jenkins_ssl_verify = False
+        settings.reportportal_enabled = True
+        settings.reportportal_url = "https://rp.example.com"
+        settings.reportportal_project = "proj"
+        settings.reportportal_verify_ssl = False
+        settings.ai_provider = "claude"
+        settings.ai_model = "test"
+
+        probe_started = asyncio.Event()
+        release_probe = asyncio.Event()
+
+        async def _slow_db(_path: str) -> dict[str, str]:
+            probe_started.set()
+            await release_probe.wait()
+            return {"status": "ok"}
+
+        db_mock = AsyncMock(side_effect=_slow_db)
+        jenkins_mock = AsyncMock(return_value={"status": "ok"})
+        ai_mock = AsyncMock(
+            return_value={"status": "ok", "provider": "claude", "model": "test"}
+        )
+        rp_mock = AsyncMock(return_value={"status": "ok"})
+
+        clear_health_cache()
+        with (
+            patch("rootcoz.monitoring.check_db", db_mock),
+            patch("rootcoz.monitoring.check_jenkins", jenkins_mock),
+            patch("rootcoz.monitoring.check_ai_provider", ai_mock),
+            patch("rootcoz.monitoring.check_reportportal", rp_mock),
+        ):
+            tasks = [
+                asyncio.create_task(build_health_response(settings, str(temp_db_path)))
+                for _ in range(5)
+            ]
+            await probe_started.wait()
+            # Yield so all sibling tasks queue on the single-flight lock.
+            await asyncio.sleep(0.02)
+            release_probe.set()
+            results = await asyncio.gather(*tasks)
+
+            # Mutating a returned dict must not corrupt the cached probe snapshot.
+            results[0]["checks"]["database"]["status"] = "mutated"
+
+            cached = await build_health_response(settings, str(temp_db_path))
+
+        assert len(results) == 5
+        assert all(r["status"] == "healthy" for r in results)
+        assert cached["checks"]["database"]["status"] == "ok"
+        assert db_mock.await_count == 1
+        assert jenkins_mock.await_count == 1
+        assert ai_mock.await_count == 1
+        assert rp_mock.await_count == 1
+
+    async def test_build_health_response_refreshes_after_ttl_and_clear_cache(
+        self, temp_db_path, monkeypatch
+    ):
+        """Fresh probes run after clear_health_cache(), clear_settings_cache(), or TTL expiry."""
+        from rootcoz.config import clear_settings_cache
+
+        now = 1000.0
+        monkeypatch.setattr(monitoring.time, "monotonic", lambda: now)
+
+        settings = MagicMock()
+        settings.jenkins_url = ""
+        settings.reportportal_enabled = False
+        settings.ai_provider = "claude"
+        settings.ai_model = "test"
+
+        ai_state = {"status": "ok", "provider": "claude", "model": "test"}
+        db_mock = AsyncMock(return_value={"status": "ok"})
+        ai_mock = AsyncMock(side_effect=lambda: dict(ai_state))
+
+        clear_health_cache()
+        with (
+            patch("rootcoz.monitoring.check_db", db_mock),
+            patch("rootcoz.monitoring.check_ai_provider", ai_mock),
+        ):
+            first = await build_health_response(settings, str(temp_db_path))
+            assert first["status"] == "healthy"
+            assert db_mock.await_count == 1
+
+            # Within TTL, underlying status change is served from cache.
+            ai_state = {"status": "error", "detail": "Sidecar unreachable"}
+            now += monitoring._HEALTH_CACHE_TTL_SECONDS / 2
+            within_ttl = await build_health_response(settings, str(temp_db_path))
+            assert within_ttl["status"] == "healthy"
+            assert db_mock.await_count == 1
+
+            # Explicit clear_health_cache() forces a fresh probe immediately.
+            clear_health_cache()
+            after_clear = await build_health_response(settings, str(temp_db_path))
+            assert after_clear["status"] == "unhealthy"
+            assert db_mock.await_count == 2
+
+            # clear_settings_cache() also invalidates cached health probes.
+            ai_state = {"status": "ok", "provider": "claude", "model": "test"}
+            clear_settings_cache()
+            after_settings_clear = await build_health_response(
+                settings, str(temp_db_path)
+            )
+            assert after_settings_clear["status"] == "healthy"
+            assert db_mock.await_count == 3
+
+            # Advancing monotonic time past TTL expires the cache automatically.
+            ai_state = {"status": "error", "detail": "Sidecar unreachable"}
+            now += monitoring._HEALTH_CACHE_TTL_SECONDS + 0.1
+            after_ttl = await build_health_response(settings, str(temp_db_path))
+            assert after_ttl["status"] == "unhealthy"
+            assert db_mock.await_count == 4
+
+    async def test_clear_health_cache_during_inflight_probe_does_not_publish_stale(
+        self, temp_db_path
+    ):
+        """Invalidating while a probe is in flight prevents stale cache publication."""
+        settings = MagicMock()
+        settings.jenkins_url = ""
+        settings.reportportal_enabled = False
+        settings.ai_provider = "claude"
+        settings.ai_model = "test"
+
+        probe_started = asyncio.Event()
+        release_probe = asyncio.Event()
+        call_num = 0
+
+        async def _ai_probe() -> dict[str, str]:
+            nonlocal call_num
+            call_num += 1
+            if call_num == 1:
+                probe_started.set()
+                await release_probe.wait()
+                return {"status": "error", "detail": "stale"}
+            return {"status": "ok", "provider": "claude", "model": "test"}
+
+        clear_health_cache()
+        with (
+            patch(
+                "rootcoz.monitoring.check_db",
+                AsyncMock(return_value={"status": "ok"}),
+            ),
+            patch(
+                "rootcoz.monitoring.check_ai_provider", AsyncMock(side_effect=_ai_probe)
+            ),
+        ):
+            first_task = asyncio.create_task(
+                build_health_response(settings, str(temp_db_path))
+            )
+            await probe_started.wait()
+            clear_health_cache()
+            release_probe.set()
+            first_result = await first_task
+            assert first_result["status"] == "unhealthy"
+
+            second_result = await build_health_response(settings, str(temp_db_path))
+            assert second_result["status"] == "healthy"
+            assert call_num == 2
 
 
 # ---------------------------------------------------------------------------
@@ -943,6 +1140,84 @@ class TestHealthEndpointIntegration:
             health = test_client.get("/api/health")
         assert "\nrootcoz_health_up 1\n" in metrics.text
         assert health.status_code == 200
+
+    async def test_health_and_metrics_endpoints_share_coalesced_cache(
+        self, temp_db_path
+    ):
+        """Concurrent unauthenticated /api/health and /metrics share one probe."""
+        from rootcoz import storage
+        from rootcoz.config import clear_settings_cache
+        from rootcoz.main import app
+
+        env = {
+            "JENKINS_URL": "https://jenkins.example.com",
+            "JENKINS_USER": "testuser",
+            "JENKINS_PASSWORD": "testpassword",  # pragma: allowlist secret
+            "AI_PROVIDER": "claude",
+            "AI_MODEL": "test",
+            "DB_PATH": str(temp_db_path),
+        }
+        probe_started = asyncio.Event()
+        release_probe = asyncio.Event()
+        ai_result = {"status": "ok", "provider": "claude", "model": "test"}
+
+        async def _slow_db(_path: str) -> dict[str, str]:
+            probe_started.set()
+            await release_probe.wait()
+            return {"status": "ok"}
+
+        db_mock = AsyncMock(side_effect=_slow_db)
+        jenkins_mock = AsyncMock(return_value={"status": "ok"})
+        ai_mock = AsyncMock(side_effect=lambda: dict(ai_result))
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch("rootcoz.monitoring.check_db", db_mock),
+            patch("rootcoz.monitoring.check_jenkins", jenkins_mock),
+            patch("rootcoz.monitoring.check_ai_provider", ai_mock),
+        ):
+            clear_settings_cache()
+            clear_health_cache()
+            try:
+                await storage.init_db()
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(
+                    transport=transport, base_url="http://testserver"
+                ) as client:
+                    req_tasks = [
+                        asyncio.create_task(client.get("/api/health")),
+                        asyncio.create_task(client.get("/api/health")),
+                        asyncio.create_task(client.get("/metrics")),
+                        asyncio.create_task(client.get("/metrics")),
+                    ]
+                    await probe_started.wait()
+                    await asyncio.sleep(0.02)
+                    release_probe.set()
+                    responses = await asyncio.gather(*req_tasks)
+
+                    # Follow-up requests within TTL also reuse the cached probe.
+                    responses.append(await client.get("/api/health"))
+                    responses.append(await client.get("/metrics"))
+
+                    assert all(r.status_code == 200 for r in responses)
+                    assert db_mock.await_count == 1
+                    assert jenkins_mock.await_count == 1
+                    assert ai_mock.await_count == 1
+
+                    # After cache invalidation, updated failure status is surfaced.
+                    ai_result = {"status": "error", "detail": "Sidecar down"}
+                    clear_health_cache()
+                    failed_health = await client.get("/api/health")
+                    failed_metrics = await client.get("/metrics")
+                    assert failed_health.status_code == 503
+                    assert "\nrootcoz_health_up 0\n" in failed_metrics.text
+                    assert db_mock.await_count == 2
+                    assert jenkins_mock.await_count == 2
+                    assert ai_mock.await_count == 2
+            finally:
+                clear_settings_cache()
+                clear_health_cache()
 
     def test_metrics_endpoint(self, test_client):
         response = test_client.get("/metrics")

