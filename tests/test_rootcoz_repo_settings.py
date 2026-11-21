@@ -237,6 +237,34 @@ class TestLoadRootcozRepoSettings:
         with pytest.raises(RootcozSettingsError, match="symlink|regular file"):
             load_rootcoz_repo_settings(tmp_path)
 
+    def test_rejects_symlink_rootcoz_dir(self, tmp_path: Path) -> None:
+        """A symlinked .rootcoz directory itself is refused (external, internal, or dangling)."""
+        repo_ext = tmp_path / "repo-ext"
+        repo_ext.mkdir()
+        outside = tmp_path / "outside-dir"
+        outside.mkdir()
+        (outside / "settings.json").write_text(
+            '{"ai_provider": "claude"}', encoding="utf-8"
+        )
+        (repo_ext / ".rootcoz").symlink_to(outside)
+        with pytest.raises(RootcozSettingsError, match="symlink"):
+            load_rootcoz_repo_settings(repo_ext)
+
+        repo_int = tmp_path / "repo-int"
+        (repo_int / "real-dir").mkdir(parents=True)
+        (repo_int / "real-dir" / "settings.json").write_text(
+            '{"ai_provider": "claude"}', encoding="utf-8"
+        )
+        (repo_int / ".rootcoz").symlink_to(repo_int / "real-dir")
+        with pytest.raises(RootcozSettingsError, match="symlink"):
+            load_rootcoz_repo_settings(repo_int)
+
+        repo_dangling = tmp_path / "repo-dangling"
+        repo_dangling.mkdir()
+        (repo_dangling / ".rootcoz").symlink_to(tmp_path / "does-not-exist")
+        with pytest.raises(RootcozSettingsError, match="symlink"):
+            load_rootcoz_repo_settings(repo_dangling)
+
     def test_rejects_directory_settings(self, tmp_path: Path) -> None:
         rootcoz = tmp_path / ".rootcoz"
         rootcoz.mkdir()

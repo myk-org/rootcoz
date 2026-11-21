@@ -2515,7 +2515,9 @@ class TestCopyRootcozPiResources:
         agents.mkdir()
         (agents / "agent.md").write_text("agent")
 
-        with patch("rootcoz.engine.core.shutil.copytree", side_effect=OSError("fail")):
+        with patch(
+            "rootcoz.engine.core._copy_contained_tree", side_effect=OSError("fail")
+        ):
             # Should not raise
             copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
 
@@ -2558,6 +2560,288 @@ class TestCopyRootcozPiResources:
         assert warning_calls, "Expected overwrite warning was not logged"
         # The file should contain repo2's content (last writer wins)
         assert (workspace / ".pi" / "skills" / "shared.md").read_text() == "from repo2"
+
+
+class TestRootcozSymlinkHardening:
+    """Regression tests for #614 — refuse symlinks and out-of-repo escapes in .rootcoz/ and .pi/."""
+
+    def test_rootcoz_dir_symlink_outside_repo_refused(self, tmp_path) -> None:
+        """A symlinked .rootcoz directory pointing outside the repo is refused everywhere."""
+        from rootcoz.engine.core import (
+            build_prompt_sections,
+            build_resources_section,
+            copy_rootcoz_pi_resources,
+            discover_project_agent_names,
+            discover_rootcoz_prompt_paths,
+        )
+
+        outside = tmp_path / "host-secret"
+        (outside / "skills").mkdir(parents=True)
+        (outside / "skills" / "leaked_skill.md").write_text("SECRET_SKILL")
+        (outside / "agents").mkdir()
+        (outside / "agents" / "leaked.md").write_text(
+            "---\nname: leaked-agent\n---\nbody\n"
+        )
+        (outside / "ROOTCOZ_PROMPT.md").write_text("SECRET_PROMPT")
+        (outside / "ROOTCOZ_HISTORY_PROMPT.md").write_text("SECRET_HIST")
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        repo.mkdir()
+        (repo / ".rootcoz").symlink_to(outside)
+
+        repos = {"my-repo": repo}
+        copy_rootcoz_pi_resources(repos, workspace)
+        assert not (workspace / ".pi").exists()
+
+        assert discover_project_agent_names(repos) == []
+        assert discover_rootcoz_prompt_paths(repos, history_enabled=True) == []
+
+        resources = build_resources_section(
+            workspace, additional_repos=repos, history_enabled=True
+        )
+        assert "ROOTCOZ_PROMPT.md" not in resources
+        assert "ROOTCOZ_HISTORY_PROMPT.md" not in resources
+        assert "leaked-agent" not in resources
+
+        agent_gate, _, _, res_section, query_section = build_prompt_sections(
+            "",
+            "",
+            workspace,
+            "https://rootcoz.example.com",
+            "job-1",
+            additional_repos=repos,
+            auth_header="Bearer tok",
+        )
+        combined = agent_gate + res_section + query_section
+        assert "ROOTCOZ_PROMPT.md" not in combined
+        assert "ROOTCOZ_HISTORY_PROMPT.md" not in combined
+        assert "leaked-agent" not in combined
+
+    def test_rootcoz_subdir_symlink_outside_repo_refused(self, tmp_path) -> None:
+        """Symlinked .rootcoz/{skills,agents,extensions} subdirs are never copied or discovered."""
+        from rootcoz.engine.core import (
+            build_resources_section,
+            copy_rootcoz_pi_resources,
+            discover_project_agent_names,
+        )
+
+        outside_skills = tmp_path / "host-skills"
+        outside_skills.mkdir()
+        (outside_skills / "dummy_db.txt").write_text("DUMMY_SECRET=123\n")
+        outside_agents = tmp_path / "host-agents"
+        outside_agents.mkdir()
+        (outside_agents / "secret.md").write_text(
+            "---\nname: leaked-agent\n---\nsecret\n"
+        )
+        outside_ext = tmp_path / "host-ext"
+        outside_ext.mkdir()
+        (outside_ext / "ext.js").write_text("export default {};")
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        rootcoz = repo / ".rootcoz"
+        rootcoz.mkdir(parents=True)
+        (rootcoz / "skills").symlink_to(outside_skills)
+        (rootcoz / "agents").symlink_to(outside_agents)
+        (rootcoz / "extensions").symlink_to(outside_ext)
+
+        repos = {"my-repo": repo}
+        copy_rootcoz_pi_resources(repos, workspace)
+        assert not (workspace / ".pi" / "skills").exists()
+        assert not (workspace / ".pi" / "agents").exists()
+        assert not (workspace / ".pi" / "extensions").exists()
+
+        assert discover_project_agent_names(repos) == []
+        resources = build_resources_section(workspace, additional_repos=repos)
+        assert "leaked-agent" not in resources
+
+    def test_rootcoz_prompt_and_agent_file_symlinks_refused_while_legit_works(
+        self, tmp_path
+    ) -> None:
+        """Symlinked prompt and agent files are skipped while real sibling files keep working."""
+        from rootcoz.engine.core import (
+            build_prompt_sections,
+            build_resources_section,
+            discover_project_agent_names,
+            discover_rootcoz_prompt_paths,
+        )
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret_prompt = outside / "secret.txt"
+        secret_prompt.write_text("HOST_SECRET_PROMPT")
+        secret_hist = outside / "hist.txt"
+        secret_hist.write_text("HOST_SECRET_HIST")
+        secret_agent = outside / "evil.md"
+        secret_agent.write_text("---\nname: evil-agent\n---\nsecret\n")
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        agents_dir = repo / ".rootcoz" / "agents"
+        agents_dir.mkdir(parents=True)
+        (repo / ".rootcoz" / "ROOTCOZ_PROMPT.md").symlink_to(secret_prompt)
+        (repo / ".rootcoz" / "ROOTCOZ_HISTORY_PROMPT.md").symlink_to(secret_hist)
+        (agents_dir / "evil.md").symlink_to(secret_agent)
+        (agents_dir / "legit.md").write_text("---\nname: legit-agent\n---\nok\n")
+
+        repos = {"my-repo": repo}
+        assert discover_rootcoz_prompt_paths(repos, history_enabled=True) == []
+        assert discover_project_agent_names(repos) == ["legit-agent"]
+
+        resources = build_resources_section(
+            workspace, additional_repos=repos, history_enabled=True
+        )
+        assert "ROOTCOZ_PROMPT.md" not in resources
+        assert "ROOTCOZ_HISTORY_PROMPT.md" not in resources
+        assert "evil-agent" not in resources
+        assert "legit-agent" in resources
+
+        agent_gate, _, _, res_section, query_section = build_prompt_sections(
+            "",
+            "",
+            workspace,
+            "https://rootcoz.example.com",
+            "job-1",
+            additional_repos=repos,
+            auth_header="Bearer tok",
+        )
+        combined = agent_gate + res_section + query_section
+        assert "ROOTCOZ_PROMPT.md" not in combined
+        assert "ROOTCOZ_HISTORY_PROMPT.md" not in combined
+        assert "evil-agent" not in combined
+        assert "legit-agent" in combined
+
+    def test_workspace_pi_symlink_destination_and_agents_refused(
+        self, tmp_path
+    ) -> None:
+        """Symlinked workspace/.pi dirs or agent files cannot escape the workspace."""
+        from rootcoz.engine.core import (
+            copy_rootcoz_pi_resources,
+            discover_custom_agents,
+            resolve_agent_prompt,
+        )
+
+        outside = tmp_path / "outside-target"
+        outside.mkdir()
+        outside_agent = outside / "leaked.md"
+        outside_agent.write_text("---\nname: escaped-agent\n---\nSECRET BODY\n")
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        (repo / ".rootcoz" / "skills").mkdir(parents=True)
+        (repo / ".rootcoz" / "skills" / "ok.md").write_text("ok")
+
+        # Symlinked workspace/.pi destination must not be written into
+        (workspace / ".pi").symlink_to(outside)
+        copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
+        assert not (outside / "skills").exists()
+
+        # Replace .pi with real dir containing symlinked agents
+        (workspace / ".pi").unlink()
+        pi_agents = workspace / ".pi" / "agents"
+        pi_agents.mkdir(parents=True)
+        (pi_agents / "escaped.md").symlink_to(outside_agent)
+        (pi_agents / "test-analyzer.md").symlink_to(outside_agent)
+        (pi_agents / "real-agent.md").write_text("---\nname: real-agent\n---\nbody\n")
+
+        assert discover_custom_agents(workspace) == ["real-agent"]
+        resolved_prompt = resolve_agent_prompt(workspace)
+        assert "SECRET BODY" not in resolved_prompt
+
+    def test_legitimate_rootcoz_resources_and_prompts_work(self, tmp_path) -> None:
+        """Regular files inside repo/.rootcoz/ are copied, discovered, and advertised."""
+        from rootcoz.engine.core import (
+            build_prompt_sections,
+            copy_rootcoz_pi_resources,
+            discover_project_agent_names,
+            discover_rootcoz_prompt_paths,
+        )
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        rootcoz = repo / ".rootcoz"
+        (rootcoz / "agents").mkdir(parents=True)
+        (rootcoz / "skills").mkdir()
+        (rootcoz / "agents" / "db-expert.md").write_text(
+            "---\nname: db-expert\n---\ncheck db\n"
+        )
+        (rootcoz / "skills" / "triage.md").write_text("triage steps")
+        (rootcoz / "ROOTCOZ_PROMPT.md").write_text("Project analysis instructions")
+        (rootcoz / "ROOTCOZ_HISTORY_PROMPT.md").write_text("History instructions")
+
+        repos = {"my-repo": repo}
+        copy_rootcoz_pi_resources(repos, workspace)
+        assert (workspace / ".pi" / "agents" / "db-expert.md").is_file()
+        assert (
+            workspace / ".pi" / "skills" / "triage.md"
+        ).read_text() == "triage steps"
+        assert discover_project_agent_names(repos) == ["db-expert"]
+        prompt_paths = discover_rootcoz_prompt_paths(repos, history_enabled=True)
+        assert prompt_paths == [
+            rootcoz / "ROOTCOZ_PROMPT.md",
+            rootcoz / "ROOTCOZ_HISTORY_PROMPT.md",
+        ]
+
+        agent_gate, _, _, res_section, query_section = build_prompt_sections(
+            "",
+            "",
+            workspace,
+            "https://rootcoz.example.com",
+            "job-1",
+            additional_repos=repos,
+            auth_header="Bearer tok",
+        )
+        assert "db-expert" in agent_gate
+        assert "ROOTCOZ_PROMPT.md" in agent_gate
+        assert "ROOTCOZ_HISTORY_PROMPT.md" in agent_gate
+        assert "ROOTCOZ_PROMPT.md" in res_section
+        assert "ROOTCOZ_HISTORY_PROMPT.md" in query_section
+
+    def test_nested_symlinked_subdir_and_dest_subdir_refused(self, tmp_path) -> None:
+        """Nested symlinked subdirs in .rootcoz/ or workspace/.pi/ cannot leak or escape."""
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        outside_src = tmp_path / "host-nested-secret"
+        outside_src.mkdir()
+        (outside_src / "leaked.md").write_text("NESTED_HOST_SECRET")
+
+        outside_dst = tmp_path / "host-dest-target"
+        outside_dst.mkdir()
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        # Pre-create a symlinked nested destination dir under workspace/.pi/skills/
+        (workspace / ".pi" / "skills").mkdir(parents=True)
+        (workspace / ".pi" / "skills" / "prelinked").symlink_to(outside_dst)
+
+        repo = workspace / "my-repo"
+        skills_nested = repo / ".rootcoz" / "skills" / "nested"
+        skills_nested.mkdir(parents=True)
+        (skills_nested / "good.md").write_text("legit nested skill")
+        (skills_nested / "escape_dir").symlink_to(outside_src)
+        (repo / ".rootcoz" / "skills" / "top_escape_dir").symlink_to(outside_src)
+        prelinked_src = repo / ".rootcoz" / "skills" / "prelinked"
+        prelinked_src.mkdir()
+        (prelinked_src / "write_attempt.md").write_text("should not escape")
+
+        copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
+
+        assert (
+            workspace / ".pi" / "skills" / "nested" / "good.md"
+        ).read_text() == "legit nested skill"
+        assert not (workspace / ".pi" / "skills" / "nested" / "escape_dir").exists()
+        assert not (workspace / ".pi" / "skills" / "top_escape_dir").exists()
+        assert not (outside_dst / "write_attempt.md").exists()
+        # Verify no copied file anywhere under workspace/.pi contains the secret
+        for f in (workspace / ".pi").rglob("*"):
+            if f.is_file() and not f.is_symlink():
+                assert "NESTED_HOST_SECRET" not in f.read_text(errors="ignore")
 
 
 class TestAnalyzeFailuresWorkspacePattern:

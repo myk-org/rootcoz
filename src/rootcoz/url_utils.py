@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
 from urllib.parse import ParseResult, urlparse, urlunparse
 
 # Fallback for values urlparse rejects (e.g. an unmatched "[" in the
@@ -65,6 +67,74 @@ def validate_http_url(
         schemes = " or ".join(f"{scheme}://" for scheme in allowed_schemes)
         raise ValueError(f"{field_name} must be a valid {schemes} URL")
     return raw
+
+
+_NON_PUBLIC_HOSTS = frozenset({"localhost", "local", "internal"})
+_NON_PUBLIC_HOST_SUFFIXES = (".localhost", ".local", ".internal")
+
+
+def is_public_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True only when *ip* is globally routable."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.scope_id is not None:
+            return False
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+    return (
+        ip.is_global
+        and not ip.is_private
+        and not ip.is_loopback
+        and not ip.is_link_local
+        and not ip.is_multicast
+        and not ip.is_reserved
+        and not ip.is_unspecified
+    )
+
+
+def _parse_ip_literal(
+    host: str,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse *host* as an IPv4/IPv6 literal (including non-canonical IPv4 forms)."""
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    try:
+        return ipaddress.IPv4Address(socket.inet_aton(host))
+    except OSError:
+        return None
+
+
+def validate_public_https_url(value: str, *, field_name: str = "URL") -> str:
+    """Validate *value* as a public ``https://`` URL without embedded credentials.
+
+    Rejects non-HTTPS schemes, whitespace/control chars, embedded userinfo,
+    non-public IP literals (loopback, link-local/metadata, RFC1918, ULA,
+    multicast, reserved, unspecified, IPv4-mapped non-public), and local/internal
+    or single-label hostnames. Never echoes *value* in error messages.
+    """
+    error = f"{field_name} must be a valid public https:// URL"
+    parsed = _parse_valid_url(value, allowed_schemes=("https",))
+    if parsed is None:
+        raise ValueError(error)
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(error)
+    host = (parsed.hostname or "").rstrip(".")
+    if not host:
+        raise ValueError(error)
+    ip = _parse_ip_literal(host)
+    if ip is not None:
+        if not is_public_ip(ip):
+            raise ValueError(error)
+        return value
+    if (
+        host in _NON_PUBLIC_HOSTS
+        or host.endswith(_NON_PUBLIC_HOST_SUFFIXES)
+        or "." not in host
+        or "" in host.split(".")
+    ):
+        raise ValueError(error)
+    return value
 
 
 def strip_url_userinfo(url: str) -> str:

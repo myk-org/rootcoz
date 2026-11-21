@@ -773,6 +773,54 @@ _MAX_ROOTCOZ_PROMPT_FINGERPRINT_BYTES = 16 * 1024 * 1024
 _FINGERPRINT_READ_CHUNK = 64 * 1024
 
 
+def _is_contained_path(root: Path, candidate: Path) -> bool:
+    """Return True if *candidate* stays inside *root* with no symlink hops."""
+    try:
+        rel = candidate.relative_to(root)
+    except ValueError:
+        return False
+    cur = root
+    for part in rel.parts:
+        cur = cur / part
+        if cur.is_symlink():
+            return False
+    try:
+        return candidate.resolve(strict=True).is_relative_to(root.resolve(strict=True))
+    except OSError:
+        return False
+
+
+def _is_contained_dir(root: Path, candidate: Path) -> bool:
+    """Return True if *candidate* is a real directory contained under *root*."""
+    return _is_contained_path(root, candidate) and candidate.is_dir()
+
+
+def _is_contained_file(root: Path, candidate: Path) -> bool:
+    """Return True if *candidate* is a real regular file contained under *root*."""
+    return _is_contained_path(root, candidate) and candidate.is_file()
+
+
+def _is_safe_dest_dir(root: Path, candidate: Path) -> bool:
+    """Return True if *candidate* can be created or written as a dir under *root*."""
+    try:
+        rel = candidate.relative_to(root)
+    except ValueError:
+        return False
+    cur = root
+    for part in rel.parts:
+        cur = cur / part
+        if cur.is_symlink():
+            return False
+        if cur.exists() and not cur.is_dir():
+            return False
+    if candidate.exists():
+        return _is_contained_dir(root, candidate)
+    try:
+        return candidate.resolve().is_relative_to(root.resolve(strict=True))
+    except OSError:
+        return False
+
+
 def _rootcoz_prompt_fingerprint(path: Path) -> str:
     """Open a ``.rootcoz`` prompt file and return a content fingerprint.
 
@@ -784,6 +832,8 @@ def _rootcoz_prompt_fingerprint(path: Path) -> str:
     advertised with ``bytes=`` but ``sha256=skipped`` to avoid worst-case
     hash cost; the AI must still open the full file with ``read``.
     """
+    if path.is_symlink():
+        return ""
     try:
         size = path.stat().st_size
     except OSError:
@@ -852,9 +902,16 @@ def discover_project_agent_names(
     seen: set[str] = set()
     for path in additional_repos.values():
         agents_dir = path / ".rootcoz" / "agents"
-        if not agents_dir.is_dir():
+        if not _is_contained_dir(path, agents_dir):
+            if (path / ".rootcoz").is_symlink() or agents_dir.is_symlink():
+                logger.warning(
+                    "Skipping symlinked .rootcoz/agents directory: %s", agents_dir
+                )
             continue
         for agent_file in sorted(agents_dir.glob("*.md")):
+            if not _is_contained_file(path, agent_file):
+                logger.warning("Skipping unsafe agent file: %s", agent_file)
+                continue
             extracted = _extract_agent_name(agent_file)
             if extracted:
                 name = extracted
@@ -902,11 +959,11 @@ def discover_rootcoz_prompt_paths(
     found: list[Path] = []
     for path in additional_repos.values():
         prompt = path / ".rootcoz" / ROOTCOZ_PROMPT_FILENAME
-        if prompt.is_file():
+        if _is_contained_file(path, prompt):
             found.append(prompt)
         if history_enabled:
             hist = path / ".rootcoz" / ROOTCOZ_HISTORY_PROMPT_FILENAME
-            if hist.is_file():
+            if _is_contained_file(path, hist):
                 found.append(hist)
     return found
 
@@ -934,9 +991,77 @@ Do not skip these reads.
 """
 
 
-def _ignore_symlinks(directory: str, contents: list[str]) -> list[str]:
-    """Ignore symlinks during copytree to prevent escape attacks."""
-    return [c for c in contents if (Path(directory) / c).is_symlink()]
+def _copy_contained_tree(
+    repo_root: Path,
+    src_dir: Path,
+    workspace_root: Path,
+    dst_dir: Path,
+    *,
+    subdir: str,
+    dest_root: Path,
+    repo_name: str,
+) -> None:
+    """Recursively copy regular files from *src_dir* into *dst_dir* without following symlinks."""
+    if not _is_contained_dir(repo_root, src_dir) or not _is_safe_dest_dir(
+        workspace_root, dst_dir
+    ):
+        logger.warning(
+            "Skipping unsafe directory during .rootcoz/%s copy from '%s': %s",
+            subdir,
+            repo_name,
+            src_dir,
+        )
+        return
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    with os.scandir(src_dir) as entries:
+        for entry in sorted(entries, key=lambda e: e.name):
+            src_child = src_dir / entry.name
+            dst_child = dst_dir / entry.name
+            if entry.is_symlink():
+                logger.warning(
+                    "Skipping symlink during .rootcoz/%s copy from '%s': %s",
+                    subdir,
+                    repo_name,
+                    src_child,
+                )
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                _copy_contained_tree(
+                    repo_root,
+                    src_child,
+                    workspace_root,
+                    dst_child,
+                    subdir=subdir,
+                    dest_root=dest_root,
+                    repo_name=repo_name,
+                )
+            elif entry.is_file(follow_symlinks=False):
+                if not _is_contained_file(repo_root, src_child):
+                    logger.warning(
+                        "Skipping unsafe file during .rootcoz/%s copy from '%s': %s",
+                        subdir,
+                        repo_name,
+                        src_child,
+                    )
+                    continue
+                if dst_child.is_symlink() or not _is_safe_dest_dir(
+                    workspace_root, dst_child.parent
+                ):
+                    logger.warning(
+                        "Skipping unsafe destination during .rootcoz/%s copy from '%s': %s",
+                        subdir,
+                        repo_name,
+                        dst_child,
+                    )
+                    continue
+                if dst_child.exists():
+                    logger.warning(
+                        ".rootcoz/%s/%s from '%s' overwrites existing file",
+                        subdir,
+                        os.path.relpath(str(dst_child), str(dest_root)),
+                        repo_name,
+                    )
+                shutil.copy2(src_child, dst_child, follow_symlinks=False)
 
 
 def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) -> None:
@@ -955,43 +1080,52 @@ def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) ->
         cloned_repos: Mapping of repo name to cloned path.
         workspace: Root workspace directory.
     """
+    pi_dir = workspace / ".pi"
+    if not _is_safe_dest_dir(workspace, pi_dir):
+        logger.warning(
+            "Skipping copy_rootcoz_pi_resources: workspace .pi path is unsafe (%s)",
+            pi_dir,
+        )
+        return
+
     for repo_name, repo_path in cloned_repos.items():
         rootcoz_dir = repo_path / ".rootcoz"
-        if not rootcoz_dir.is_dir():
+        if not _is_contained_dir(repo_path, rootcoz_dir):
+            if rootcoz_dir.is_symlink() or rootcoz_dir.exists():
+                logger.warning(
+                    "Skipping unsafe .rootcoz directory in '%s': %s",
+                    repo_name,
+                    rootcoz_dir,
+                )
             continue
-        pi_dir = workspace / ".pi"
         for subdir in _ROOTCOZ_PI_SUBDIRS:
             src = rootcoz_dir / subdir
-            if not src.is_dir():
+            if not _is_contained_dir(repo_path, src):
+                if src.is_symlink() or src.exists():
+                    logger.warning(
+                        "Skipping unsafe .rootcoz/%s in '%s': %s",
+                        subdir,
+                        repo_name,
+                        src,
+                    )
                 continue
             dest = pi_dir / subdir
+            if not _is_safe_dest_dir(workspace, dest):
+                logger.warning(
+                    "Skipping unsafe workspace destination .pi/%s for '%s'",
+                    subdir,
+                    repo_name,
+                )
+                continue
             try:
-
-                def _copy_with_overwrite_warning(
-                    src_path: str,
-                    dst_path: str,
-                    *,
-                    follow_symlinks: bool = True,
-                    subdir: str = subdir,
-                    dest: Path = dest,
-                    repo_name: str = repo_name,
-                ) -> None:
-                    """copy2 wrapper that warns when overwriting existing files."""
-                    if os.path.exists(dst_path):
-                        logger.warning(
-                            ".rootcoz/%s/%s from '%s' overwrites existing file",
-                            subdir,
-                            os.path.relpath(dst_path, str(dest)),
-                            repo_name,
-                        )
-                    shutil.copy2(src_path, dst_path, follow_symlinks=follow_symlinks)
-
-                shutil.copytree(
+                _copy_contained_tree(
+                    repo_path,
                     src,
+                    workspace,
                     dest,
-                    ignore=_ignore_symlinks,
-                    copy_function=_copy_with_overwrite_warning,
-                    dirs_exist_ok=True,
+                    subdir=subdir,
+                    dest_root=dest,
+                    repo_name=repo_name,
                 )
                 logger.info(
                     "Copied .rootcoz/%s/ from '%s' to workspace .pi/%s/",
@@ -2023,10 +2157,11 @@ def build_prompt_sections(
         if additional_repos:
             for _path in additional_repos.values():
                 repo_history_path = _path / ".rootcoz" / ROOTCOZ_HISTORY_PROMPT_FILENAME
+                has_repo_history = _is_contained_file(_path, repo_history_path)
                 logger.debug(
-                    f"Repo history analysis prompt exists at {_path}: {repo_history_path.exists()}"
+                    f"Repo history analysis prompt exists at {_path}: {has_repo_history}"
                 )
-                if repo_history_path.exists():
+                if has_repo_history:
                     logger.info(
                         f"Found repo-level history analysis prompt at {repo_history_path}"
                     )
@@ -2115,7 +2250,7 @@ def build_resources_section(
                 )
             # Check for project-specific instructions in each repo
             rootcoz_prompt = path / ".rootcoz" / ROOTCOZ_PROMPT_FILENAME
-            if rootcoz_prompt.exists():
+            if _is_contained_file(path, rootcoz_prompt):
                 prompt_fp = _rootcoz_prompt_fingerprint(rootcoz_prompt)
                 resources.append(
                     f"- Project-specific analysis instructions at {rootcoz_prompt} — "
@@ -2124,7 +2259,7 @@ def build_resources_section(
                     f"per AGENTS.md file-based data policy / issue #74)"
                 )
             repo_history_prompt = path / ".rootcoz" / ROOTCOZ_HISTORY_PROMPT_FILENAME
-            if history_enabled and repo_history_prompt.exists():
+            if history_enabled and _is_contained_file(path, repo_history_prompt):
                 hist_fp = _rootcoz_prompt_fingerprint(repo_history_prompt)
                 resources.append(
                     f"- Project-specific history analysis instructions"
@@ -2135,8 +2270,12 @@ def build_resources_section(
                 )
             # Advertise project-provided agents (from .rootcoz/agents/)
             pi_agents_dir = path / ".rootcoz" / "agents"
-            if pi_agents_dir.is_dir():
-                agent_files = sorted(pi_agents_dir.glob("*.md"))
+            if _is_contained_dir(path, pi_agents_dir):
+                agent_files = [
+                    af
+                    for af in sorted(pi_agents_dir.glob("*.md"))
+                    if _is_contained_file(path, af)
+                ]
                 if agent_files:
                     # Names already listed in STEP 0 gate; keep a reminder here.
                     agent_names: list[str] = []
@@ -2857,11 +2996,16 @@ def copy_builtin_agents_to_workspace(workspace: Path) -> None:
         return
 
     dest = workspace / ".pi" / "agents"
+    if not _is_safe_dest_dir(workspace, dest):
+        logger.warning(
+            "Skipping built-in agents copy: workspace destination is unsafe (%s)", dest
+        )
+        return
     dest.mkdir(parents=True, exist_ok=True)
 
     for agent_file in sorted(ORCHESTRATOR_AGENTS_DIR.glob("*.md")):
         target = dest / agent_file.name
-        if target.exists():
+        if target.is_symlink() or target.exists():
             logger.debug(
                 "Skipping built-in agent '%s' — user agent already exists at %s",
                 agent_file.stem,
@@ -2912,7 +3056,7 @@ def resolve_agent_prompt(workspace: Path | None) -> str:
     # Check user override first
     if workspace:
         user_agent = workspace / ".pi" / "agents" / "test-analyzer.md"
-        if user_agent.is_file():
+        if _is_contained_file(workspace, user_agent):
             try:
                 content = user_agent.read_text(encoding="utf-8")
                 logger.info(
@@ -2947,11 +3091,13 @@ def discover_custom_agents(workspace: Path | None) -> list[str]:
     if not workspace:
         return []
     agents_dir = workspace / ".pi" / "agents"
-    if not agents_dir.is_dir():
+    if not _is_contained_dir(workspace, agents_dir):
         return []
 
     names: list[str] = []
     for agent_file in sorted(agents_dir.glob("*.md")):
+        if not _is_contained_file(workspace, agent_file):
+            continue
         name = _extract_agent_name(agent_file)
         if not name:
             if _SAFE_AGENT_NAME_RE.match(agent_file.stem):
@@ -3370,7 +3516,7 @@ async def run_orchestrated_analysis(
         routed_agent = agent_routing.get(sig)
         if routed_agent:
             agent_file = workspace_dir / ".pi" / "agents" / f"{routed_agent}.md"
-            if agent_file.is_file():
+            if _is_contained_file(workspace_dir, agent_file):
                 agent_appendix = (
                     f"\n\n=== SPECIALIST AGENT ({routed_agent}) ===\n"
                     f"A specialist agent has been assigned to this failure group.\n"

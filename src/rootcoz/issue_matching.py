@@ -17,6 +17,7 @@ from typing import Any, TypedDict
 from rootcoz import get_child_logger
 from rootcoz.ai_client import call_ai_once
 from rootcoz.models import AnalysisDetail, FailureAnalysis, ProductBugReport
+from rootcoz.url_utils import mask_stored_url, redact_urls_in_text
 
 logger = get_child_logger(__name__)
 
@@ -194,8 +195,8 @@ async def run_tracker_search(
             logger.exception(
                 "%s failed%s with keywords: %s",
                 spec.label,
-                f" for {target}" if target else "",
-                list(keywords),
+                f" for {mask_stored_url(target)}" if target else "",
+                [redact_urls_in_text(kw) for kw in keywords],
             )
             return None
 

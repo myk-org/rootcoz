@@ -5,16 +5,20 @@ The predicate is the only implementation of the whitespace/control-character
 validates a URL is pinned through it here.
 """
 
+import ipaddress
+
 import pytest
 
 from rootcoz.url_utils import (
     _parse_valid_url,
+    is_public_ip,
     mask_stored_url,
     mask_url_value,
     sanitize_clone_url,
     sanitize_http_href,
     strip_nonprintable,
     validate_http_url,
+    validate_public_https_url,
 )
 
 
@@ -265,3 +269,121 @@ class TestAtTokenNotAtTheEnd:
     ) -> None:
         """No path, but words around it: a token, not a host (#562)."""
         assert mask_stored_url(value) == expected
+
+
+class TestIsPublicIp:
+    @pytest.mark.parametrize(
+        "addr",
+        [
+            "8.8.8.8",
+            "1.1.1.1",
+            "142.250.80.46",
+            "2607:f8b0:4005:80b::200e",
+        ],
+    )
+    def test_accepts_public_ips(self, addr: str) -> None:
+        assert is_public_ip(ipaddress.ip_address(addr)) is True
+
+    @pytest.mark.parametrize(
+        "addr",
+        [
+            "127.0.0.1",
+            "::1",
+            "0.0.0.0",
+            "::",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "fe80::1",
+            "fe80::1%eth0",
+            "fc00::1",
+            "fd12::1",
+            "100.64.0.1",
+            "224.0.0.1",
+            "ff02::1",
+            "240.0.0.1",
+            "255.255.255.255",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:10.0.0.1",
+            "64:ff9b::127.0.0.1",
+        ],
+    )
+    def test_rejects_non_public_ips(self, addr: str) -> None:
+        assert is_public_ip(ipaddress.ip_address(addr)) is False
+
+
+class TestValidatePublicHttpsUrl:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://fcm.googleapis.com/fcm/send/abc123",
+            "https://updates.push.services.mozilla.com/wpush/v2/abc123",
+            "https://web.push.apple.com/QAbc123",
+            "https://wns2-bl2p.notify.windows.com/w/?token=abc",
+            "https://push.example.com:8443/sub/1",
+            "https://8.8.8.8/push",
+            "https://[2607:f8b0:4005:80b::200e]/push",
+        ],
+    )
+    def test_accepts_public_https_urls(self, url: str) -> None:
+        assert validate_public_https_url(url, field_name="Push endpoint") == url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "",
+            "http://fcm.googleapis.com/fcm/send/abc123",
+            "https://",
+            "https://[bad/push",
+            "https://push.example.com:badport/push",
+            "https://user:pass@push.example.com/push",  # pragma: allowlist secret
+            "https://@push.example.com/push",
+            "https://push.example.com/push with space",
+            " https://push.example.com/push",
+            "https://push.example.com/push\n",
+            "https://push.example.com/push\x00",
+            "https://127.0.0.1/push",
+            "https://127.0.0.1:8443/push",
+            "https://127.1/push",
+            "https://0177.0.0.1/push",
+            "https://2130706433/push",
+            "https://[::1]/push",
+            "https://[::ffff:127.0.0.1]/push",
+            "https://169.254.169.254/latest/meta-data",
+            "https://[fe80::1]/push",
+            "https://[::ffff:169.254.169.254]/push",
+            "https://10.0.0.1/internal",
+            "https://172.16.0.1/internal",
+            "https://192.168.1.1/internal",
+            "https://[fd00::1]/internal",
+            "https://0.0.0.0/push",
+            "https://[::]/push",
+            "https://224.0.0.1/push",
+            "https://[ff02::1]/push",
+            "https://240.0.0.1/push",
+            "https://localhost/push",
+            "https://LOCALHOST./push",
+            "https://sub.localhost/push",
+            "https://printer.local/push",
+            "https://metadata.google.internal/computeMetadata",
+            "https://host.docker.internal/push",
+            "https://svc.internal./push",
+            "https://sidecar/push",
+            "https://.example.com/push",
+            "https://a..example.com/push",
+        ],
+    )
+    def test_rejects_invalid_or_non_public_urls(self, url: str) -> None:
+        with pytest.raises(ValueError, match="Push endpoint"):
+            validate_public_https_url(url, field_name="Push endpoint")
+
+    def test_error_never_echoes_secret_value(self) -> None:
+        secret_url = "https://user:s3cr3t@127.0.0.1/push"  # pragma: allowlist secret
+        with pytest.raises(ValueError) as excinfo:
+            validate_public_https_url(secret_url, field_name="Push endpoint")
+        message = str(excinfo.value)
+        assert "Push endpoint" in message
+        assert "s3cr3t" not in message
+        assert "127.0.0.1" not in message
