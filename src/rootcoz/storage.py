@@ -5984,6 +5984,45 @@ async def add_tracked_in_link(
     if not url:
         return 0
     async with _connect_db() as db:
+        # Match any pre-hardening rows in the same scope whose sanitized URL
+        # equals `url`, so re-adding an old credential-bearing link updates it
+        # in place instead of creating a duplicate alongside the legacy row.
+        existing_cursor = await db.execute(
+            "SELECT id, url FROM tracked_in_links "
+            "WHERE job_id = ? AND test_name = ? "
+            "AND child_job_name = ? AND child_build_number = ? "
+            "ORDER BY id",
+            (job_id, test_name, child_job_name, child_build_number),
+        )
+        matching_rows = [
+            row
+            for row in await existing_cursor.fetchall()
+            if sanitize_http_href(row["url"]) == url
+        ]
+        if matching_rows:
+            keeper = next(
+                (row for row in matching_rows if row["url"] == url),
+                matching_rows[0],
+            )
+            extra_ids = [
+                row["id"] for row in matching_rows if row["id"] != keeper["id"]
+            ]
+            if extra_ids:
+                placeholders = ",".join("?" for _ in extra_ids)
+                await db.execute(
+                    f"DELETE FROM tracked_in_links WHERE id IN ({placeholders})",
+                    extra_ids,
+                )
+            await db.execute(
+                "UPDATE tracked_in_links SET url = ?, "
+                "type = CASE WHEN ? != '' THEN ? ELSE type END, "
+                "created_by = CASE WHEN created_by = '' THEN ? ELSE created_by END "
+                "WHERE id = ?",
+                (url, tracked_type, tracked_type, tracked_by, keeper["id"]),
+            )
+            await db.commit()
+            return int(keeper["id"])
+
         cursor = await db.execute(
             "INSERT INTO tracked_in_links "
             "(job_id, test_name, child_job_name, child_build_number, url, type, created_by) "
@@ -6521,6 +6560,17 @@ async def get_test_history(
             [*params, limit],
         )
         recent_runs = [dict(row) for row in await cursor.fetchall()]
+        for run in recent_runs:
+            raw_urls = run.get("tracked_urls")
+            if raw_urls:
+                clean_urls = list(
+                    dict.fromkeys(
+                        u
+                        for part in raw_urls.split(", ")
+                        if (u := sanitize_http_href(part))
+                    )
+                )
+                run["tracked_urls"] = ", ".join(clean_urls) or None
 
         # Total failure record count — computed with a separate unbounded query
         # so the value is not capped by the `limit` parameter used for recent_runs.

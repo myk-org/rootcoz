@@ -1618,3 +1618,49 @@ class TestExportUrlCredentialStripping:
             )
             assert "jira_secret" not in repr(scoped)
             assert "old_secret" not in repr(scoped)
+
+            # History lookup must also strip credentials from legacy tracked_in_links rows
+            await storage.populate_failure_history(
+                "job-til-600",
+                {
+                    "job_name": "suite-600",
+                    "build_number": 1,
+                    "failures": [
+                        {
+                            "test_name": "test_legacy",
+                            "error": "boom",
+                            "analysis": {"classification": "PRODUCT BUG"},
+                        }
+                    ],
+                },
+            )
+            history = await storage.get_test_history("test_legacy")
+            assert history["recent_runs"]
+            assert (
+                history["recent_runs"][0]["tracked_urls"]
+                == "https://jira.example.com/browse/PROJ-2"
+            )
+            assert "old_secret" not in repr(history)
+
+            # Re-adding the same link updates the legacy row in place (no duplicate)
+            updated_id = await storage.add_tracked_in_link(
+                job_id="job-til-600",
+                test_name="test_legacy",
+                url="https://jira.example.com/browse/PROJ-2",
+                tracked_type="jira",
+                tracked_by="reviewer1",
+            )
+            assert updated_id > 0
+            scoped_after = await storage.get_tracked_in_for_scope("job-til-600")
+            assert len(scoped_after["test_legacy"]) == 1
+            assert (
+                scoped_after["test_legacy"][0]["tracked_in_url"]
+                == "https://jira.example.com/browse/PROJ-2"
+            )
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT url FROM tracked_in_links "
+                    "WHERE job_id = 'job-til-600' AND test_name = 'test_legacy'"
+                )
+                raw_urls = [row["url"] for row in await cursor.fetchall()]
+            assert raw_urls == ["https://jira.example.com/browse/PROJ-2"]

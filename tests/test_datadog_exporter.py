@@ -2571,3 +2571,41 @@ class TestMarkdownAndUrlHardening:
         )
         assert "- **Reviewed by:** Bob Smith!" in message
         assert "100% of retries timed out.\nCheck pod logs for OOMKill." in message
+
+    def test_details_uppercase_scheme_urls_strip_credentials(self):
+        details = (
+            "Check HTTPS://user:upper_secret@example.com/path and "  # pragma: allowlist secret
+            "HTTP://u:lower_secret@ci.example.com/1 and "  # pragma: allowlist secret
+            "GIT://tok_secret@git.example.com/org/repo.git"  # pragma: allowlist secret
+        )
+        message = _message(
+            _exporter()._build_event(_context(), _failure(details=details))
+        )
+        for secret in ("upper_secret", "lower_secret", "tok_secret"):
+            assert secret not in message
+        assert "https://example.com/path" in message
+        assert "http://ci.example.com/1" in message
+        assert "git://git.example.com/org/repo.git" in message
+
+    def test_duplicate_sanitized_tracked_in_links_deduplicated(self):
+        context = _context(
+            tracked_in_links={
+                "test_login_flow": [
+                    {
+                        "tracked_in_url": "https://u1:pw1@jira.example.com/browse/PROJ-1",  # pragma: allowlist secret
+                        "tracked_in_type": "jira",
+                    },
+                    {
+                        "tracked_in_url": "https://jira.example.com/browse/PROJ-1",
+                        "tracked_in_type": "jira",
+                    },
+                ]
+            }
+        )
+        message = _message(_exporter()._build_event(context, _failure()))
+        assert (
+            message.count(
+                "- **Tracked in:** [Jira](https://jira.example.com/browse/PROJ-1)"
+            )
+            == 1
+        )

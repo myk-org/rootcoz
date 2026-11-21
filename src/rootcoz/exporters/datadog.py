@@ -962,10 +962,12 @@ class DatadogExporter(Exporter):
                     f"- **CI build:** [build #{safe_build_number}]({safe_jenkins_url})"
                 )
         if self._push_tracker_links:
+            seen_urls: set[str] = set()
             for link in context.tracked_in_links.get(test_name, []):
                 safe_url = _md_link_url(str(link.get("tracked_in_url", "") or ""))
-                if not safe_url:
+                if not safe_url or safe_url in seen_urls:
                     continue
+                seen_urls.add(safe_url)
                 label = {
                     "jira": "Jira",
                     "github": "GitHub",
