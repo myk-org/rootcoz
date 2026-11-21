@@ -1105,21 +1105,32 @@ class _PendingFeed:
     deadline so the navbar and multiplexed streams share one implementation.
     """
 
-    def __init__(self, event: asyncio.Event | None, username: str, name: str):
+    def __init__(
+        self,
+        event: asyncio.Event | None,
+        username: str,
+        name: str,
+        auth_check: Callable[[], Awaitable[bool]] | None = None,
+    ):
         self.event = event
         self.username = username
         self.name = name
+        self._auth_check = auth_check
         # ``None`` = no count delivered to this stream yet.
         self.last: int | None = None
         # ``None`` = nothing to retry; otherwise the monotonic retry deadline.
         self.retry_at: float | None = None
 
     async def step(self) -> str | None:
-        """Re-verify the admin role and recount; return the chunk to emit."""
+        """Re-verify the admin role/credential and recount; return the chunk to emit."""
         if self.event is None:
             return None
         try:
-            still_admin = await _ai_admin_role_current(self.username)
+            still_admin = (
+                await self._auth_check()
+                if self._auth_check is not None
+                else await _ai_admin_role_current(self.username)
+            )
         except aiosqlite.Error, OSError, TypeError, ValueError:
             # Unverifiable is not revoked: send nothing, but stay registered and
             # retry, so a transient database error does not freeze the badge.
@@ -4171,6 +4182,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _derive_sidecar_url_from_port()
 
     await init_db()
+    await _migrate_legacy_admin_artifacts()
     await storage.cleanup_expired_sessions()
     await _cleanup_revoked_ai_sessions()
 
@@ -6220,7 +6232,9 @@ _ADMIN_MULTIPLEX_TOPICS = frozenset({"token-usage", "settings", "admin-chat"})
 _ADMIN_SSE_RECHECK_INTERVAL_SECONDS = 1.0
 
 
-async def _is_admin_sse_authorized(request: Request) -> bool:
+async def _is_admin_sse_authorized(
+    request: Request, *, raise_on_error: bool = False
+) -> bool:
     """Re-verify that a long-lived admin SSE caller is still an active admin.
 
     Checks both the live account state (not deleted, not disabled, still admin)
@@ -6302,6 +6316,8 @@ async def _is_admin_sse_authorized(request: Request) -> bool:
             )
         return still_admin
     except Exception:
+        if raise_on_error:
+            raise
         logger.warning(
             "Admin SSE authorization re-check failed for '%s'; closing stream",
             username,
@@ -16513,7 +16529,12 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
             _mention_listeners.setdefault(username, set()).add(mention_event)
         if pending_event is not None:
             _pending_count_listeners.add(pending_event)
-        pending_feed = _PendingFeed(pending_event, username, "pending-count")
+        pending_feed = _PendingFeed(
+            pending_event,
+            username,
+            "pending-count",
+            auth_check=partial(_is_admin_sse_authorized, request, raise_on_error=True),
+        )
 
         try:
             # Send both counts immediately on connect
@@ -16563,6 +16584,11 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     break
 
                 if not done and not pending_feed.retry_due():
+                    if pending_feed.event is not None and (
+                        chunk := await pending_feed.step()
+                    ):
+                        yield chunk
+                        continue
                     yield ": keepalive\n\n"
                     continue
 
@@ -16803,7 +16829,12 @@ async def stream_multiplexed(
             if is_admin:
                 pending_event = asyncio.Event()
                 _pending_count_listeners.add(pending_event)
-        pending_feed = _PendingFeed(pending_event, username, "navbar:pending-count")
+        pending_feed = _PendingFeed(
+            pending_event,
+            username,
+            "navbar:pending-count",
+            auth_check=partial(_is_admin_sse_authorized, request, raise_on_error=True),
+        )
 
         wait_tasks: list[asyncio.Task[Any]] = []
         _sse_connections += 1
@@ -16868,6 +16899,11 @@ async def stream_multiplexed(
                 if not done and not pending_feed.retry_due():
                     if admin_auth_check is not None and not await admin_auth_check():
                         break
+                    if pending_feed.event is not None and (
+                        chunk := await pending_feed.step()
+                    ):
+                        yield chunk
+                        continue
                     yield ": keepalive\n\n"
                     continue
 
@@ -20493,14 +20529,6 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
         # Read the account before it is gone: the row has to say what that account
         # had, or a permission that disappears with it can never be explained.
         snapshot = await storage.get_user_audit_snapshot(username)
-        # Clean any legacy username-keyed artifacts BEFORE delete_user frees
-        # the username; current DB accounts store artifacts under immutable
-        # user-<owner_id> directories so a recreated username can neither race
-        # with nor reach a prior owner's artifacts (#603).
-        await cleanup_off_loop(
-            f"owner:{owner_id}",
-            partial(_cleanup_admin_artifacts, stored_username),
-        )
         marker_written = await issue_attachments.write_owner_delete_marker(owner_id)
         try:
             deleted = await storage.delete_user(username)
@@ -28679,21 +28707,80 @@ async def _process_admin_chat_message(
 # -- Admin chat artifact helpers --
 
 _ADMIN_ARTIFACTS_BASE = Path("/tmp/rootcoz-admin-artifacts")
+# Leading dot is forbidden in valid usernames (storage._validate_username), so
+# `.by-id/<owner_id>` is strictly disjoint from every username-named directory.
+_ADMIN_ARTIFACTS_BY_ID_DIR = ".by-id"
 
 
 def _get_admin_artifacts_dir(username: str, *, owner_id: int | None = None) -> Path:
     """Get the artifacts directory for an admin user.
 
-    DB admins use their immutable ``users.id`` (``user-<id>``) so recreating
-    the same username never reaches surviving artifacts from a prior account
-    nor races with an in-flight deletion of the old account (#603). Bootstrap
-    ``admin`` (which has no users row) uses ``admin``.
+    DB admins use their immutable ``users.id`` under ``.by-id/<id>`` (disjoint
+    from every valid username) so recreating the same username never reaches
+    surviving artifacts from a prior account nor races with an in-flight
+    deletion of the old account (#603). Bootstrap ``admin`` (which has no
+    users row) uses ``admin``.
     """
     from rootcoz.temp_paths import sanitize_path_part
 
     if owner_id is not None:
-        return _ADMIN_ARTIFACTS_BASE / f"user-{owner_id}"
+        return _ADMIN_ARTIFACTS_BASE / _ADMIN_ARTIFACTS_BY_ID_DIR / str(owner_id)
     return _ADMIN_ARTIFACTS_BASE / sanitize_path_part(username)
+
+
+async def _migrate_legacy_admin_artifacts() -> None:
+    """Migrate pre-upgrade username-keyed admin artifact dirs into ``.by-id/<id>``.
+
+    Runs once at startup before requests are served: active DB admins keep
+    access to previously saved reports under their immutable owner_id path,
+    while orphaned directories from deleted or non-admin users are purged.
+    """
+    if not _ADMIN_ARTIFACTS_BASE.exists() or not _ADMIN_ARTIFACTS_BASE.is_dir():
+        return
+    try:
+        entries = list(_ADMIN_ARTIFACTS_BASE.iterdir())
+    except OSError:
+        logger.warning(
+            "Admin chat: failed to scan %s for legacy artifact migration",
+            _ADMIN_ARTIFACTS_BASE,
+            exc_info=True,
+        )
+        return
+
+    for entry in entries:
+        name = entry.name
+        if name == "admin" or name.startswith(".") or not entry.is_dir():
+            continue
+        row = await storage.get_user_by_username(name)
+        if row is not None and row.get("role") == "admin":
+            target_dir = _get_admin_artifacts_dir(name, owner_id=int(row["id"]))
+
+            def _move_dir(src: Path = entry, dst: Path = target_dir) -> None:
+                dst.mkdir(parents=True, exist_ok=True)
+                dst.chmod(0o700)
+                for item in src.iterdir():
+                    dest_item = dst / item.name
+                    if not dest_item.exists():
+                        item.replace(dest_item)
+                delete_tree(src)
+
+            try:
+                await asyncio.to_thread(_move_dir)
+                logger.info(
+                    "Admin chat: migrated legacy artifacts for '%s' to owner %s",
+                    name,
+                    row["id"],
+                )
+            except OSError:
+                logger.warning(
+                    "Admin chat: failed to migrate legacy artifacts for '%s'",
+                    name,
+                    exc_info=True,
+                )
+        else:
+            await cleanup_off_loop(
+                f"legacy-artifacts:{name}", partial(delete_tree, entry)
+            )
 
 
 async def _resolve_admin_artifacts_owner_id(username: str) -> tuple[bool, int | None]:

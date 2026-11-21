@@ -22341,11 +22341,6 @@ class TestUserLifecycleAndAdminSseRevocation:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_file = artifact_dir / "report.html"
         artifact_file.write_text("<h1>secret</h1>", encoding="utf-8")
-        legacy_artifact_dir = main_module._get_admin_artifacts_dir("alice")
-        legacy_artifact_dir.mkdir(parents=True, exist_ok=True)
-        (legacy_artifact_dir / "legacy.html").write_text(
-            "<h1>legacy</h1>", encoding="utf-8"
-        )
         await storage.add_chat_message(
             "job-1", "user", "ALICE_PRIVATE", username="alice"
         )
@@ -22356,6 +22351,16 @@ class TestUserLifecycleAndAdminSseRevocation:
             "alice", "dashboard", "server", "SharedPreset", {"q": "2"}
         )
 
+        # A separate user named `user-<owner_id>` cannot collide with alice's
+        # `.by-id/<owner_id>` directory when deleted.
+        colliding_name = f"user-{owner_id}"
+        await storage.create_user(colliding_name, role="reviewer")
+        request = SimpleNamespace(
+            state=SimpleNamespace(username="admin", role="admin", is_admin=True)
+        )
+        await main_module.delete_user_endpoint(request, colliding_name)
+        assert artifact_file.exists()
+
         cleanup_scopes: list[str] = []
         orig_cleanup = main_module.cleanup_off_loop
 
@@ -22365,13 +22370,22 @@ class TestUserLifecycleAndAdminSseRevocation:
 
         monkeypatch.setattr(main_module, "cleanup_off_loop", _spy_cleanup)
 
-        request = SimpleNamespace(
-            state=SimpleNamespace(username="admin", role="admin", is_admin=True)
+        # A failed delete must not destroy the user's artifacts prematurely.
+        orig_delete_user = storage.delete_user
+        monkeypatch.setattr(
+            storage,
+            "delete_user",
+            AsyncMock(side_effect=ValueError("cannot delete")),
         )
+        with pytest.raises(HTTPException) as failed_del:
+            await main_module.delete_user_endpoint(request, "alice")
+        assert failed_del.value.status_code == 400
+        assert artifact_file.exists()
+        monkeypatch.setattr(storage, "delete_user", orig_delete_user)
+
         result = await main_module.delete_user_endpoint(request, "alice")
         assert result["deleted"] == "alice"
         assert not artifact_dir.exists()
-        assert not legacy_artifact_dir.exists()
         assert f"owner:{owner_id}" in cleanup_scopes
 
         # Re-creating alice (even as admin) gets a new owner_id and cannot reach
@@ -22788,3 +22802,90 @@ class TestUserLifecycleAndAdminSseRevocation:
         assert res is not None and res["refused"] is None
         assert await guard() is False
         assert calls == 2
+
+    async def test_migrate_legacy_admin_artifacts_preserves_active_and_purges_orphans(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Startup migration moves active DB admin reports into .by-id/<id> and drops orphans."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "migrate_artifacts.db")
+        monkeypatch.setattr(
+            main_module, "_ADMIN_ARTIFACTS_BASE", tmp_path / "artifacts"
+        )
+        await storage.init_db()
+        await storage.create_admin_user("existing-adm")
+        row = await storage.get_user_by_username("existing-adm")
+        assert row is not None
+
+        legacy_id = "22222222-2222-4222-8222-222222222222"
+        active_legacy = main_module._ADMIN_ARTIFACTS_BASE / "existing-adm"
+        active_legacy.mkdir(parents=True, exist_ok=True)
+        (active_legacy / f"{legacy_id}.html").write_text(
+            "<h1>migrated</h1>", encoding="utf-8"
+        )
+        orphan_legacy = main_module._ADMIN_ARTIFACTS_BASE / "deleted-adm"
+        orphan_legacy.mkdir(parents=True, exist_ok=True)
+        (orphan_legacy / "old.html").write_text("<h1>orphan</h1>", encoding="utf-8")
+
+        await main_module._migrate_legacy_admin_artifacts()
+
+        assert not active_legacy.exists()
+        assert not orphan_legacy.exists()
+        adm_req = SimpleNamespace(
+            state=SimpleNamespace(username="existing-adm", role="admin", is_admin=True)
+        )
+        resp = await main_module.get_admin_chat_artifact(legacy_id, adm_req)
+        assert resp.body == b"<h1>migrated</h1>"
+
+    async def test_navbar_only_admin_stream_clears_pending_count_on_logout_and_key_rotation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """navbar-only SSE clears pending-count on session logout and API key rotation (#605)."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "navbar_revoke.db")
+        await storage.init_db()
+        _, raw_key = await storage.create_admin_user("nav-adm")
+        await storage.create_user("pending-u1", status="pending", role="reviewer")
+        tok = await storage.create_session("nav-adm", is_admin=True, role="admin")
+
+        # 1. Multiplexed navbar-only stream clears pending count after session logout.
+        req_mux = self._make_sse_request(username="nav-adm", session_token=tok)
+        resp_mux = await main_module.stream_multiplexed(req_mux, topics="navbar")
+        body_mux = resp_mux.body_iterator
+        try:
+            initial = [
+                await asyncio.wait_for(anext(body_mux), timeout=1) for _ in range(3)
+            ]
+            assert initial[2] == "event: navbar:pending-count\ndata: 1\n\n"
+            pending = asyncio.create_task(anext(body_mux))
+            await asyncio.sleep(0)
+            await storage.delete_session(tok)
+            await storage.create_user("pending-u2", status="pending", role="reviewer")
+            main_module.notify_pending_count_changed()
+            cleared = await asyncio.wait_for(pending, timeout=1)
+            assert cleared == "event: navbar:pending-count\ndata: 0\n\n"
+        finally:
+            await body_mux.aclose()
+
+        # 2. Standalone navbar stream clears pending count after Bearer API key rotation.
+        req_nav = self._make_sse_request(username="nav-adm", bearer_token=raw_key)
+        resp_nav = await main_module.stream_navbar_counts(req_nav)
+        body_nav = resp_nav.body_iterator
+        try:
+            initial = [
+                await asyncio.wait_for(anext(body_nav), timeout=1) for _ in range(3)
+            ]
+            assert initial[2] == "event: pending-count\ndata: 2\n\n"
+            pending = asyncio.create_task(anext(body_nav))
+            await asyncio.sleep(0)
+            await storage.rotate_own_key("nav-adm")
+            await storage.create_user("pending-u3", status="pending", role="reviewer")
+            main_module.notify_pending_count_changed()
+            cleared = await asyncio.wait_for(pending, timeout=1)
+            assert cleared == "event: pending-count\ndata: 0\n\n"
+        finally:
+            await body_nav.aclose()
