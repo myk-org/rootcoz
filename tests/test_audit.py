@@ -6098,6 +6098,7 @@ def test_audit_endpoints_reject_unauthenticated(app_client) -> None:
 async def test_audit_stream_emits_new_event(audit_db: Path) -> None:
     request = AsyncMock()
     request.state.is_admin = True
+    request.state.username = "admin"
     request.is_disconnected = AsyncMock(return_value=False)
 
     response = await main.stream_audit_events(request)
@@ -6143,6 +6144,7 @@ async def test_audit_stream_strips_nested_credentials(audit_db: Path) -> None:
     """A queued event is projected like the list endpoint before it is sent."""
     request = AsyncMock()
     request.state.is_admin = True
+    request.state.username = "admin"
     request.is_disconnected = AsyncMock(return_value=False)
 
     response = await main.stream_audit_events(request)

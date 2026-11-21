@@ -3229,7 +3229,7 @@ async def call_ai(
         from rootcoz.storage import get_user_by_username
 
         account = await get_user_by_username(username) if username else None
-        if account is None and username != "admin":
+        if (account is None or account.get("disabled")) and username != "admin":
             raise LookupError(
                 "AI session owner account changed during session creation"
             )

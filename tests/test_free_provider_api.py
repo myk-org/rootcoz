@@ -442,3 +442,59 @@ def test_ai_models_provider_lookup_is_case_insensitive(client, monkeypatch):
     assert resp.status_code == 200, resp.text
     assert resp.json()["provider"] == "EnMaaS"
     assert [m["id"] for m in resp.json()["models"]] == ["glm-5-3"]
+
+
+def test_disabled_user_has_no_free_provider_access(client, monkeypatch):
+    """Disabled users and admins lose free-provider access until re-enabled (#619)."""
+    import asyncio
+
+    from rootcoz import ai_client
+
+    client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"enable_free_models": "true"}},
+    )
+    asyncio.run(storage.set_free_ai_models([("openai", "gpt-free")], "admin"))
+    monkeypatch.setattr(ai_client, "is_server_provider_active", lambda _p: True)
+
+    async def _allow_selected(_p, _m):
+        return None
+
+    monkeypatch.setattr(ai_client, "require_selected_server_pair", _allow_selected)
+    # Keep a second active DB admin so disabling free-admin is not refused as last_admin.
+    assert (
+        client.post(
+            "/api/admin/users/create",
+            headers=_admin_headers(),
+            json={"username": "backup-free-admin", "role": "admin"},
+        ).status_code
+        == 200
+    )
+
+    for username, role in (("free-user", "operator"), ("free-admin", "admin")):
+        created = client.post(
+            "/api/admin/users/create",
+            headers=_admin_headers(),
+            json={"username": username, "role": role},
+        )
+        assert created.status_code == 200
+        assert asyncio.run(storage.can_user_use_free_providers(username)) is True
+
+        res = asyncio.run(storage.set_user_disabled(username, True))
+        assert res is not None and res["refused"] is None
+        assert asyncio.run(storage.can_user_use_free_providers(username)) is False
+
+        token = ai_client.ai_username.set(username)
+        try:
+            with pytest.raises(ValueError, match="administrator grant"):
+                asyncio.run(
+                    ai_client.require_server_provider_grant("openai", "gpt-free")
+                )
+        finally:
+            ai_client.ai_username.reset(token)
+
+        asyncio.run(storage.set_user_disabled(username, False))
+        assert asyncio.run(storage.can_user_use_free_providers(username)) is True
+
+    assert asyncio.run(storage.can_user_use_free_providers("admin")) is True
