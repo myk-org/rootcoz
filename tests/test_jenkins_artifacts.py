@@ -750,10 +750,17 @@ class TestCumulativeExtractionBudgetAndSizeCap:
         assert session.get.call_count == 10
 
     def test_over_cap_jenkins_artifacts_max_size_mb_rejected(self) -> None:
-        """Request models and Settings reject jenkins_artifacts_max_size_mb above the ceiling."""
+        """Request models reject over-cap values; Settings clamps legacy values to ceiling."""
         from pydantic import ValidationError
 
-        from rootcoz.config import JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX, Settings
+        from rootcoz.config import (
+            JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX,
+            Settings,
+            clear_db_settings_cache,
+            get_settings,
+            update_db_settings_cache,
+        )
+        from rootcoz.main import _validate_settings_updates
         from rootcoz.models import (
             AnalyzeRequest,
             ReAnalyzeRequest,
@@ -768,7 +775,7 @@ class TestCumulativeExtractionBudgetAndSizeCap:
             )
         with pytest.raises(ValidationError):
             UnifiedAnalyzeRequest(
-                analysis_type="jenkins",
+                type="jenkins",
                 job_name="j",
                 build_number=1,
                 jenkins_artifacts_max_size_mb=over_cap,
@@ -776,7 +783,40 @@ class TestCumulativeExtractionBudgetAndSizeCap:
         with pytest.raises(ValidationError):
             ReAnalyzeRequest(jenkins_artifacts_max_size_mb=over_cap)
         with pytest.raises(ValidationError):
-            Settings(jenkins_artifacts_max_size_mb=over_cap)
+            Settings(jenkins_artifacts_max_size_mb=0)
+
+        # Admin write-path validation still strictly rejects > 2048
+        import asyncio
+
+        errors = asyncio.run(
+            _validate_settings_updates({"jenkins_artifacts_max_size_mb": over_cap})
+        )
+        assert any("jenkins_artifacts_max_size_mb" in e for e in errors)
+
+        # Legacy env/DB values above the ceiling clamp instead of blocking startup
+        # or wiping other DB overrides (#601).
+        assert (
+            Settings(
+                jenkins_artifacts_max_size_mb=over_cap
+            ).jenkins_artifacts_max_size_mb
+            == JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX
+        )
+        clear_db_settings_cache()
+        try:
+            update_db_settings_cache(
+                {
+                    "jenkins_artifacts_max_size_mb": str(over_cap),
+                    "ai_model": "preserved-db-model",
+                }
+            )
+            effective = get_settings()
+            assert (
+                effective.jenkins_artifacts_max_size_mb
+                == JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX
+            )
+            assert effective.ai_model == "preserved-db-model"
+        finally:
+            clear_db_settings_cache()
 
         # Boundary value itself is accepted
         req = AnalyzeRequest(
@@ -785,6 +825,159 @@ class TestCumulativeExtractionBudgetAndSizeCap:
             jenkins_artifacts_max_size_mb=JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX,
         )
         assert req.jenkins_artifacts_max_size_mb == JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX
+
+    def test_tar_mode_000_directory_still_counted_against_budget(
+        self, extract_base: Path
+    ) -> None:
+        """Tar archives with mode-000 directories cannot hide bytes from the disk cap."""
+        buf = io.BytesIO()
+        payload = b"A" * (6 * 1024 * 1024)
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            dir_info = tarfile.TarInfo(name="hidden")
+            dir_info.type = tarfile.DIRTYPE
+            dir_info.mode = 0o000
+            tar.addfile(dir_info)
+
+            file_info = tarfile.TarInfo(name="hidden/data.bin")
+            file_info.size = len(payload)
+            file_info.mode = 0o000
+            tar.addfile(file_info, io.BytesIO(payload))
+        tar_bytes = buf.getvalue()
+
+        session = MagicMock()
+
+        def fake_get(url: str, **kwargs):
+            response = Mock()
+            response.status_code = 200
+            response.iter_content.return_value = [tar_bytes]
+            response.close = Mock()
+            return response
+
+        session.get.side_effect = fake_get
+
+        max_size_mb = 1
+        budget_bytes = max_size_mb * EXTRACT_SIZE_MULTIPLIER * 1024 * 1024
+        _, artifacts_dir = process_build_artifacts(
+            session,
+            "https://jenkins.example.com/job/test/1",
+            [{"relativePath": "first.tar.gz"}, {"relativePath": "second.tar.gz"}],
+            max_size_mb=max_size_mb,
+        )
+
+        assert artifacts_dir is not None
+        # First 6 MiB tar extracts with owner-accessible dirs; second 6 MiB tar
+        # exceeds the remaining 4 MiB budget (and is not hidden behind mode 000).
+        assert (artifacts_dir / "first" / "hidden" / "data.bin").exists()
+        assert not (artifacts_dir / "second" / "hidden" / "data.bin").exists()
+        total_on_disk = sum(
+            f.stat().st_size
+            for f in artifacts_dir.rglob("*")
+            if f.is_file() and not f.is_symlink()
+        )
+        assert total_on_disk <= budget_bytes
+
+    def test_failed_archive_into_existing_dir_leaves_existing_untouched_and_respects_budget(
+        self, extract_base: Path
+    ) -> None:
+        """A failing second archive sharing an extract subdir leaves zero partial files."""
+        artifacts_dir = extract_base / "artifacts-collision"
+        artifacts_dir.mkdir()
+
+        # First archive creates artifacts_dir/shared/keep.txt
+        first_tar = _make_tar_gz({"keep.txt": "original-content"})
+        assert store_artifact("shared.tar.gz", first_tar, artifacts_dir, max_size_mb=1)
+        assert (artifacts_dir / "shared" / "keep.txt").read_text() == "original-content"
+
+        # Second archive targets the same subdir ("shared") but fails mid-extraction
+        # with an oversized payload exceeding remaining_bytes.
+        bad_zip_buf = io.BytesIO()
+        with zipfile.ZipFile(bad_zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("keep.txt", "corrupted-overwrite")
+            zf.writestr("huge.bin", b"\x00" * (2 * 1024 * 1024))
+        bad_zip = bad_zip_buf.getvalue()
+
+        # Remaining budget is 500 bytes: extraction fails (2 MiB > 500 B), staging
+        # is discarded, original keep.txt is untouched, and raw fallback is also
+        # rejected because len(bad_zip) > 500 B.
+        stored = store_artifact(
+            "shared.zip", bad_zip, artifacts_dir, max_size_mb=1, remaining_bytes=500
+        )
+        assert stored is False
+        assert (artifacts_dir / "shared" / "keep.txt").read_text() == "original-content"
+        assert not (artifacts_dir / "shared" / "huge.bin").exists()
+        assert not (artifacts_dir / "shared.zip").exists()
+        assert not list(artifacts_dir.glob(".extract-stage-*"))
+
+    def test_stored_replay_and_jenkins_source_reconstruct_clamp_legacy_values(
+        self,
+    ) -> None:
+        """Legacy stored jobs with >2048 MB degrade safely on replay and reconstruction."""
+        from rootcoz.config import JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX, Settings
+        from rootcoz.main import _reconstruct_from_params
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.jenkins_source import JenkinsSource
+
+        over_cap = JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX + 5000
+
+        replayed = UnifiedAnalyzeRequest.model_validate(
+            {
+                "type": "jenkins",
+                "job_name": "legacy-job",
+                "build_number": 7,
+                "jenkins_artifacts_max_size_mb": over_cap,
+            },
+            context={"stored_replay": True},
+        )
+        assert (
+            replayed.jenkins_artifacts_max_size_mb == JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX
+        )
+
+        body, effective = _reconstruct_from_params(
+            {
+                "job_name": "legacy-job",
+                "build_number": 7,
+                "request_params": {
+                    "analysis_type": "jenkins",
+                    "jenkins_artifacts_max_size_mb": over_cap,
+                },
+            }
+        )
+        assert body.jenkins_artifacts_max_size_mb == JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX
+        assert (
+            effective.jenkins_artifacts_max_size_mb
+            <= Settings().jenkins_artifacts_max_size_mb
+        )
+
+        # JenkinsSource reconstruction clamps even when settings is None and ignores non-numeric stored data
+        source_clamped = JenkinsSource.from_stored_params(
+            {
+                "job_name": "legacy-job",
+                "build_number": 7,
+                "jenkins_url": "https://jenkins.example.com",
+                "jenkins_artifacts_max_size_mb": over_cap,
+            },
+            settings=None,
+        )
+        assert source_clamped is not None
+        assert (
+            source_clamped.settings.jenkins_artifacts_max_size_mb
+            <= Settings().jenkins_artifacts_max_size_mb
+        )
+
+        source_bad_val = JenkinsSource.from_stored_params(
+            {
+                "job_name": "legacy-job",
+                "build_number": 7,
+                "jenkins_url": "https://jenkins.example.com",
+                "jenkins_artifacts_max_size_mb": "not-an-int",
+            },
+            settings=None,
+        )
+        assert source_bad_val is not None
+        assert (
+            source_bad_val.settings.jenkins_artifacts_max_size_mb
+            == Settings().jenkins_artifacts_max_size_mb
+        )
 
     def test_merge_settings_caps_jenkins_artifacts_max_size_mb_to_server_limit(
         self,

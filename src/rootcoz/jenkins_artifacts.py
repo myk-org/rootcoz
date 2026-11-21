@@ -69,6 +69,93 @@ def _resolve_extract_subdir(parent: Path, filename: str, root_dir: Path) -> Path
     return extract_subdir
 
 
+def _clear_dir_contents(directory: Path) -> None:
+    """Remove all entries inside a freshly-created staging directory."""
+    if not directory.exists() or directory.is_symlink():
+        return
+    for entry in list(directory.iterdir()):
+        if entry.is_symlink() or not entry.is_dir():
+            try:
+                entry.unlink()
+            except OSError:
+                pass
+        else:
+            delete_tree(entry)
+
+
+def _merge_tree(src: Path, dst: Path) -> int:
+    """Move extracted entries from ``src`` into existing ``dst``, returning net byte delta."""
+    dst_resolved = dst.resolve()
+    # Pre-validate before mutating dst so a type/symlink conflict leaves dst untouched.
+    for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
+        rel = Path(dirpath).relative_to(src)
+        target_dir = dst / rel
+        if target_dir.is_symlink() or (target_dir.exists() and not target_dir.is_dir()):
+            raise OSError(f"Refusing to merge into non-directory target: {target_dir}")
+        if not target_dir.resolve().is_relative_to(dst_resolved):
+            raise OSError(f"Refusing to merge outside target directory: {target_dir}")
+        for dname in list(dirnames):
+            src_sub = Path(dirpath) / dname
+            dst_sub = target_dir / dname
+            if src_sub.is_symlink():
+                if dst_sub.exists() or dst_sub.is_symlink():
+                    raise OSError(
+                        f"Refusing to overwrite target with symlink: {dst_sub}"
+                    )
+                dirnames.remove(dname)
+            elif dst_sub.is_symlink() or (dst_sub.exists() and not dst_sub.is_dir()):
+                raise OSError(
+                    f"Refusing to merge directory onto non-directory: {dst_sub}"
+                )
+        for name in filenames:
+            dst_file = target_dir / name
+            if dst_file.is_symlink() or dst_file.is_dir():
+                raise OSError(f"Refusing to overwrite non-regular target: {dst_file}")
+            if not dst_file.resolve().is_relative_to(dst_resolved):
+                raise OSError(f"Refusing to merge outside target directory: {dst_file}")
+
+    delta = 0
+    for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
+        rel = Path(dirpath).relative_to(src)
+        target_dir = dst / rel
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for dname in list(dirnames):
+            src_sub = Path(dirpath) / dname
+            if src_sub.is_symlink():
+                os.replace(src_sub, target_dir / dname)
+                dirnames.remove(dname)
+        for name in filenames:
+            src_file = Path(dirpath) / name
+            dst_file = target_dir / name
+            old_size = dst_file.stat().st_size if dst_file.exists() else 0
+            if src_file.is_symlink():
+                os.replace(src_file, dst_file)
+                delta -= old_size
+            else:
+                new_size = src_file.stat().st_size
+                os.replace(src_file, dst_file)
+                delta += new_size - old_size
+    return delta
+
+
+def _tar_extract_filter(
+    member: tarfile.TarInfo, dest_path: str
+) -> tarfile.TarInfo | None:
+    """Wrap ``tarfile.data_filter`` so extracted entries stay owner-accessible.
+
+    A tar archive with mode ``000`` directories would otherwise prevent the
+    non-root process from traversing them during disk-budget accounting, AI
+    reads, and cleanup.
+    """
+    filtered = tarfile.data_filter(member, dest_path)
+    if filtered is not None and filtered.mode is not None:
+        if filtered.isdir():
+            filtered = filtered.replace(mode=filtered.mode | 0o700)
+        elif filtered.isreg():
+            filtered = filtered.replace(mode=filtered.mode | 0o600)
+    return filtered
+
+
 def _cleanup_failed_extract_dir(
     extract_dir: Path,
     *,
@@ -162,6 +249,68 @@ def download_artifact(
         return None
 
 
+def _store_artifact_with_size(
+    relative_path: str,
+    data: bytes,
+    artifacts_dir: Path,
+    max_size_mb: int = 500,
+    *,
+    remaining_bytes: int | None = None,
+) -> tuple[bool, int]:
+    """Store a single artifact to disk, returning ``(stored, net_bytes_added)``."""
+    # Validate path doesn't escape artifacts_dir
+    root = artifacts_dir.resolve()
+    dest = artifacts_dir / relative_path
+    resolved = dest.resolve()
+    if not resolved.is_relative_to(root) or resolved == root:
+        logger.warning(f"Skipping artifact with unsafe path: {relative_path}")
+        return False, 0
+
+    if remaining_bytes is not None and remaining_bytes <= 0:
+        logger.warning(
+            f"Skipping artifact '{relative_path}': cumulative artifact size budget exhausted"
+        )
+        return False, 0
+
+    if _is_archive(relative_path):
+        extract_subdir = _resolve_extract_subdir(dest.parent, dest.name, artifacts_dir)
+        if extract_subdir is None:
+            logger.warning(
+                f"Skipping artifact with unsafe extraction path: {relative_path}"
+            )
+            return False, 0
+        extracted_path, extracted_delta = _validate_and_extract_archive_with_size(
+            data,
+            max_size_mb,
+            extract_dir=extract_subdir,
+            remaining_bytes=remaining_bytes,
+            root_dir=artifacts_dir,
+        )
+        if extracted_path is not None:
+            logger.info(f"Extracted archive artifact '{relative_path}'")
+            return True, extracted_delta
+        logger.warning(f"Could not extract '{relative_path}', storing as raw file")
+
+    if dest.is_symlink() or dest.is_dir():
+        logger.warning(
+            f"Skipping artifact '{relative_path}': destination is not a regular file"
+        )
+        return False, 0
+
+    old_size = dest.stat().st_size if dest.exists() else 0
+    net_delta = len(data) - old_size
+    if remaining_bytes is not None and net_delta > remaining_bytes:
+        logger.warning(
+            f"Skipping artifact '{relative_path}': size ({len(data)} bytes) "
+            f"exceeds remaining budget ({remaining_bytes} bytes)"
+        )
+        return False, 0
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    return True, net_delta
+
+
 def store_artifact(
     relative_path: str,
     data: bytes,
@@ -182,51 +331,14 @@ def store_artifact(
     Returns:
         True if the artifact was stored or extracted, False if skipped.
     """
-    # Validate path doesn't escape artifacts_dir
-    root = artifacts_dir.resolve()
-    dest = artifacts_dir / relative_path
-    resolved = dest.resolve()
-    if not resolved.is_relative_to(root) or resolved == root:
-        logger.warning(f"Skipping artifact with unsafe path: {relative_path}")
-        return False
-
-    if remaining_bytes is not None and remaining_bytes <= 0:
-        logger.warning(
-            f"Skipping artifact '{relative_path}': cumulative artifact size budget exhausted"
-        )
-        return False
-
-    if _is_archive(relative_path):
-        extract_subdir = _resolve_extract_subdir(dest.parent, dest.name, artifacts_dir)
-        if extract_subdir is None:
-            logger.warning(
-                f"Skipping artifact with unsafe extraction path: {relative_path}"
-            )
-            return False
-        if (
-            validate_and_extract_archive(
-                data,
-                max_size_mb,
-                extract_dir=extract_subdir,
-                remaining_bytes=remaining_bytes,
-                root_dir=artifacts_dir,
-            )
-            is not None
-        ):
-            logger.info(f"Extracted archive artifact '{relative_path}'")
-            return True
-        logger.warning(f"Could not extract '{relative_path}', storing as raw file")
-
-    if remaining_bytes is not None and len(data) > remaining_bytes:
-        logger.warning(
-            f"Skipping artifact '{relative_path}': size ({len(data)} bytes) "
-            f"exceeds remaining budget ({remaining_bytes} bytes)"
-        )
-        return False
-
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(data)
-    return True
+    stored, _ = _store_artifact_with_size(
+        relative_path,
+        data,
+        artifacts_dir,
+        max_size_mb,
+        remaining_bytes=remaining_bytes,
+    )
+    return stored
 
 
 def _extract_tar(
@@ -262,12 +374,13 @@ def _extract_tar(
                     f"exceeds limit ({max_extracted_bytes / (1024 * 1024):.1f} MB)"
                 )
             try:
-                tar.extractall(path=extract_dir, filter="data")
+                tar.extractall(path=extract_dir, filter=_tar_extract_filter)
                 return
             except (tarfile.FilterError, OSError) as exc:
                 logger.warning(
                     f"Tar data_filter rejected entries, falling back to manual filtering: {exc}"
                 )
+                _clear_dir_contents(extract_dir)
 
         # Manual member-by-member extraction with filtering
         boundary = str(extract_dir.resolve()) + os.sep
@@ -308,7 +421,9 @@ def _extract_tar(
                 f"exceeds limit ({max_extracted_bytes / (1024 * 1024):.1f} MB)"
             )
 
-        tar.extractall(path=extract_dir, members=safe_members, filter="data")
+        tar.extractall(
+            path=extract_dir, members=safe_members, filter=_tar_extract_filter
+        )
 
 
 def _extract_zip(
@@ -355,6 +470,130 @@ def _extract_zip(
         zf.extractall(path=extract_dir, members=safe_names)
 
 
+def _validate_and_extract_archive_with_size(
+    archive_data: bytes,
+    max_size_mb: int = 500,
+    extract_dir: Path | None = None,
+    *,
+    remaining_bytes: int | None = None,
+    root_dir: Path | None = None,
+) -> tuple[Path | None, int]:
+    """Validate and extract an archive, returning ``(extract_dir, net_bytes_added)``."""
+    if max_size_mb <= 0:
+        logger.warning(f"Archive rejected: invalid max_size_mb ({max_size_mb})")
+        return None, 0
+
+    size_mb = len(archive_data) / (1024 * 1024)
+    if size_mb > max_size_mb:
+        logger.warning(
+            f"Archive size ({size_mb:.1f} MB) exceeds maximum allowed size ({max_size_mb} MB)"
+        )
+        return None, 0
+
+    default_max_extracted = max_size_mb * EXTRACT_SIZE_MULTIPLIER * 1024 * 1024
+    if remaining_bytes is not None:
+        if remaining_bytes <= 0:
+            logger.warning(
+                "Archive rejected: cumulative extraction size budget exhausted"
+            )
+            return None, 0
+        max_extracted_bytes = min(default_max_extracted, remaining_bytes)
+    else:
+        max_extracted_bytes = default_max_extracted
+
+    if extract_dir is None:
+        extract_dir = EXTRACT_BASE / f"{JENKINS_ARTIFACTS_PREFIX}{uuid.uuid4().hex[:8]}"
+        boundary_root: Path | None = EXTRACT_BASE.resolve()
+    else:
+        if extract_dir.is_symlink():
+            logger.warning(f"Refusing to extract archive into symlink: {extract_dir}")
+            return None, 0
+        boundary_root = root_dir.resolve() if root_dir is not None else None
+        if boundary_root is not None:
+            resolved_dir = extract_dir.resolve()
+            if (
+                not resolved_dir.is_relative_to(boundary_root)
+                or resolved_dir == boundary_root
+            ):
+                logger.warning(
+                    f"Refusing to extract archive outside root {boundary_root}: {extract_dir}"
+                )
+                return None, 0
+
+    existed_before = extract_dir.exists()
+    if existed_before:
+        if not extract_dir.is_dir():
+            logger.warning(
+                f"Refusing to extract archive into non-directory: {extract_dir}"
+            )
+            return None, 0
+        # Stage into a fresh sibling directory so a failed or over-budget
+        # extraction leaves pre-existing files untouched and adds zero bytes.
+        work_dir = extract_dir.parent / f".extract-stage-{uuid.uuid4().hex[:8]}"
+    else:
+        work_dir = extract_dir
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Extracting archive ({size_mb:.1f} MB) to {extract_dir}")
+
+    def _cleanup_work_dir() -> None:
+        if existed_before:
+            delete_tree(work_dir)
+        else:
+            _cleanup_failed_extract_dir(
+                work_dir, existed_before=False, boundary_root=boundary_root
+            )
+
+    fileobj = io.BytesIO(archive_data)
+
+    # Try tar first, then zip
+    try:
+        _extract_tar(fileobj, work_dir, max_extracted_bytes=max_extracted_bytes)
+    except _SizeLimitExceeded as exc:
+        _cleanup_work_dir()
+        logger.warning(f"Archive rejected: {exc}")
+        return None, 0
+    except tarfile.TarError, OSError:
+        _clear_dir_contents(work_dir)
+        fileobj.seek(0)
+        try:
+            _extract_zip(fileobj, work_dir, max_extracted_bytes=max_extracted_bytes)
+        except _SizeLimitExceeded as exc:
+            _cleanup_work_dir()
+            logger.warning(f"Archive rejected: {exc}")
+            return None, 0
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError) as exc:
+            _cleanup_work_dir()
+            logger.warning(f"Invalid archive (not a valid tar or zip file): {exc}")
+            return None, 0
+
+    # Post-extraction size check to prevent decompression bombs
+    extracted_size = _dir_size_bytes(work_dir)
+    if extracted_size > max_extracted_bytes:
+        _cleanup_work_dir()
+        logger.warning(
+            f"Extracted size ({extracted_size / (1024 * 1024):.1f} MB) exceeds maximum "
+            f"allowed ({max_extracted_bytes / (1024 * 1024):.1f} MB). Possible decompression bomb."
+        )
+        return None, 0
+
+    if existed_before:
+        try:
+            net_delta = _merge_tree(work_dir, extract_dir)
+        except OSError as exc:
+            logger.warning(
+                f"Failed to merge extracted archive into {extract_dir}: {exc}"
+            )
+            return None, 0
+        finally:
+            delete_tree(work_dir)
+    else:
+        net_delta = extracted_size
+
+    logger.info(f"Extraction complete: {extract_dir}")
+    return extract_dir, net_delta
+
+
 def validate_and_extract_archive(
     archive_data: bytes,
     max_size_mb: int = 500,
@@ -381,94 +620,14 @@ def validate_and_extract_archive(
     Returns:
         Path to the directory where the archive was extracted, or None on failure.
     """
-    if max_size_mb <= 0:
-        logger.warning(f"Archive rejected: invalid max_size_mb ({max_size_mb})")
-        return None
-
-    size_mb = len(archive_data) / (1024 * 1024)
-    if size_mb > max_size_mb:
-        logger.warning(
-            f"Archive size ({size_mb:.1f} MB) exceeds maximum allowed size ({max_size_mb} MB)"
-        )
-        return None
-
-    default_max_extracted = max_size_mb * EXTRACT_SIZE_MULTIPLIER * 1024 * 1024
-    if remaining_bytes is not None:
-        if remaining_bytes <= 0:
-            logger.warning(
-                "Archive rejected: cumulative extraction size budget exhausted"
-            )
-            return None
-        max_extracted_bytes = min(default_max_extracted, remaining_bytes)
-    else:
-        max_extracted_bytes = default_max_extracted
-
-    if extract_dir is None:
-        extract_dir = EXTRACT_BASE / f"{JENKINS_ARTIFACTS_PREFIX}{uuid.uuid4().hex[:8]}"
-        boundary_root: Path | None = EXTRACT_BASE.resolve()
-    else:
-        if extract_dir.is_symlink():
-            logger.warning(f"Refusing to extract archive into symlink: {extract_dir}")
-            return None
-        boundary_root = root_dir.resolve() if root_dir is not None else None
-        if boundary_root is not None:
-            resolved_dir = extract_dir.resolve()
-            if (
-                not resolved_dir.is_relative_to(boundary_root)
-                or resolved_dir == boundary_root
-            ):
-                logger.warning(
-                    f"Refusing to extract archive outside root {boundary_root}: {extract_dir}"
-                )
-                return None
-
-    existed_before = extract_dir.exists()
-    size_before = _dir_size_bytes(extract_dir) if existed_before else 0
-    extract_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Extracting archive ({size_mb:.1f} MB) to {extract_dir}")
-
-    fileobj = io.BytesIO(archive_data)
-
-    # Try tar first, then zip
-    try:
-        _extract_tar(fileobj, extract_dir, max_extracted_bytes=max_extracted_bytes)
-    except _SizeLimitExceeded as exc:
-        _cleanup_failed_extract_dir(
-            extract_dir, existed_before=existed_before, boundary_root=boundary_root
-        )
-        logger.warning(f"Archive rejected: {exc}")
-        return None
-    except tarfile.TarError, OSError:
-        fileobj.seek(0)
-        try:
-            _extract_zip(fileobj, extract_dir, max_extracted_bytes=max_extracted_bytes)
-        except _SizeLimitExceeded as exc:
-            _cleanup_failed_extract_dir(
-                extract_dir, existed_before=existed_before, boundary_root=boundary_root
-            )
-            logger.warning(f"Archive rejected: {exc}")
-            return None
-        except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError) as exc:
-            _cleanup_failed_extract_dir(
-                extract_dir, existed_before=existed_before, boundary_root=boundary_root
-            )
-            logger.warning(f"Invalid archive (not a valid tar or zip file): {exc}")
-            return None
-
-    # Post-extraction size check to prevent decompression bombs
-    extracted_size = max(0, _dir_size_bytes(extract_dir) - size_before)
-    if extracted_size > max_extracted_bytes:
-        _cleanup_failed_extract_dir(
-            extract_dir, existed_before=existed_before, boundary_root=boundary_root
-        )
-        logger.warning(
-            f"Extracted size ({extracted_size / (1024 * 1024):.1f} MB) exceeds maximum "
-            f"allowed ({max_extracted_bytes / (1024 * 1024):.1f} MB). Possible decompression bomb."
-        )
-        return None
-
-    logger.info(f"Extraction complete: {extract_dir}")
-    return extract_dir
+    extracted_path, _ = _validate_and_extract_archive_with_size(
+        archive_data,
+        max_size_mb,
+        extract_dir=extract_dir,
+        remaining_bytes=remaining_bytes,
+        root_dir=root_dir,
+    )
+    return extracted_path
 
 
 def _extract_nested_archives(
@@ -477,6 +636,7 @@ def _extract_nested_archives(
     max_depth: int = 5,
     *,
     max_total_bytes: int | None = None,
+    initial_used_bytes: int | None = None,
 ) -> int:
     """Recursively extract archives found inside extracted directories.
 
@@ -500,6 +660,11 @@ def _extract_nested_archives(
     total_extracted = 0
     skipped: set[Path] = set()
     max_archive_bytes = max_size_mb * 1024 * 1024
+    used_bytes = (
+        initial_used_bytes
+        if initial_used_bytes is not None
+        else _dir_size_bytes(root_dir)
+    )
 
     for depth in range(1, max_depth + 1):
         archives = sorted(
@@ -518,7 +683,7 @@ def _extract_nested_archives(
         extracted_this_depth = 0
         for archive_path in archives:
             relative = archive_path.relative_to(root_dir)
-            remaining_bytes = budget_bytes - _dir_size_bytes(root_dir)
+            remaining_bytes = budget_bytes - used_bytes
             if remaining_bytes <= 0:
                 logger.warning(
                     "Cumulative extracted size limit reached in %s (%d MB)",
@@ -549,7 +714,7 @@ def _extract_nested_archives(
                     skipped.add(archive_path)
                     continue
                 data = archive_path.read_bytes()
-                result = validate_and_extract_archive(
+                result, extracted_delta = _validate_and_extract_archive_with_size(
                     data,
                     max_size_mb,
                     extract_dir=extract_subdir,
@@ -561,6 +726,7 @@ def _extract_nested_archives(
                         "Extracted nested archive: %s -> %s", relative, extract_subdir
                     )
                     archive_path.unlink()
+                    used_bytes = max(0, used_bytes + extracted_delta - archive_size)
                     total_extracted += 1
                     extracted_this_depth += 1
                 else:
@@ -622,6 +788,7 @@ def process_build_artifacts(
 
     try:
         downloaded = 0
+        used_bytes = 0
         for artifact in artifact_list:
             relative_path = artifact.get("relativePath", "")
             if not relative_path:
@@ -632,7 +799,7 @@ def process_build_artifacts(
                 logger.warning(f"Skipping artifact with unsafe path: {relative_path}")
                 continue
 
-            remaining_bytes = max_total_bytes - _dir_size_bytes(artifacts_dir)
+            remaining_bytes = max_total_bytes - used_bytes
             if remaining_bytes <= 0:
                 logger.warning(
                     "Cumulative artifact size limit (%d MB) reached in %s, "
@@ -652,14 +819,16 @@ def process_build_artifacts(
             if data is None:
                 continue
 
-            if store_artifact(
+            stored, added_bytes = _store_artifact_with_size(
                 relative_path,
                 data,
                 artifacts_dir,
                 max_size_mb,
                 remaining_bytes=remaining_bytes,
-            ):
+            )
+            if stored:
                 downloaded += 1
+                used_bytes = max(0, used_bytes + added_bytes)
 
         if downloaded == 0:
             cleanup_extract_dir(artifacts_dir)
@@ -671,7 +840,10 @@ def process_build_artifacts(
 
         # Recursively extract any nested archives and delete the archive files
         _extract_nested_archives(
-            artifacts_dir, max_size_mb, max_total_bytes=max_total_bytes
+            artifacts_dir,
+            max_size_mb,
+            max_total_bytes=max_total_bytes,
+            initial_used_bytes=used_bytes,
         )
 
         context = get_artifacts_path(artifacts_dir)

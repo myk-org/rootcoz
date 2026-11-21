@@ -2797,14 +2797,14 @@ def _reconstruct_from_params(
     for field in settings_fields:
         if field in params:
             overrides[field] = params[field]
-    if (
-        "jenkins_artifacts_max_size_mb" in overrides
-        and overrides["jenkins_artifacts_max_size_mb"] is not None
-    ):
-        overrides["jenkins_artifacts_max_size_mb"] = min(
-            int(overrides["jenkins_artifacts_max_size_mb"]),
-            base_settings.jenkins_artifacts_max_size_mb,
-        )
+    if "jenkins_artifacts_max_size_mb" in overrides:
+        if body.jenkins_artifacts_max_size_mb is None:
+            overrides.pop("jenkins_artifacts_max_size_mb", None)
+        else:
+            overrides["jenkins_artifacts_max_size_mb"] = min(
+                body.jenkins_artifacts_max_size_mb,
+                base_settings.jenkins_artifacts_max_size_mb,
+            )
 
     # Tests repo URL — use `is not None` so an explicit empty string
     # (clearing the field) is preserved instead of silently dropped.

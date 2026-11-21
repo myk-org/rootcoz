@@ -713,6 +713,33 @@ class Settings(BaseSettings):
         ),
     )
 
+    @field_validator("jenkins_artifacts_max_size_mb", mode="before")
+    @classmethod
+    def _clamp_legacy_jenkins_artifacts_max_size_mb(cls, v: object) -> object:
+        """Clamp pre-existing env/DB values above the ceiling instead of failing boot.
+
+        Deployments that set ``JENKINS_ARTIFACTS_MAX_SIZE_MB`` or saved a DB
+        override above ``JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX`` before #601 must
+        still boot and retain their other DB settings. Admin write paths check
+        ``Field(le=...)`` metadata before calling ``Settings.model_validate``,
+        so new saves above the cap are still rejected with 400.
+        """
+        if isinstance(v, bool):
+            return v
+        try:
+            number = int(v) if isinstance(v, int) else int(str(v).strip())
+        except TypeError, ValueError:
+            return v
+        if number > JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX:
+            logger.warning(
+                "Clamping jenkins_artifacts_max_size_mb (%d MB) to maximum "
+                "allowed (%d MB)",
+                number,
+                JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX,
+            )
+            return JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX
+        return v
+
     # Artifact download toggle
     get_job_artifacts: bool = Field(
         default=True,

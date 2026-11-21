@@ -472,6 +472,22 @@ class _JenkinsParamsMixin(BaseModel):
         description="Download all build artifacts for AI context (default: true, overrides GET_JOB_ARTIFACTS env var)",
     )
 
+    @field_validator("jenkins_artifacts_max_size_mb", mode="before")
+    @classmethod
+    def _clamp_stored_jenkins_artifacts_max_size_mb(
+        cls, v: object, info: ValidationInfo
+    ) -> object:
+        """Degrade legacy stored values above the ceiling on replay instead of raising."""
+        if not _is_stored_replay(info) or v is None or isinstance(v, bool):
+            return v
+        try:
+            number = int(v) if isinstance(v, int) else int(str(v).strip())
+        except TypeError, ValueError:
+            return None
+        if number <= 0:
+            return None
+        return min(number, JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX)
+
     @field_validator("jenkins_url", mode="after")
     @classmethod
     def _validate_jenkins_url_field(
