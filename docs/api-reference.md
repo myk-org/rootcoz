@@ -267,7 +267,7 @@ Direct non-chat callers of `POST /api/chat-issue/propose` and `POST /api/chat-is
 | GET | `/history/classifications` | viewer | `test_name`, `classification`, `job_name`, `parent_job_name`, `job_id` |
 | POST | `/history/classify` | reviewer | **JSON body** (not query string): `test_name`, `classification`, `reason`, `job_id`, `source`; returns `201` |
 
-Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` identity. The backend blocks AI callers from overriding classifications a human has already set.
+Server-minted AI analysis sessions sending `source="ai"` attribute the classification to the reserved `rootcoz-ai` identity (hidden until the analysis completes). Non-AI callers sending `source="ai"` cannot assume `rootcoz-ai`: the classification is attributed to the authenticated caller, made visible immediately, and recorded in the audit log as `classification.override`. The backend blocks AI callers from overriding classifications a human has already set.
 
 ### Chat
 

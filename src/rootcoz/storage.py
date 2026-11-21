@@ -2325,6 +2325,7 @@ async def init_db() -> None:
                 token TEXT PRIMARY KEY,
                 username TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
+                is_ai_session INTEGER NOT NULL DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP NOT NULL
             )
@@ -2333,6 +2334,11 @@ async def init_db() -> None:
         # Migration: add role column to sessions table
         await _migrate_add_column(
             db, "sessions", "role", "TEXT NOT NULL DEFAULT 'reviewer'"
+        )
+
+        # Migration: add is_ai_session column to sessions table
+        await _migrate_add_column(
+            db, "sessions", "is_ai_session", "INTEGER NOT NULL DEFAULT 0"
         )
 
         # Migration: backfill session roles from users table so existing
@@ -9941,6 +9947,7 @@ async def create_session(
     is_admin: bool = False,
     ttl_hours: int | None = None,
     role: str = "reviewer",
+    is_ai_session: bool = False,
 ) -> str:
     """Create an opaque session token. Returns raw token."""
     if ttl_hours is None:
@@ -9953,9 +9960,17 @@ async def create_session(
     async def _insert() -> None:
         async with _connect_db() as db:
             await db.execute(
-                "INSERT INTO sessions (token, username, is_admin, expires_at, role)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (token_hash, username, 1 if is_admin else 0, expires_str, role),
+                "INSERT INTO sessions"
+                " (token, username, is_admin, expires_at, role, is_ai_session)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    token_hash,
+                    username,
+                    1 if is_admin else 0,
+                    expires_str,
+                    role,
+                    1 if is_ai_session else 0,
+                ),
             )
             await db.commit()
 
@@ -9971,13 +9986,17 @@ async def get_session(token: str) -> dict[str, Any] | None:
     token_hash = _hash_session_token(token)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT username, is_admin, role, created_at, expires_at"
+            "SELECT username, is_admin, role, is_ai_session, created_at, expires_at"
             " FROM sessions"
             " WHERE token = ? AND expires_at > datetime('now')",
             (token_hash,),
         )
         row = await cursor.fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        session = dict(row)
+        session["is_ai_session"] = bool(row["is_ai_session"])
+        return session
 
 
 async def renew_session(token: str) -> bool:

@@ -529,7 +529,9 @@ async def test_pipeline_jira_and_saving_stages(
         )
         assert history.await_count == int(not all_failed)
         assert review.await_count == int(not all_failed)
-        assert mint.await_args.kwargs == {}, "an analysis run must keep degrading"
+        assert mint.await_args.kwargs == {"is_ai_session": True}, (
+            "an analysis run must mint an AI session and keep degrading on storage faults"
+        )
 
 
 @pytest.mark.asyncio
