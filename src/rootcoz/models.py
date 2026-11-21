@@ -38,7 +38,11 @@ from rootcoz.prow_validation import (
     validate_prow_job_name,
 )
 from rootcoz.repository import RESERVED_REPO_NAMES
-from rootcoz.url_utils import mask_stored_url, validate_http_url
+from rootcoz.url_utils import (
+    mask_stored_url,
+    validate_http_url,
+    validate_public_https_url,
+)
 
 logger = get_child_logger(__name__)
 
@@ -1637,16 +1641,14 @@ class ExporterInfo(BaseModel):
 
 
 class _PushEndpointMixin(BaseModel):
-    """Shared validation for Web Push endpoint URLs (HTTPS-only, length-bounded)."""
+    """Shared validation for Web Push endpoint URLs (public HTTPS-only, length-bounded)."""
 
     endpoint: str = Field(max_length=2048, description="Push service endpoint URL")
 
     @field_validator("endpoint")
     @classmethod
     def validate_endpoint_url(cls, v: str) -> str:
-        if not v.startswith("https://"):
-            raise ValueError("Push endpoint must use HTTPS")
-        return v
+        return validate_public_https_url(v, field_name="Push endpoint")
 
 
 class PushSubscriptionRequest(_PushEndpointMixin):

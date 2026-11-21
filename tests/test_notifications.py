@@ -1,11 +1,72 @@
 """Tests for Web Push notification dispatch."""
 
+import asyncio
+import base64
+import datetime
+import http.server
 import json
+import os
+import socket
+import ssl
+import threading
+import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import requests
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.x509.oid import NameOID
 
+import rootcoz.notifications as notifications_mod
 from rootcoz.notifications import send_mention_notifications
+from rootcoz.vapid import _generate_vapid_keys
+
+
+def _make_real_push_keys() -> tuple[str, str]:
+    """Generate valid Web Push p256dh + auth keys for end-to-end pywebpush tests."""
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_bytes = private_key.public_key().public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint,
+    )
+    p256dh = base64.urlsafe_b64encode(public_bytes).rstrip(b"=").decode("ascii")
+    auth = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode("ascii")
+    return p256dh, auth
+
+
+def _write_self_signed_cert(tmp_path: Path, hostname: str) -> tuple[Path, Path]:
+    """Create a self-signed TLS cert/key pair valid for *hostname*."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(hostname)]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    return cert_path, key_path
 
 
 class TestSendMentionNotifications:
@@ -106,10 +167,7 @@ class TestSendMentionNotifications:
                 new_callable=AsyncMock,
                 return_value=subscriptions,
             ),
-            patch(
-                "rootcoz.notifications.asyncio.to_thread",
-                new_callable=AsyncMock,
-            ) as mock_to_thread,
+            patch("rootcoz.notifications.webpush") as mock_webpush,
         ):
             await send_mention_notifications(
                 mentioned_usernames=["bob"],
@@ -120,10 +178,8 @@ class TestSendMentionNotifications:
                 vapid_claim_email="admin@example.com",
                 public_base_url="https://rootcoz.example.com",
             )
-            mock_to_thread.assert_called_once()
-            call_args = mock_to_thread.call_args
-            # First positional arg is the webpush function
-            # Check kwargs passed to webpush via to_thread
+            mock_webpush.assert_called_once()
+            call_args = mock_webpush.call_args
             assert (
                 call_args.kwargs["subscription_info"]["endpoint"]
                 == "https://push.example.com/sub/bob-1"
@@ -162,8 +218,7 @@ class TestSendMentionNotifications:
                 return_value=subscriptions,
             ),
             patch(
-                "rootcoz.notifications.asyncio.to_thread",
-                new_callable=AsyncMock,
+                "rootcoz.notifications.webpush",
                 side_effect=exc,
             ),
             patch(
@@ -224,10 +279,7 @@ class TestSendMentionNotifications:
                 new_callable=AsyncMock,
                 return_value=subscriptions,
             ),
-            patch(
-                "rootcoz.notifications.asyncio.to_thread",
-                new_callable=AsyncMock,
-            ) as mock_to_thread,
+            patch("rootcoz.notifications.webpush") as mock_webpush,
         ):
             await send_mention_notifications(
                 mentioned_usernames=["bob", "carol"],
@@ -237,7 +289,7 @@ class TestSendMentionNotifications:
                 vapid_private_key="fake-key",  # pragma: allowlist secret
                 vapid_claim_email="admin@example.com",
             )
-            assert mock_to_thread.call_count == 2
+            assert mock_webpush.call_count == 2
 
     @pytest.mark.asyncio
     async def test_webpush_non_410_error_logged_not_raised(self) -> None:
@@ -263,8 +315,7 @@ class TestSendMentionNotifications:
                 return_value=subscriptions,
             ),
             patch(
-                "rootcoz.notifications.asyncio.to_thread",
-                new_callable=AsyncMock,
+                "rootcoz.notifications.webpush",
                 side_effect=exc,
             ),
             patch(
@@ -301,10 +352,7 @@ class TestSendMentionNotifications:
                 new_callable=AsyncMock,
                 return_value=subscriptions,
             ),
-            patch(
-                "rootcoz.notifications.asyncio.to_thread",
-                new_callable=AsyncMock,
-            ) as mock_to_thread,
+            patch("rootcoz.notifications.webpush") as mock_webpush,
         ):
             await send_mention_notifications(
                 mentioned_usernames=["bob"],
@@ -315,5 +363,443 @@ class TestSendMentionNotifications:
                 vapid_claim_email="admin@example.com",
                 public_base_url=None,
             )
-            payload = json.loads(mock_to_thread.call_args.kwargs["data"])
+            payload = json.loads(mock_webpush.call_args.kwargs["data"])
             assert payload["url"] == "/results/job-1"
+
+
+class TestWebPushDeliveryHardening:
+    """Regression tests for Web Push timeout, redirect, and DNS SSRF hardening (#599)."""
+
+    @pytest.mark.asyncio
+    async def test_webpush_passes_finite_timeout_and_closes_session(self) -> None:
+        """_send_one passes a finite timeout and closes its requests.Session."""
+        subscriptions = [
+            {
+                "username": "bob",
+                "endpoint": "https://push.example.com/sub/bob-1",
+                "p256dh_key": "p256dh-bob",  # pragma: allowlist secret  # gitleaks:allow
+                "auth_key": "auth-bob",  # pragma: allowlist secret  # gitleaks:allow
+            },
+        ]
+        captured_sessions: list[requests.Session] = []
+        closed_sessions: list[requests.Session] = []
+
+        orig_close = requests.Session.close
+
+        def _spy_close(self: requests.Session) -> None:
+            closed_sessions.append(self)
+            orig_close(self)
+
+        def _fake_webpush(**kwargs: object) -> None:
+            sess = kwargs["requests_session"]
+            assert isinstance(sess, requests.Session)
+            captured_sessions.append(sess)
+
+        with (
+            patch(
+                "rootcoz.notifications.get_push_subscriptions_for_users",
+                new_callable=AsyncMock,
+                return_value=subscriptions,
+            ),
+            patch(
+                "rootcoz.notifications.webpush", side_effect=_fake_webpush
+            ) as mock_webpush,
+            patch.object(requests.Session, "close", _spy_close),
+        ):
+            await send_mention_notifications(
+                mentioned_usernames=["bob"],
+                comment_author="alice",
+                job_id="job-1",
+                test_name="test_foo",
+                vapid_private_key="fake-key",  # pragma: allowlist secret
+                vapid_claim_email="admin@example.com",
+            )
+
+        timeout = mock_webpush.call_args.kwargs["timeout"]
+        assert isinstance(timeout, (int, float))
+        assert 0 < timeout <= 30
+        assert len(captured_sessions) == 1
+        assert captured_sessions[0] in closed_sessions
+
+    @pytest.mark.asyncio
+    async def test_stalling_endpoints_timeout_promptly_without_starving_default_executor(
+        self,
+    ) -> None:
+        """Stalling endpoints time out promptly and never starve asyncio.to_thread."""
+        release_tarpit = threading.Event()
+        accepted_sockets: list[socket.socket] = []
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", 0))
+        server.listen(16)
+        port = server.getsockname()[1]
+
+        def _tarpit_loop() -> None:
+            server.settimeout(0.1)
+            while not release_tarpit.is_set():
+                try:
+                    conn, _ = server.accept()
+                    accepted_sockets.append(conn)
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+            release_tarpit.wait(5.0)
+
+        tarpit_thread = threading.Thread(target=_tarpit_loop, daemon=True)
+        tarpit_thread.start()
+
+        vapid = _generate_vapid_keys()
+        p256dh, auth = _make_real_push_keys()
+        subscriptions = [
+            {
+                "username": "bob",
+                "endpoint": f"https://tarpit.example.com:{port}/sub/{i}",
+                "p256dh_key": p256dh,
+                "auth_key": auth,
+            }
+            for i in range(5)
+        ]
+
+        def _fake_getaddrinfo(
+            host: str,
+            svc_port: int,
+            family: int = 0,
+            socktype: int = 0,
+            *args: object,
+            **kwargs: object,
+        ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+            if host == "tarpit.example.com":
+                return [
+                    (
+                        socket.AF_INET,
+                        socket.SOCK_STREAM,
+                        socket.IPPROTO_TCP,
+                        "",
+                        ("127.0.0.1", int(svc_port)),
+                    )
+                ]
+            raise OSError(f"unexpected host {host}")
+
+        try:
+            with (
+                patch(
+                    "rootcoz.notifications.get_push_subscriptions_for_users",
+                    new_callable=AsyncMock,
+                    return_value=subscriptions,
+                ),
+                patch.object(notifications_mod, "WEBPUSH_TIMEOUT_SECONDS", 0.25),
+                patch.object(notifications_mod, "is_public_ip", return_value=True),
+                patch(
+                    "rootcoz.notifications.socket.getaddrinfo",
+                    side_effect=_fake_getaddrinfo,
+                ),
+            ):
+                start = time.monotonic()
+                push_task = asyncio.create_task(
+                    send_mention_notifications(
+                        mentioned_usernames=["bob"],
+                        comment_author="alice",
+                        job_id="job-1",
+                        test_name="test_tarpit",
+                        vapid_private_key=vapid["private_key"],
+                        vapid_claim_email="admin@example.com",
+                    )
+                )
+                # Shared default executor remains responsive during push stalls.
+                default_pool_result = await asyncio.wait_for(
+                    asyncio.to_thread(lambda: "responsive"), timeout=0.5
+                )
+                assert default_pool_result == "responsive"
+
+                await asyncio.wait_for(push_task, timeout=3.0)
+                elapsed = time.monotonic() - start
+                assert elapsed < 2.5
+                assert len(accepted_sockets) >= 1
+        finally:
+            release_tarpit.set()
+            server.close()
+            for conn in accepted_sockets:
+                conn.close()
+            tarpit_thread.join(timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_307_redirect_to_loopback_is_not_followed(
+        self, tmp_path: Path
+    ) -> None:
+        """A 307 redirect from an HTTPS push endpoint to http://127.0.0.1 is NOT followed."""
+        http_hits: list[str] = []
+        https_hits: list[str] = []
+
+        class _LoopbackHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                http_hits.append(f"POST {self.path}")
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        http_server = http.server.HTTPServer(("127.0.0.1", 0), _LoopbackHandler)
+        http_port = http_server.server_address[1]
+        http_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        http_thread.start()
+
+        class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                https_hits.append(f"POST {self.path}")
+                content_len = int(self.headers.get("Content-Length", "0"))
+                if content_len:
+                    self.rfile.read(content_len)
+                self.send_response(307)
+                self.send_header(
+                    "Location", f"http://127.0.0.1:{http_port}/loopback-hit"
+                )
+                self.end_headers()
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        cert_path, key_path = _write_self_signed_cert(tmp_path, "push.example.com")
+        https_server = http.server.HTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+        https_server.socket = ssl_ctx.wrap_socket(https_server.socket, server_side=True)
+        https_port = https_server.server_address[1]
+        https_thread = threading.Thread(target=https_server.serve_forever, daemon=True)
+        https_thread.start()
+
+        vapid = _generate_vapid_keys()
+        p256dh, auth = _make_real_push_keys()
+        subscriptions = [
+            {
+                "username": "bob",
+                "endpoint": f"https://push.example.com:{https_port}/redir",
+                "p256dh_key": p256dh,
+                "auth_key": auth,
+            }
+        ]
+
+        orig_session_cls = notifications_mod._WebPushSession
+
+        class _TestCertWebPushSession(orig_session_cls):
+            def __init__(self) -> None:
+                super().__init__()
+                self.verify = str(cert_path)
+
+        def _fake_getaddrinfo(
+            host: str,
+            svc_port: int,
+            family: int = 0,
+            socktype: int = 0,
+            *args: object,
+            **kwargs: object,
+        ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+            if host == "push.example.com":
+                return [
+                    (
+                        socket.AF_INET,
+                        socket.SOCK_STREAM,
+                        socket.IPPROTO_TCP,
+                        "",
+                        ("127.0.0.1", int(svc_port)),
+                    )
+                ]
+            raise OSError(f"unexpected host {host}")
+
+        try:
+            with (
+                patch(
+                    "rootcoz.notifications.get_push_subscriptions_for_users",
+                    new_callable=AsyncMock,
+                    return_value=subscriptions,
+                ),
+                patch.object(
+                    notifications_mod, "_WebPushSession", _TestCertWebPushSession
+                ),
+                patch.object(notifications_mod, "is_public_ip", return_value=True),
+                patch(
+                    "rootcoz.notifications.socket.getaddrinfo",
+                    side_effect=_fake_getaddrinfo,
+                ),
+            ):
+                await send_mention_notifications(
+                    mentioned_usernames=["bob"],
+                    comment_author="alice",
+                    job_id="job-1",
+                    test_name="test_redir",
+                    vapid_private_key=vapid["private_key"],
+                    vapid_claim_email="admin@example.com",
+                )
+
+            assert https_hits == ["POST /redir"]
+            assert http_hits == []
+        finally:
+            https_server.shutdown()
+            https_server.server_close()
+            http_server.shutdown()
+            http_server.server_close()
+            https_thread.join(timeout=2.0)
+            http_thread.join(timeout=2.0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "resolved_addrs",
+        [
+            [(socket.AF_INET, ("127.0.0.1", 443))],
+            [(socket.AF_INET, ("169.254.169.254", 443))],
+            [(socket.AF_INET, ("10.0.0.1", 443))],
+            [(socket.AF_INET6, ("::1", 443, 0, 0))],
+            [
+                (socket.AF_INET, ("93.184.216.34", 443)),
+                (socket.AF_INET, ("127.0.0.1", 443)),
+            ],
+        ],
+    )
+    async def test_dns_resolving_to_non_public_ip_is_blocked_before_connect(
+        self,
+        resolved_addrs: list[tuple[int, tuple[object, ...]]],
+    ) -> None:
+        """DNS resolving to any non-public IP is rejected before socket.connect."""
+        vapid = _generate_vapid_keys()
+        p256dh, auth = _make_real_push_keys()
+        subscriptions = [
+            {
+                "username": "bob",
+                "endpoint": "https://rebind.example.com/push",
+                "p256dh_key": p256dh,
+                "auth_key": auth,
+            }
+        ]
+        gai_result = [
+            (family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)
+            for family, sockaddr in resolved_addrs
+        ]
+        connect_calls: list[object] = []
+
+        def _forbid_connect(self: socket.socket, address: object) -> None:
+            connect_calls.append(address)
+            raise AssertionError(f"socket.connect should not be called: {address}")
+
+        with (
+            patch(
+                "rootcoz.notifications.get_push_subscriptions_for_users",
+                new_callable=AsyncMock,
+                return_value=subscriptions,
+            ),
+            patch(
+                "rootcoz.notifications.socket.getaddrinfo",
+                return_value=gai_result,
+            ),
+            patch.object(socket.socket, "connect", _forbid_connect),
+        ):
+            await send_mention_notifications(
+                mentioned_usernames=["bob"],
+                comment_author="alice",
+                job_id="job-1",
+                test_name="test_dns_ssrf",
+                vapid_private_key=vapid["private_key"],
+                vapid_claim_email="admin@example.com",
+            )
+
+        assert connect_calls == []
+
+    @pytest.mark.asyncio
+    async def test_dns_rebinding_uses_pinned_validated_ip_without_second_lookup(
+        self,
+    ) -> None:
+        """Connects directly to the validated IP from the single getaddrinfo call."""
+        vapid = _generate_vapid_keys()
+        p256dh, auth = _make_real_push_keys()
+        subscriptions = [
+            {
+                "username": "bob",
+                "endpoint": "https://rebind.example.com/push",
+                "p256dh_key": p256dh,
+                "auth_key": auth,
+            }
+        ]
+        gai_calls = 0
+
+        def _rebinding_getaddrinfo(
+            host: str,
+            svc_port: int,
+            family: int = 0,
+            socktype: int = 0,
+            *args: object,
+            **kwargs: object,
+        ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+            nonlocal gai_calls
+            gai_calls += 1
+            ip = "93.184.216.34" if gai_calls == 1 else "127.0.0.1"
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    (ip, int(svc_port)),
+                )
+            ]
+
+        connect_targets: list[object] = []
+
+        def _record_connect(self: socket.socket, address: object) -> None:
+            connect_targets.append(address)
+            raise ConnectionRefusedError("stubbed connect")
+
+        with (
+            patch(
+                "rootcoz.notifications.get_push_subscriptions_for_users",
+                new_callable=AsyncMock,
+                return_value=subscriptions,
+            ),
+            patch(
+                "rootcoz.notifications.socket.getaddrinfo",
+                side_effect=_rebinding_getaddrinfo,
+            ),
+            patch.object(socket.socket, "connect", _record_connect),
+        ):
+            await send_mention_notifications(
+                mentioned_usernames=["bob"],
+                comment_author="alice",
+                job_id="job-1",
+                test_name="test_dns_pin",
+                vapid_private_key=vapid["private_key"],
+                vapid_claim_email="admin@example.com",
+            )
+
+        assert gai_calls == 1
+        assert connect_targets == [("93.184.216.34", 443)]
+
+    @pytest.mark.asyncio
+    async def test_legacy_stored_non_public_endpoint_rejected_before_webpush(
+        self,
+    ) -> None:
+        """Non-public endpoints already stored in DB are skipped before calling webpush."""
+        subscriptions = [
+            {
+                "username": "bob",
+                "endpoint": "https://169.254.169.254/latest/meta-data",
+                "p256dh_key": "p256dh-bob",  # pragma: allowlist secret  # gitleaks:allow
+                "auth_key": "auth-bob",  # pragma: allowlist secret  # gitleaks:allow
+            },
+        ]
+        with (
+            patch(
+                "rootcoz.notifications.get_push_subscriptions_for_users",
+                new_callable=AsyncMock,
+                return_value=subscriptions,
+            ),
+            patch("rootcoz.notifications.webpush") as mock_webpush,
+        ):
+            await send_mention_notifications(
+                mentioned_usernames=["bob"],
+                comment_author="alice",
+                job_id="job-1",
+                test_name="test_legacy",
+                vapid_private_key="fake-key",  # pragma: allowlist secret
+                vapid_claim_email="admin@example.com",
+            )
+        mock_webpush.assert_not_called()

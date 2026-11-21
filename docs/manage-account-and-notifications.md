@@ -112,7 +112,7 @@ The registration key is the only credential that signs you in; the tracker token
    | Sidebar badge | Live unread count, pushed over the `/api/navbar/stream` SSE channel. |
    | `Push Notifications` toggle | Browser notifications titled `Mentioned by @author`. The notification link is built as `/results/{job_id}`, so a tap opens the report for that job. Use the `Mentions` page or the sidebar badge until that is corrected. |
 
-   Enabling push notifications asks the browser for permission and registers the device with the server. Delivery is best effort: a subscription the push service reports as gone is deleted automatically, and at most 10 subscriptions are kept per user.
+   Enabling push notifications asks the browser for permission and registers the device with the server. Push endpoints must be public `https://` URLs without embedded credentials (private, loopback, link-local, and local/internal hosts are rejected at registration and connect time). Delivery is best effort with a 10-second timeout and automatic redirects disabled: a subscription the push service reports as gone is deleted automatically, and at most 10 subscriptions are kept per user.
 
    > **Note:** Push notifications need VAPID keys. RootCoz generates a key pair automatically when none are configured, so the toggle normally works out of the box. An administrator can also set them under `Web Push` in Server Settings. See [Managing Users and Server Settings](manage-users-and-server-settings.html) for details.
 
