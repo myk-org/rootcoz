@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 import threading
 import time
 from typing import Any, NamedTuple
@@ -2052,11 +2053,16 @@ def clear_settings_cache() -> None:
 
     A build already running under an older generation will not publish its
     result (see ``get_settings``), so the cleared value is never resurrected.
+    Also invalidates the cached health probes if ``rootcoz.monitoring`` is
+    loaded so setting changes take effect immediately on /api/health and /metrics.
     """
     global _cached_settings, _settings_generation
     with _settings_lock:
         _cached_settings = None
         _settings_generation += 1
+    monitoring_mod = sys.modules.get("rootcoz.monitoring")
+    if monitoring_mod is not None:
+        monitoring_mod.clear_health_cache()
 
 
 async def load_db_settings() -> None:
