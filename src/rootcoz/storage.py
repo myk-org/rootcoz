@@ -8989,14 +8989,25 @@ async def delete_user(username: str) -> bool:
             "WHERE username = ? AND credential_source NOT IN ('deleting', 'deleted')",
             (username,),
         )
-        await db.execute(
-            "UPDATE chat_messages SET session_id = '' WHERE username = ? AND session_id != ''",
-            (username,),
-        )
         cursor = await db.execute("DELETE FROM users WHERE username = ?", (username,))
         if cursor.rowcount > 0:
             await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
+            await db.execute(
+                "DELETE FROM chat_messages WHERE username = ?", (username,)
+            )
+            await db.execute(
+                "DELETE FROM filter_presets WHERE username = ? AND scope = 'user'",
+                (username,),
+            )
+            await db.execute(
+                "DELETE FROM push_subscriptions WHERE username = ?", (username,)
+            )
+            await db.execute(
+                "DELETE FROM mention_reads WHERE username = ?", (username,)
+            )
         await db.commit()
+        if cursor.rowcount > 0:
+            logger.info("Deleted user '%s' and purged username-scoped state", username)
         return cursor.rowcount > 0
 
 
@@ -9180,26 +9191,27 @@ async def set_user_can_use_server_providers(username: str, value: bool) -> bool:
 
 
 async def can_user_use_server_providers(username: str) -> bool:
-    """Read the current grant; unknown identities are denied."""
+    """Read the current grant; unknown or disabled identities are denied."""
     if username == "admin":
         return True
     user = await get_user_by_username(username)
-    return bool(user and user["can_use_server_providers"])
+    return bool(user and not user.get("disabled") and user["can_use_server_providers"])
 
 
 async def can_user_use_free_providers(username: str) -> bool:
     """Effective free-pair access.
 
     The gate is the server-level ``ENABLE_FREE_MODELS`` toggle: when on,
-    every user may run admin-declared free provider+model pairs on server
-    credentials. Bootstrap admins, role admins, and users holding the full
-    server grant already have the superset. A deleted account gets nothing,
-    even if a background worker still carries its username.
+    every active non-disabled user may run admin-declared free provider+model
+    pairs on server credentials. Bootstrap admins, role admins, and users
+    holding the full server grant already have the superset. A deleted or
+    disabled account gets nothing, even if a background worker still carries
+    its username.
     """
     if username == "admin":
         return True
     user = await get_user_by_username(username)
-    if not user:
+    if not user or user.get("disabled"):
         return False
     if user["role"] == "admin" or user["can_use_server_providers"]:
         return True
@@ -10915,7 +10927,8 @@ async def save_ai_session_source(
             if expected_account_id is not None:
                 account = await (
                     await db.execute(
-                        "SELECT 1 FROM users WHERE username = ? AND id = ?",
+                        "SELECT 1 FROM users WHERE username = ? AND id = ? "
+                        "AND COALESCE(disabled, 0) = 0",
                         (username, expected_account_id),
                     )
                 ).fetchone()
@@ -11971,8 +11984,14 @@ async def get_push_subscriptions_for_users(
     async with _connect_db() as db:
         placeholders = ",".join("?" for _ in usernames)
         cursor = await db.execute(
-            f"SELECT username, endpoint, p256dh_key, auth_key "
-            f"FROM push_subscriptions WHERE username IN ({placeholders})",
+            f"SELECT ps.username, ps.endpoint, ps.p256dh_key, ps.auth_key "
+            f"FROM push_subscriptions ps "
+            f"LEFT JOIN users u ON u.username = ps.username "
+            f"WHERE ps.username IN ({placeholders}) "
+            f"AND (ps.username = 'admin' OR ("
+            f"u.username IS NOT NULL "
+            f"AND COALESCE(u.disabled, 0) = 0 "
+            f"AND COALESCE(NULLIF(u.status, ''), 'active') = 'active'))",
             usernames,
         )
         rows = await cursor.fetchall()
@@ -12717,21 +12736,25 @@ async def complete_chat_message_if_generation(
         cursor = await db.execute(
             "UPDATE chat_messages SET content = ?, status = 'completed', "
             "ai_provider = ?, ai_model = ?, session_id = ? "
-            "WHERE id = ? AND status = 'pending' AND "
-            "(? = 1 OR ? IS NULL OR EXISTS (SELECT 1 FROM users "
-            "WHERE username = chat_messages.username "
+            "WHERE id = ? AND status = 'pending' "
+            "AND (chat_messages.username = 'admin' OR EXISTS "
+            "(SELECT 1 FROM users WHERE username = chat_messages.username "
+            "AND COALESCE(disabled, 0) = 0)) "
+            "AND (? = 1 OR ? IS NULL OR EXISTS (SELECT 1 FROM users "
+            "WHERE username = chat_messages.username AND COALESCE(disabled, 0) = 0 "
             "AND COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) = ?)) "
             "AND (? = 0 OR chat_messages.username = 'admin' OR EXISTS "
             "(SELECT 1 FROM users WHERE username = chat_messages.username "
+            "AND COALESCE(disabled, 0) = 0 "
             "AND (role = 'admin' OR can_use_server_providers = 1)) OR "
             "(? = 1 AND EXISTS (SELECT 1 FROM users "
-            "WHERE username = chat_messages.username) AND EXISTS "
-            "(SELECT 1 FROM free_ai_models "
+            "WHERE username = chat_messages.username AND COALESCE(disabled, 0) = 0) "
+            "AND EXISTS (SELECT 1 FROM free_ai_models "
             "WHERE lower(provider) = lower(?) AND model = ?))) "
             "AND (chat_messages.job_id != '__admin_chat__' "
             "OR chat_messages.username = 'admin' OR EXISTS "
             "(SELECT 1 FROM users WHERE username = chat_messages.username "
-            "AND role = 'admin'))",
+            "AND COALESCE(disabled, 0) = 0 AND role = 'admin'))",
             (
                 content,
                 ai_provider,

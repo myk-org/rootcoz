@@ -1041,3 +1041,53 @@ class TestWebPushDeliveryHardening:
             )
 
         assert connect_calls == []
+
+
+async def test_send_mention_notifications_skips_deleted_and_disabled_users(
+    temp_db_path, monkeypatch
+) -> None:
+    """Web Push delivery excludes deleted, disabled, and pending accounts (#603)."""
+    from rootcoz import storage
+
+    monkeypatch.setattr(storage, "DB_PATH", temp_db_path)
+    await storage.init_db()
+    await storage.create_user("active_user", role="reviewer", status="active")
+    await storage.create_user("disabled_user", role="reviewer", status="active")
+    await storage.create_user("deleted_user", role="reviewer", status="active")
+
+    for name in ("active_user", "disabled_user", "deleted_user", "admin"):
+        await storage.save_push_subscription(
+            name,
+            f"https://push.example.com/sub/{name}",
+            "p256dh-key",  # pragma: allowlist secret  # gitleaks:allow
+            "auth-key",  # pragma: allowlist secret  # gitleaks:allow
+        )
+
+    await storage.set_user_disabled("disabled_user", True)
+    await storage.delete_user("deleted_user")
+
+    delivered: list[str] = []
+    vapid = _generate_vapid_keys()
+
+    def _fake_webpush(subscription_info, **_kwargs):
+        delivered.append(subscription_info["endpoint"])
+
+    with patch("rootcoz.notifications.webpush", side_effect=_fake_webpush):
+        await send_mention_notifications(
+            mentioned_usernames=[
+                "active_user",
+                "disabled_user",
+                "deleted_user",
+                "admin",
+            ],
+            comment_author="commenter",
+            job_id="job-603",
+            test_name="test_lifecycle",
+            vapid_private_key=vapid["private_key"],
+            vapid_claim_email="admin@example.com",
+        )
+
+    assert set(delivered) == {
+        "https://push.example.com/sub/active_user",
+        "https://push.example.com/sub/admin",
+    }

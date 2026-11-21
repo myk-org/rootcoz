@@ -4653,3 +4653,205 @@ class TestPendingSurvivesShutdown:
             live = await storage.get_result("live")
             assert live["status"] == "failed"
             assert live["error"] == storage.RESTART_ERROR_MSG
+
+
+class TestUserLifecycleIsolation:
+    """Account deletion purge (#603) and disabled-account completion gates (#619)."""
+
+    async def test_delete_user_purges_username_scoped_state_and_preserves_server_presets(
+        self, setup_test_db: Path
+    ) -> None:
+        """delete_user purges private username-scoped rows and blocks reuse leakage."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.create_user("alice", role="operator")
+            await storage.create_user("bob", role="operator")
+
+            # Seed per-job chat, admin chat, personal preset, server preset,
+            # push subscription, and mention read for alice (and bob).
+            await storage.add_chat_message(
+                "job-1", "user", "ALICE_PRIVATE_PROMPT", username="alice"
+            )
+            await storage.add_chat_message(
+                "__admin_chat__", "assistant", "ALICE_ADMIN_REPLY", username="alice"
+            )
+            await storage.add_chat_message(
+                "job-1", "user", "BOB_PRIVATE_PROMPT", username="bob"
+            )
+            await storage.create_filter_preset(
+                "alice", "dashboard", "user", "AlicePrivatePreset", {"q": "secret"}
+            )
+            await storage.create_filter_preset(
+                "alice", "dashboard", "server", "SharedServerPreset", {"q": "shared"}
+            )
+            await storage.create_filter_preset(
+                "bob", "dashboard", "user", "BobPrivatePreset", {"q": "bob"}
+            )
+            await storage.save_push_subscription(
+                "alice", "https://push.example.com/alice", "k1", "a1"
+            )
+            await storage.save_push_subscription(
+                "bob", "https://push.example.com/bob", "k2", "a2"
+            )
+            await storage.mark_mentions_read("alice", [101, 102])
+            await storage.mark_mentions_read("bob", [101])
+
+            assert await storage.delete_user("alice") is True
+
+            # Re-registering the same username must NOT inherit any old state.
+            await storage.create_user("alice", role="reviewer")
+            assert await storage.get_chat_messages("job-1", username="alice") == []
+            assert (
+                await storage.get_chat_messages("__admin_chat__", username="alice")
+                == []
+            )
+            alice_presets = await storage.list_filter_presets("alice", "dashboard")
+            assert [(p["scope"], p["name"]) for p in alice_presets] == [
+                ("server", "SharedServerPreset")
+            ]
+            assert await storage.get_push_subscriptions_for_users(["alice"]) == []
+
+            async with storage._connect_db() as db:
+                alice_reads = await (
+                    await db.execute(
+                        "SELECT comment_id FROM mention_reads WHERE username = 'alice'"
+                    )
+                ).fetchall()
+                bob_reads = await (
+                    await db.execute(
+                        "SELECT comment_id FROM mention_reads WHERE username = 'bob'"
+                    )
+                ).fetchall()
+            assert alice_reads == []
+            assert [row["comment_id"] for row in bob_reads] == [101]
+
+            # Bob's state and the shared server preset remain intact.
+            assert [
+                m["content"]
+                for m in await storage.get_chat_messages("job-1", username="bob")
+            ] == ["BOB_PRIVATE_PROMPT"]
+            bob_presets = await storage.list_filter_presets("bob", "dashboard")
+            assert {(p["scope"], p["name"]) for p in bob_presets} == {
+                ("user", "BobPrivatePreset"),
+                ("server", "SharedServerPreset"),
+            }
+            assert len(await storage.get_push_subscriptions_for_users(["bob"])) == 1
+
+    async def test_complete_chat_message_blocks_disabled_user_and_admin(
+        self, setup_test_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Disabled users/admins cannot complete user-key, server-key, free, or admin chat."""
+        monkeypatch.setenv("ENABLE_FREE_MODELS", "true")
+        from rootcoz.config import clear_settings_cache
+
+        clear_settings_cache()
+        try:
+            with patch.object(storage, "DB_PATH", setup_test_db):
+                await storage.create_user(
+                    "alice", role="reviewer", can_use_server_providers=True
+                )
+                await storage.create_user("freebie", role="reviewer")
+                await storage.create_admin_user("boss", can_use_server_providers=True)
+                await storage.create_admin_user("backup-admin")
+                await storage.update_user_ai_credential("alice", "openai", "sk-key-1")
+                gen = await storage.get_user_ai_credential_generation("alice", "openai")
+                await storage.set_free_ai_models([("openai", "gpt-free")], "admin")
+
+                _, pending_user_key = await storage.add_chat_message_pair(
+                    "job-uk", "q", username="alice"
+                )
+                _, pending_user_none = await storage.add_chat_message_pair(
+                    "job-un", "q", username="alice"
+                )
+                _, pending_server = await storage.add_chat_message_pair(
+                    "job-sv", "q", username="alice"
+                )
+                _, pending_free = await storage.add_chat_message_pair(
+                    "job-fr", "q", username="freebie"
+                )
+                _, pending_admin_chat = await storage.add_chat_message_pair(
+                    "__admin_chat__", "q", username="boss"
+                )
+                _, pending_bootstrap = await storage.add_chat_message_pair(
+                    "__admin_chat__", "q", username="admin"
+                )
+
+                assert (await storage.set_user_disabled("alice", True))[
+                    "refused"
+                ] is None
+                assert (await storage.set_user_disabled("freebie", True))[
+                    "refused"
+                ] is None
+                assert (await storage.set_user_disabled("boss", True))[
+                    "refused"
+                ] is None
+
+                assert not await storage.complete_chat_message_if_generation(
+                    pending_user_key,
+                    content="reply",
+                    ai_provider="openai",
+                    ai_model="gpt-4o",
+                    session_id="s1",
+                    credential_generation=gen,
+                    server_source=False,
+                )
+                assert not await storage.complete_chat_message_if_generation(
+                    pending_user_none,
+                    content="reply",
+                    ai_provider="openai",
+                    ai_model="gpt-4o",
+                    session_id="s2",
+                    credential_generation=None,
+                    server_source=False,
+                )
+                assert not await storage.complete_chat_message_if_generation(
+                    pending_server,
+                    content="reply",
+                    ai_provider="openai",
+                    ai_model="gpt-4o",
+                    session_id="s3",
+                    credential_generation=None,
+                    server_source=True,
+                )
+                assert not await storage.complete_chat_message_if_generation(
+                    pending_free,
+                    content="reply",
+                    ai_provider="openai",
+                    ai_model="gpt-free",
+                    session_id="s4",
+                    credential_generation=None,
+                    server_source=True,
+                )
+                assert not await storage.complete_chat_message_if_generation(
+                    pending_admin_chat,
+                    content="reply",
+                    ai_provider="openai",
+                    ai_model="gpt-4o",
+                    session_id="s5",
+                    credential_generation=None,
+                    server_source=True,
+                )
+
+                # Bootstrap admin still completes normally.
+                assert await storage.complete_chat_message_if_generation(
+                    pending_bootstrap,
+                    content="bootstrap-ok",
+                    ai_provider="openai",
+                    ai_model="gpt-4o",
+                    session_id="s6",
+                    credential_generation=None,
+                    server_source=True,
+                )
+
+                # Re-enabling restores completion for active users.
+                await storage.set_user_disabled("boss", False)
+                assert await storage.complete_chat_message_if_generation(
+                    pending_admin_chat,
+                    content="boss-ok",
+                    ai_provider="openai",
+                    ai_model="gpt-4o",
+                    session_id="s5",
+                    credential_generation=None,
+                    server_source=True,
+                )
+        finally:
+            clear_settings_cache()

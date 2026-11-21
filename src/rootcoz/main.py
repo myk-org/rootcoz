@@ -1448,6 +1448,7 @@ async def _queue_sse_events(
     subscription: _PayloadSubscription,
     render: Callable[[Any], str | None],
     gap_event: str = "",
+    auth_check: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[str]:
     """Yield rendered SSE chunks from a subscription's queue until the client leaves.
 
@@ -1470,6 +1471,8 @@ async def _queue_sse_events(
             )
         except TimeoutError:
             timed_out = True
+        if auth_check is not None and not await auth_check():
+            break
         if gap_event and (dropped := subscription.take_dropped()):
             yield f"event: {gap_event}\ndata: {json.dumps({'dropped': dropped})}\n\n"
         if timed_out:
@@ -1504,6 +1507,8 @@ def _make_sse_stream(
     event_name: str,
     per_key_listeners: dict[str, set[asyncio.Event]] | None = None,
     listener_key: str = "",
+    *,
+    auth_check: Callable[[], Awaitable[bool]] | None = None,
 ) -> StreamingResponse:
     """Create a generic SSE stream that sends a named event when signaled.
 
@@ -1513,6 +1518,7 @@ def _make_sse_stream(
         event_name: SSE event name to send (e.g. 'dashboard-changed').
         per_key_listeners: Optional per-key listener dict (e.g. per job_id).
         listener_key: Key into per_key_listeners (e.g. the job_id).
+        auth_check: Optional async re-authorization check run on each wake/keepalive.
     """
 
     async def event_generator() -> AsyncIterator[str]:
@@ -1541,6 +1547,9 @@ def _make_sse_stream(
                         task.cancel()
                     wait_task = None
                 except asyncio.CancelledError:
+                    break
+
+                if auth_check is not None and not await auth_check():
                     break
 
                 if not done:
@@ -4632,6 +4641,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.role = "reviewer"
         request.state.can_view_reports = False
         request.state.can_use_server_providers = False
+        request.state.auth_session_token = ""
 
         # Public paths and static assets — pass through
         # (but /login may need SSO redirect, handled below;
@@ -4678,6 +4688,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         resolved_role = get_settings().default_user_role  # default role until resolved
         authenticated_admin = False
         has_valid_session = False
+        auth_session_token = ""
         # User row already loaded via Bearer key or SSO (reuse for can_view_reports).
         fetched_user: dict[str, Any] | None = None
 
@@ -4690,6 +4701,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 username = str(session["username"])
                 authenticated_admin = is_admin
                 has_valid_session = True
+                auth_session_token = session_token
                 if is_admin:
                     resolved_role = "admin"
                 else:
@@ -4732,6 +4744,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     resolved_role = "admin"
                     authenticated_admin = True
                     has_valid_session = True
+                    auth_session_token = ""
                 else:
                     user = await storage.get_user_by_key(token)
                     if user:
@@ -4739,6 +4752,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         username = str(user["username"])
                         resolved_role = str(user.get("role", "reviewer"))
                         has_valid_session = True
+                        auth_session_token = ""
                         if resolved_role == "admin":
                             is_admin = True
                             authenticated_admin = True
@@ -4754,6 +4768,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                                 resolved_role = "admin"
                             authenticated_admin = is_admin
                             has_valid_session = True
+                            auth_session_token = token
 
         # 3. Check X-Forwarded-User header (SSO via trusted proxy)
         if not username and proxy_username and proxy_username.lower() != "admin":
@@ -4809,6 +4824,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.username = username
             request.state.is_admin = is_admin
             request.state.role = resolved_role
+            request.state.auth_session_token = auth_session_token
             # can_view_reports: admins effective True; non-admins reload stored flag
             # from users table each request (no session invalidation needed).
             # Reuse a user row already loaded via Bearer/SSO when available.
@@ -6193,11 +6209,103 @@ async def _auto_assign_metadata(
 
 
 async def _ai_admin_role_current(username: str) -> bool:
-    """Check the live role, not a role captured when chat was queued."""
+    """Check the live role and enabled state, not a role captured when chat was queued."""
     if username == "admin":  # Bootstrap admin has no users row.
         return True
     user = await storage.get_user_by_username(username)
-    return bool(user and user["role"] == "admin")
+    return bool(user and not user.get("disabled") and user["role"] == "admin")
+
+
+_ADMIN_MULTIPLEX_TOPICS = frozenset({"token-usage", "settings", "admin-chat"})
+
+
+async def _is_admin_sse_authorized(request: Request) -> bool:
+    """Re-verify that a long-lived admin SSE caller is still an active admin.
+
+    Checks both the live account state (not deleted, not disabled, still admin)
+    and, when the connection authenticated via a session token or DB API key,
+    that the credential itself has not been revoked or rotated.
+    """
+    username = getattr(request.state, "username", "")
+    if not isinstance(username, str) or not username:
+        return False
+
+    try:
+        state_vars = vars(request.state) if hasattr(request, "state") else {}
+        if "auth_session_token" in state_vars and isinstance(
+            state_vars["auth_session_token"], str
+        ):
+            session_token = state_vars["auth_session_token"]
+        elif isinstance(getattr(request, "cookies", None), Mapping):
+            raw_cookie = _read_cookie(request, "rootcoz_session")
+            session_token = raw_cookie if isinstance(raw_cookie, str) else ""
+        else:
+            session_token = ""
+
+        if session_token:
+            session = await storage.get_session(session_token)
+            if (
+                not session
+                or not session.get("is_admin")
+                or str(session.get("username", "")) != username
+            ):
+                logger.info(
+                    "Admin SSE closed for '%s': session revoked or no longer admin",
+                    username,
+                )
+                return False
+        else:
+            headers = getattr(request, "headers", None)
+            auth_header = (
+                headers.get("authorization", "") if isinstance(headers, Mapping) else ""
+            )
+            if isinstance(auth_header, str) and auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+                settings = get_settings()
+                if not (
+                    username == "admin"
+                    and settings.admin_key
+                    and hmac.compare_digest(token, settings.admin_key)
+                ):
+                    user = await storage.get_user_by_key(token)
+                    if user is not None:
+                        if (
+                            str(user.get("username", "")) != username
+                            or user.get("disabled")
+                            or user.get("role") != "admin"
+                        ):
+                            logger.info(
+                                "Admin SSE closed for '%s': API key no longer active admin",
+                                username,
+                            )
+                            return False
+                    else:
+                        session = await storage.get_session(token)
+                        if (
+                            not session
+                            or not session.get("is_admin")
+                            or str(session.get("username", "")) != username
+                        ):
+                            logger.info(
+                                "Admin SSE closed for '%s': Bearer credential revoked",
+                                username,
+                            )
+                            return False
+
+        still_admin = await _ai_admin_role_current(username)
+        if not still_admin:
+            logger.info(
+                "Admin SSE closed for '%s': account deleted, disabled, or demoted",
+                username,
+            )
+        return still_admin
+    except Exception:
+        logger.warning(
+            "Admin SSE authorization re-check failed for '%s'; closing stream",
+            username,
+            exc_info=True,
+        )
+        return False
 
 
 async def _create_ai_auth_header(
@@ -16517,7 +16625,12 @@ async def stream_comments(job_id: str, request: Request) -> StreamingResponse:
 async def stream_token_usage(request: Request) -> StreamingResponse:
     """SSE stream that notifies when token usage data changes."""
     _require_admin(request)
-    return _make_sse_stream(request, _token_usage_listeners, "usage-changed")
+    return _make_sse_stream(
+        request,
+        _token_usage_listeners,
+        "usage-changed",
+        auth_check=partial(_is_admin_sse_authorized, request),
+    )
 
 
 @app.get("/api/stream", operation_id="streamMultiplexed")
@@ -16623,6 +16736,10 @@ async def stream_multiplexed(
     if not registrations and not navbar_requested:
         raise HTTPException(status_code=400, detail="No valid topics specified")
 
+    has_admin_topics = any(
+        prefix in _ADMIN_MULTIPLEX_TOPICS for prefix, *_ in registrations
+    )
+
     async def event_generator() -> AsyncIterator[str]:
         global _sse_connections
         # Register all events in their listener sets
@@ -16705,10 +16822,15 @@ async def stream_multiplexed(
                     break
 
                 if not done and not pending_feed.retry_due():
+                    if has_admin_topics and not await _is_admin_sse_authorized(request):
+                        break
                     yield ": keepalive\n\n"
                     continue
 
                 if await request.is_disconnected():
+                    break
+
+                if has_admin_topics and not await _is_admin_sse_authorized(request):
                     break
 
                 # Emit events for all fired topics, plus a due pending retry
@@ -19550,6 +19672,8 @@ async def stream_logs(
                         tail_lines = await asyncio.to_thread(
                             _read_log_tail, log_path, lines
                         )
+                        if not await _is_admin_sse_authorized(request):
+                            return
                         for line in tail_lines:
                             clean = _ANSI_RE.sub("", line)
                             tail_seen[clean] += 1
@@ -19565,7 +19689,12 @@ async def stream_logs(
                     return None
                 return _log_chunk(line) if _matches_level(line) else None
 
-            async for chunk in _queue_sse_events(request, subscription, _render):
+            async for chunk in _queue_sse_events(
+                request,
+                subscription,
+                _render,
+                auth_check=partial(_is_admin_sse_authorized, request),
+            ):
                 yield chunk
 
     logger.info(
@@ -19985,7 +20114,11 @@ async def stream_audit_events(request: Request) -> StreamingResponse:
     async def event_generator() -> AsyncIterator[str]:
         async with _audit_broadcast.subscribe() as subscription:
             async for chunk in _queue_sse_events(
-                request, subscription, _render, gap_event="audit-gap"
+                request,
+                subscription,
+                _render,
+                gap_event="audit-gap",
+                auth_check=partial(_is_admin_sse_authorized, request),
             ):
                 yield chunk
 
@@ -20307,6 +20440,7 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
     if user_row is None:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
     owner_id = int(user_row["id"])
+    stored_username = str(user_row["username"])
 
     async with _hold_attachment_scope_locks(f"owner:{owner_id}"):
         # Read the account before it is gone: the row has to say what that account
@@ -20327,11 +20461,19 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
         if not deleted:
             if not await storage.user_id_exists(owner_id):
                 await _cleanup_deleted_owner_attachments(owner_id)
+                await cleanup_off_loop(
+                    f"owner:{owner_id}",
+                    partial(_cleanup_admin_artifacts, stored_username),
+                )
             elif marker_written:
                 await issue_attachments.remove_owner_delete_marker(owner_id)
             raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
         await _cleanup_deleted_owner_attachments(owner_id)
+        await cleanup_off_loop(
+            f"owner:{owner_id}",
+            partial(_cleanup_admin_artifacts, stored_username),
+        )
 
     notify_pending_count_changed()
     await _cleanup_revoked_ai_sessions()
@@ -22503,7 +22645,12 @@ def _broadcast_settings_change() -> None:
 async def settings_stream(request: Request) -> StreamingResponse:
     """SSE stream for server settings changes."""
     _require_admin(request)
-    return _make_sse_stream(request, _settings_listeners, "settings-changed")
+    return _make_sse_stream(
+        request,
+        _settings_listeners,
+        "settings-changed",
+        auth_check=partial(_is_admin_sse_authorized, request),
+    )
 
 
 @app.get("/api/admin/settings", operation_id="getAdminSettings")
@@ -27079,7 +27226,11 @@ def _resolve_chat_ai_config(
 
 
 def _chat_sse_response(
-    request: Request, username: str, job_id: str
+    request: Request,
+    username: str,
+    job_id: str,
+    *,
+    auth_check: Callable[[], Awaitable[bool]] | None = None,
 ) -> StreamingResponse:
     """The one chat stream: claimed, subscribed, rendered and released in one place.
 
@@ -27107,6 +27258,7 @@ def _chat_sse_response(
                     subscription,
                     _render_chat_frame,
                     gap_event="chat-changed",
+                    auth_check=auth_check,
                 ):
                     yield chunk
         finally:
@@ -28097,7 +28249,12 @@ async def admin_chat_stream(request: Request) -> StreamingResponse:
     """SSE stream for real-time admin chat message updates."""
     _require_admin(request)
     _require_authenticated(request)
-    return _chat_sse_response(request, request.state.username, ADMIN_CHAT_JOB_ID)
+    return _chat_sse_response(
+        request,
+        request.state.username,
+        ADMIN_CHAT_JOB_ID,
+        auth_check=partial(_is_admin_sse_authorized, request),
+    )
 
 
 @app.post("/api/admin/chat", status_code=202, operation_id="sendAdminChatMessage")
