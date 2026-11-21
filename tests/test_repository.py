@@ -1806,3 +1806,246 @@ class TestSharedPrintableDiagnostic:
         assert all(ch.isprintable() for ch in message)
         # The ANSI sequence collapses to a space, not to the literal "[31m".
         assert "[31m" not in message
+
+
+class TestCredentialScrubbingHardening:
+    """Regression tests for #615 — scrub embedded URL credentials from .git/config."""
+
+    def test_clone_into_scrubs_embedded_url_credentials_without_token(
+        self, ref_repo: dict, tmp_path: Path
+    ) -> None:
+        """Embedded userinfo and query credentials are scrubbed even when token=None."""
+        cred_url = (
+            "https://alice:DUMMY_URL_PASS@git.example.com/org/repo.git"  # pragma: allowlist secret
+            "?token=DUMMY_QUERY_SECRET#frag"
+        )
+
+        def fake_git_clone(url: str, clone_dir: Path, **_kwargs) -> None:
+            subprocess.run(
+                ["git", "clone", "-q", "--depth", "1", ref_repo["url"], str(clone_dir)],
+                check=True,
+            )
+            # Simulate git clone recording the credentialed URL in .git/config
+            subprocess.run(
+                ["git", "-C", str(clone_dir), "remote", "set-url", "origin", url],
+                check=True,
+            )
+
+        target = tmp_path / "workspace" / "repo"
+        target.parent.mkdir()
+        with patch("rootcoz.repository._git_clone", side_effect=fake_git_clone):
+            RepositoryManager().clone_into(cred_url, target, depth=1, token=None)
+
+        config_text = (target / ".git" / "config").read_text(encoding="utf-8")
+        assert "https://git.example.com/org/repo.git" in config_text
+        assert "DUMMY_URL_PASS" not in config_text
+        assert "DUMMY_QUERY_SECRET" not in config_text
+        assert "alice:" not in config_text
+
+        # Non-authenticated local git operations still work
+        status = subprocess.run(
+            ["git", "-C", str(target), "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert status.returncode == 0
+        log = subprocess.run(
+            ["git", "-C", str(target), "log", "-1", "--oneline"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert log.stdout.strip()
+
+    def test_clone_into_scrubs_embedded_url_credentials_with_token(
+        self, ref_repo: dict, tmp_path: Path
+    ) -> None:
+        """Both injected token and embedded URL userinfo/query are scrubbed from .git/config."""
+        cred_url = (
+            "https://alice:DUMMY_URL_PASS@git.example.com/org/repo.git"  # pragma: allowlist secret
+            "?token=DUMMY_QUERY_SECRET"
+        )
+
+        def fake_git_clone(url: str, clone_dir: Path, **_kwargs) -> None:
+            subprocess.run(
+                ["git", "clone", "-q", "--depth", "1", ref_repo["url"], str(clone_dir)],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(clone_dir), "remote", "set-url", "origin", url],
+                check=True,
+            )
+
+        target = tmp_path / "workspace" / "repo"
+        target.parent.mkdir()
+        with patch("rootcoz.repository._git_clone", side_effect=fake_git_clone):
+            RepositoryManager().clone_into(
+                cred_url,
+                target,
+                depth=1,
+                token="DUMMY_ARG_TOKEN",  # pragma: allowlist secret
+            )
+
+        config_text = (target / ".git" / "config").read_text(encoding="utf-8")
+        assert "https://git.example.com/org/repo.git" in config_text
+        assert "DUMMY_URL_PASS" not in config_text
+        assert "DUMMY_QUERY_SECRET" not in config_text
+        assert "DUMMY_ARG_TOKEN" not in config_text
+        assert "x-token-auth" not in config_text
+
+    def test_clone_into_scrubs_credentials_on_error_path(
+        self, ref_repo: dict, tmp_path: Path
+    ) -> None:
+        """On clone failure after .git/config is written, credentials are scrubbed before cleanup."""
+        cred_url = "https://alice:DUMMY_ERR_PASS@git.example.com/org/repo.git?token=ERR_Q"  # pragma: allowlist secret
+        observed_before_delete: list[str] = []
+
+        def fake_clone_fail(url: str, staging_dir: Path, **_kwargs) -> None:
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "-q",
+                    "--depth",
+                    "1",
+                    ref_repo["url"],
+                    str(staging_dir),
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(staging_dir), "remote", "set-url", "origin", url],
+                check=True,
+            )
+            raise GitCommandError(["git", "clone"], 128, stderr="fatal: simulated")
+
+        from rootcoz import repository as repo_module
+
+        real_delete_tree = repo_module.delete_tree
+
+        def spy_delete_tree(path: Path):
+            cfg = path / ".git" / "config"
+            if cfg.is_file():
+                observed_before_delete.append(cfg.read_text(encoding="utf-8"))
+            return real_delete_tree(path)
+
+        target = tmp_path / "workspace" / "repo"
+        target.parent.mkdir()
+        with (
+            patch("rootcoz.repository._git_clone", side_effect=fake_clone_fail),
+            patch("rootcoz.repository.delete_tree", side_effect=spy_delete_tree),
+            pytest.raises(GitCommandError),
+        ):
+            RepositoryManager().clone_into(cred_url, target, depth=1, token=None)
+
+        assert observed_before_delete, "Expected .git/config to exist before delete"
+        assert "DUMMY_ERR_PASS" not in observed_before_delete[0]
+        assert "ERR_Q" not in observed_before_delete[0]
+        assert "https://git.example.com/org/repo.git" in observed_before_delete[0]
+        assert not target.exists()
+
+    def test_clone_scrubs_embedded_url_credentials(
+        self, ref_repo: dict, tmp_path: Path
+    ) -> None:
+        """RepositoryManager.clone() also scrubs embedded credentials from .git/config."""
+        cred_url = "https://bob:DUMMY_CLONE_PASS@git.example.com/org/repo.git?token=CLONE_Q"  # pragma: allowlist secret
+
+        def fake_git_clone(url: str, clone_dir: Path, **_kwargs) -> None:
+            subprocess.run(
+                ["git", "clone", "-q", "--depth", "1", ref_repo["url"], str(clone_dir)],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(clone_dir), "remote", "set-url", "origin", url],
+                check=True,
+            )
+
+        manager = RepositoryManager()
+        try:
+            with patch("rootcoz.repository._git_clone", side_effect=fake_git_clone):
+                cloned = manager.clone(cred_url, depth=1)
+
+            config_text = (cloned / ".git" / "config").read_text(encoding="utf-8")
+            assert "https://git.example.com/org/repo.git" in config_text
+            assert "DUMMY_CLONE_PASS" not in config_text
+            assert "CLONE_Q" not in config_text
+        finally:
+            manager.cleanup()
+
+    def test_clone_into_sha_scrubs_fetch_head_and_reflogs(
+        self, ref_repo: dict, tmp_path: Path
+    ) -> None:
+        """SHA fetch path leaves no credentials in .git/config, FETCH_HEAD, or .git/logs."""
+        cred_url = (
+            "https://alice:DUMMY_SHA_PASS@git.example.com/org/repo.git"  # pragma: allowlist secret
+            "?token=DUMMY_SHA_QUERY"
+        )
+        sha = ref_repo["shas"][-1]
+
+        def fake_fetch_by_id(
+            url: str, target_dir: Path, fetch_sha: str, depth: int | None, _deadline
+        ) -> bool:
+            subprocess.run(["git", "init", "-q", str(target_dir)], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(target_dir),
+                    "remote",
+                    "add",
+                    "origin",
+                    ref_repo["url"],
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(target_dir),
+                    "fetch",
+                    "-q",
+                    "--depth",
+                    str(depth or 1),
+                    "origin",
+                    fetch_sha,
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(target_dir),
+                    "checkout",
+                    "-q",
+                    "--detach",
+                    "FETCH_HEAD",
+                ],
+                check=True,
+            )
+            # Simulate credentialed URL recorded in .git/config and FETCH_HEAD
+            subprocess.run(
+                ["git", "-C", str(target_dir), "remote", "set-url", "origin", url],
+                check=True,
+            )
+            fetch_head = target_dir / ".git" / "FETCH_HEAD"
+            fetch_head.write_text(f"{fetch_sha}\t\t'{fetch_sha}' of {url}\n")
+            return True
+
+        target = tmp_path / "workspace" / "repo"
+        target.parent.mkdir()
+        with patch(
+            "rootcoz.repository._fetch_commit_by_id", side_effect=fake_fetch_by_id
+        ):
+            RepositoryManager().clone_into(cred_url, target, depth=1, branch=sha)
+
+        for git_file in (target / ".git").rglob("*"):
+            if git_file.is_file():
+                content = git_file.read_text(errors="ignore")
+                assert "DUMMY_SHA_PASS" not in content, f"Leaked in {git_file}"
+                assert "DUMMY_SHA_QUERY" not in content, f"Leaked in {git_file}"
+        assert "https://git.example.com/org/repo.git" in (
+            target / ".git" / "config"
+        ).read_text(encoding="utf-8")

@@ -216,19 +216,39 @@ def derive_test_repo_name(
 def _scrub_credentials(target_dir: Path, repo_url: str | HttpUrl) -> None:
     """Reset remote.origin.url to strip embedded credentials from .git/config.
 
-    Called after clone operations that inject auth tokens into the clone URL.
+    Called unconditionally after clone/fetch operations so neither injected auth
+    tokens nor caller-supplied URL credentials (userinfo, query, fragment) remain
+    on disk in .git/config, FETCH_HEAD, or reflogs.
     No-op if .git directory does not exist (e.g. clone failed before creating it).
     """
-    if not (target_dir / ".git").exists():
+    git_dir = target_dir / ".git"
+    if not git_dir.exists():
         return
+    clean_url = strip_url_credentials(str(repo_url))
     git_executable = shutil.which("git")
     if git_executable:
-        subprocess.run(
-            [git_executable, "remote", "set-url", "origin", str(repo_url)],
+        result = subprocess.run(
+            [git_executable, "remote", "set-url", "origin", clean_url],
             cwd=target_dir,
             check=False,
             capture_output=True,
         )
+        if result.returncode != 0:
+            logger.debug(
+                "git remote set-url origin returned %d while scrubbing %s",
+                result.returncode,
+                target_dir,
+            )
+    if git_dir.is_dir() and not git_dir.is_symlink():
+        fetch_head = git_dir / "FETCH_HEAD"
+        if not fetch_head.is_symlink():
+            try:
+                fetch_head.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("Could not remove %s during credential scrub", fetch_head)
+        logs_dir = git_dir / "logs"
+        if logs_dir.exists() and not logs_dir.is_symlink():
+            shutil.rmtree(logs_dir, ignore_errors=True)
 
 
 def _staged_name(target_dir: Path) -> str:
@@ -668,14 +688,17 @@ class RepositoryManager:
         clone_dir = self.base_path / f"{repo_name}-{clone_id}"
         clone_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dirs.append(clone_dir)
-        _clone_by_ref_type(
-            str(repo_url),
-            clone_dir,
-            branch=branch,
-            depth=depth,
-            log_prefix="Cloning repository",
-            deadline=time.monotonic() + _clone_timeout(),
-        )
+        try:
+            _clone_by_ref_type(
+                str(repo_url),
+                clone_dir,
+                branch=branch,
+                depth=depth,
+                log_prefix="Cloning repository",
+                deadline=time.monotonic() + _clone_timeout(),
+            )
+        finally:
+            _scrub_credentials(clone_dir, repo_url)
         return clone_dir
 
     def clone_into(
@@ -731,10 +754,9 @@ class RepositoryManager:
             )
             failed = False
         finally:
-            if token:
-                # Aimed at the staging tree: it is where the injected remote
-                # landed, and it reaches transcripts the agent can read.
-                _scrub_credentials(staging, repo_url)
+            # Always scrub staging before rename or cleanup so neither injected
+            # tokens nor caller-supplied URL credentials remain in .git/config.
+            _scrub_credentials(staging, repo_url)
             if failed:
                 delete_tree(staging)
         try:
