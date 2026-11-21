@@ -788,9 +788,9 @@ class TestGitHubIssuesSettings:
 
 
 # Shared bracketed-model literals used across multiple peer-config tests
-_CURSOR_GPT54_BRACKETED = "gpt-5.4[context=272k,reasoning=medium,fast=false]"
-_CURSOR_SONNET_BRACKETED = "claude-sonnet-4-6[thinking=true,context=200k,effort=medium]"
-_CURSOR_COMPOSER_BRACKETED = "composer-2[fast=true]"
+_OPENAI_GPT54_BRACKETED = "gpt-5.4[context=272k,reasoning=medium,fast=false]"
+_CLAUDE_SONNET_BRACKETED = "claude-sonnet-4-6[thinking=true,context=200k,effort=medium]"
+_GEMINI_PRO_BRACKETED = "gemini-2.5-pro[fast=true]"
 
 
 class TestParsePeerConfigs:
@@ -798,10 +798,10 @@ class TestParsePeerConfigs:
 
     def test_parse_peer_configs_valid(self) -> None:
         """Valid 'provider:model' pairs produce correct dicts."""
-        result = parse_peer_configs("claude:opus,cursor:gpt")
+        result = parse_peer_configs("claude:opus,gemini:pro")
         assert result == [
             {"ai_provider": "claude", "ai_model": "opus"},
-            {"ai_provider": "cursor", "ai_model": "gpt"},
+            {"ai_provider": "gemini", "ai_model": "pro"},
         ]
 
     def test_parse_peer_configs_empty(self) -> None:
@@ -829,9 +829,14 @@ class TestParsePeerConfigs:
 
     def test_parse_peer_configs_accepts_catalog_provider_ids(self) -> None:
         """Catalog validation is deferred to the async sidecar resolution path."""
-        assert parse_peer_configs("openai:gpt-5.4,cli-cursor:cursor:composer-2") == [
+        assert parse_peer_configs(
+            "openai:gpt-5.4,openrouter:anthropic/claude-sonnet-4-6:thinking"
+        ) == [
             {"ai_provider": "openai", "ai_model": "gpt-5.4"},
-            {"ai_provider": "cli-cursor", "ai_model": "cursor:composer-2"},
+            {
+                "ai_provider": "openrouter",
+                "ai_model": "anthropic/claude-sonnet-4-6:thinking",
+            },
         ]
 
     def test_parse_peer_configs_trailing_comma(self) -> None:
@@ -841,50 +846,48 @@ class TestParsePeerConfigs:
 
     def test_parse_peer_configs_model_with_brackets_no_commas(self) -> None:
         """Model name with brackets but no internal commas parses correctly."""
-        result = parse_peer_configs("cursor:composer-2[fast=true]")
-        assert result == [
-            {"ai_provider": "cursor", "ai_model": "composer-2[fast=true]"}
-        ]
+        result = parse_peer_configs(f"gemini:{_GEMINI_PRO_BRACKETED}")
+        assert result == [{"ai_provider": "gemini", "ai_model": _GEMINI_PRO_BRACKETED}]
 
     def test_parse_peer_configs_model_with_brackets_and_commas(self) -> None:
         """Model name with commas inside brackets is not split."""
         result = parse_peer_configs(
-            f"cursor:{_CURSOR_COMPOSER_BRACKETED},cursor:{_CURSOR_GPT54_BRACKETED}"
+            f"gemini:{_GEMINI_PRO_BRACKETED},openai:{_OPENAI_GPT54_BRACKETED}"
         )
         assert result == [
-            {"ai_provider": "cursor", "ai_model": _CURSOR_COMPOSER_BRACKETED},
+            {"ai_provider": "gemini", "ai_model": _GEMINI_PRO_BRACKETED},
             {
-                "ai_provider": "cursor",
-                "ai_model": _CURSOR_GPT54_BRACKETED,
+                "ai_provider": "openai",
+                "ai_model": _OPENAI_GPT54_BRACKETED,
             },
         ]
 
     def test_parse_peer_configs_mixed_bracket_and_plain(self) -> None:
         """Mix of plain model and bracketed model with commas."""
         result = parse_peer_configs(
-            f"claude:claude-opus-4-6-1m,cursor:{_CURSOR_GPT54_BRACKETED}"
+            f"claude:claude-opus-4-6-1m,openai:{_OPENAI_GPT54_BRACKETED}"
         )
         assert result == [
             {"ai_provider": "claude", "ai_model": "claude-opus-4-6-1m"},
             {
-                "ai_provider": "cursor",
-                "ai_model": _CURSOR_GPT54_BRACKETED,
+                "ai_provider": "openai",
+                "ai_model": _OPENAI_GPT54_BRACKETED,
             },
         ]
 
     def test_parse_peer_configs_multiple_bracketed_models(self) -> None:
         """Multiple models with commas inside brackets."""
         result = parse_peer_configs(
-            f"cursor:{_CURSOR_GPT54_BRACKETED},cursor:{_CURSOR_SONNET_BRACKETED}"
+            f"openai:{_OPENAI_GPT54_BRACKETED},claude:{_CLAUDE_SONNET_BRACKETED}"
         )
         assert result == [
             {
-                "ai_provider": "cursor",
-                "ai_model": _CURSOR_GPT54_BRACKETED,
+                "ai_provider": "openai",
+                "ai_model": _OPENAI_GPT54_BRACKETED,
             },
             {
-                "ai_provider": "cursor",
-                "ai_model": _CURSOR_SONNET_BRACKETED,
+                "ai_provider": "claude",
+                "ai_model": _CLAUDE_SONNET_BRACKETED,
             },
         ]
 

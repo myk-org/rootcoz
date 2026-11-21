@@ -10977,6 +10977,43 @@ class TestStartupWorkspaceReclaim:
         assert events[0]["outcome"] == "failure"
         assert events[0]["details"]["survived"] == 1
 
+    async def test_startup_reclaim_purges_legacy_http_tools_dumps(
+        self, _no_host_temp_root, tmp_path, initialized_db
+    ) -> None:
+        """Upgraded hosts purge stale pre-#622 HTTP tools dumps across temp roots."""
+        from rootcoz import main as main_mod
+
+        base = _no_host_temp_root
+        base.mkdir(parents=True, exist_ok=True)
+        await _seed_job_row("live")
+
+        # 1. Analysis workspace sibling dump under rootcoz_temp_base()
+        base_dump = base / ".workspace-old.rootcoz-http-tools.json"
+        base_dump.write_text('{"token": "old"}', encoding="utf-8")
+
+        # 2. Chat job sibling dump + per-user dump inside a KEPT live chat workspace
+        live_chat = _seed_tree(tmp_path / "rootcoz-chat-live", entry="sessions.txt")
+        chat_root_dump = tmp_path / ".rootcoz-chat-live.rootcoz-http-tools.json"
+        chat_root_dump.write_text('{"token": "old"}', encoding="utf-8")
+        nested_user_dump = live_chat / ".alice.rootcoz-http-tools.json"
+        nested_user_dump.write_text('{"token": "old"}', encoding="utf-8")
+
+        # 3. Symlinked dump must not be followed or removed
+        outside = tmp_path / "do-not-delete.json"
+        outside.write_text("keep", encoding="utf-8")
+        symlink_dump = base / ".symlink.rootcoz-http-tools.json"
+        symlink_dump.symlink_to(outside)
+
+        await main_mod._reclaim_abandoned_workspaces({"live"})
+
+        assert not base_dump.exists()
+        assert not chat_root_dump.exists()
+        assert not nested_user_dump.exists()
+        assert live_chat.exists()
+        assert (live_chat / "sessions.txt").exists()
+        assert symlink_dump.is_symlink()
+        assert outside.read_text(encoding="utf-8") == "keep"
+
 
 class TestAnalysisWorkspaceReap:
     """The one reap sequence both analysis ``finally`` blocks run (#424)."""

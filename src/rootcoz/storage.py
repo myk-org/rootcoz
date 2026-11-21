@@ -2801,6 +2801,7 @@ async def init_db() -> None:
 
     await _migrate_jira_oauth_secret_rename()
     await _migrate_jira_url_per_method_split()
+    await _migrate_remove_legacy_agent_settings()
 
     # Run signature recomputation migration BEFORE backfill so that:
     # 1. Migration deletes old rows with pre-normalization signatures.
@@ -2911,6 +2912,39 @@ async def _migrate_jira_url_per_method_split() -> None:
                 "jira_server_ssl_verify",
             ),
         )
+        await _mark_migration_applied(db, migration_key)
+        await db.commit()
+
+
+_LEGACY_REMOVED_SERVER_SETTINGS: tuple[str, ...] = (
+    "acpx_agents",
+    "cli_agents",
+    "cursor_api_key",
+)
+
+
+async def _migrate_remove_legacy_agent_settings() -> None:
+    """One-time migration: drop obsolete acpx/cli/cursor server_settings rows (#622).
+
+    Tracked via ``_migrations_applied`` so upgraded databases remove orphan rows
+    that are no longer recognized by ``Settings`` or editable via the settings API.
+    """
+    migration_key = "remove_legacy_agent_settings_v1"
+    placeholders = ", ".join("?" for _ in _LEGACY_REMOVED_SERVER_SETTINGS)
+    async with _connect_db() as db:
+        if await _migration_applied(db, migration_key):
+            return
+        cursor = await db.execute(
+            f"DELETE FROM server_settings WHERE key IN ({placeholders})",
+            _LEGACY_REMOVED_SERVER_SETTINGS,
+        )
+        deleted = cursor.rowcount
+        if deleted > 0:
+            logger.info(
+                "Migration: removed %d obsolete server_settings row(s) (%s)",
+                deleted,
+                ", ".join(_LEGACY_REMOVED_SERVER_SETTINGS),
+            )
         await _mark_migration_applied(db, migration_key)
         await db.commit()
 

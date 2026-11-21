@@ -2779,6 +2779,36 @@ class TestChatCleanup:
             async with chat.chat_workspace_lock("job-eacces"):
                 pass
 
+    def test_cleanup_workspace_unlinks_legacy_http_tools_dumps(
+        self, tmp_path, monkeypatch
+    ):
+        """Upgraded hosts purge sibling ``.*.rootcoz-http-tools.json`` dumps on chat cleanup."""
+        from rootcoz.engine import chat
+
+        # Per-user cleanup removes the sibling dump inside the job workspace dir.
+        job_dir = tmp_path / "rootcoz-chat-job-legacy"
+        user_dir = job_dir / "alice"
+        user_dir.mkdir(parents=True)
+        user_dump = job_dir / ".alice.rootcoz-http-tools.json"
+        user_dump.write_text('{"token": "stale"}', encoding="utf-8")
+        job_dump = tmp_path / ".rootcoz-chat-job-legacy.rootcoz-http-tools.json"
+        job_dump.write_text('{"token": "stale"}', encoding="utf-8")
+
+        monkeypatch.setattr(
+            chat,
+            "get_chat_workspace",
+            lambda jid, user="": user_dir if user else job_dir,
+        )
+        chat.cleanup_chat_workspace("job-legacy", "alice")
+        assert not user_dir.exists()
+        assert not user_dump.exists()
+        assert job_dump.exists()  # untouched until job workspace is deleted
+
+        # Whole-job cleanup removes the job-level sibling dump too.
+        chat.cleanup_chat_workspace("job-legacy")
+        assert not job_dir.exists()
+        assert not job_dump.exists()
+
 
 @pytest.mark.asyncio
 async def test_cleanup_deleted_job_offloads_blocking_cleanup(monkeypatch):

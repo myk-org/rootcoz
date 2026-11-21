@@ -1275,13 +1275,13 @@ class TestBaseAnalysisRequestPeerFields:
             job_name="j",
             build_number=1,
             peer_ai_configs=[
-                AiConfigEntry(ai_provider="cursor", ai_model="gpt-5.4-xhigh"),
-                AiConfigEntry(ai_provider="gemini", ai_model="pro"),
+                AiConfigEntry(ai_provider="openai", ai_model="gpt-5.4"),
+                AiConfigEntry(ai_provider="gemini", ai_model="gemini-2.5-pro"),
             ],
         )
         assert req.peer_ai_configs is not None
         assert len(req.peer_ai_configs) == 2
-        assert req.peer_ai_configs[0].ai_provider == "cursor"
+        assert req.peer_ai_configs[0].ai_provider == "openai"
 
     def test_max_rounds_lower_bound(self) -> None:
         """Test that peer_analysis_max_rounds rejects 0."""

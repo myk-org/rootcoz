@@ -3912,6 +3912,41 @@ async def _reclaim_issue_attachments(
     return (reclaimed, considered)
 
 
+def _purge_legacy_http_tools_dumps(base: Path) -> int:
+    """Purge stale pre-#622 ``.*.rootcoz-http-tools.json`` dumps across temp roots."""
+    from rootcoz.engine import chat
+    from rootcoz.temp_paths import purge_legacy_http_tools_dumps
+
+    removed = purge_legacy_http_tools_dumps(base)
+    try:
+        chat_root = chat.chat_workspace_root()
+    except OSError:
+        return removed
+    removed += purge_legacy_http_tools_dumps(chat_root)
+    try:
+        root_fd = os.open(
+            chat_root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError:
+        return removed
+    try:
+        with os.scandir(root_fd) as it:
+            chat_dirs = [
+                chat_root / entry.name
+                for entry in it
+                if entry.name.startswith(chat._CHAT_WORKSPACE_PREFIX)
+                and entry.is_dir(follow_symlinks=False)
+            ]
+    except OSError:
+        chat_dirs = []
+    finally:
+        os.close(root_fd)
+    for chat_dir in chat_dirs:
+        removed += purge_legacy_http_tools_dumps(chat_dir)
+    return removed
+
+
 async def _reclaim_abandoned_workspaces(
     job_ids: set[str] | None = None,
     owner_ids: set[int] | None = None,
@@ -3938,6 +3973,7 @@ async def _reclaim_abandoned_workspaces(
     chats, chats_seen, kept = await _reclaim_chat_workspaces(job_ids)
     extracts, extracts_seen = await _reclaim_artifact_extracts(base, kept)
     attachments, attachments_seen = await _reclaim_issue_attachments(job_ids, owner_ids)
+    await asyncio.to_thread(_purge_legacy_http_tools_dumps, base)
     reclaimed = trees + chats + extracts + attachments
     survivors = (
         (trees_seen - trees)

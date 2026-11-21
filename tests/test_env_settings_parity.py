@@ -106,9 +106,10 @@ def test_save_sidecar_settings_writes_bridge_and_warns_on_non_loopback(client, b
 async def test_stale_removed_db_setting_rows_do_not_crash_startup_or_settings_api(
     tmp_path, monkeypatch
 ):
-    """Upgrade safety (#622): stale acpx_agents/cli_agents/cursor_api_key DB rows
-    are ignored cleanly on startup, Settings loading, GET /api/admin/settings,
-    and export without dropping valid DB overrides."""
+    """Upgrade safety (#622): init_db one-time migration deletes stale
+    acpx_agents/cli_agents/cursor_api_key rows idempotently, and
+    load_db_settings + settings API still ignore unknown keys cleanly without
+    dropping valid DB overrides."""
     from rootcoz.config import load_db_settings
 
     db_path = tmp_path / "upgrade.db"
@@ -120,6 +121,8 @@ async def test_stale_removed_db_setting_rows_do_not_crash_startup_or_settings_ap
     clear_settings_cache()
 
     await storage.init_db()
+    # Simulate a pre-#622 database: seed legacy rows and clear the migration
+    # marker so the next init_db() runs the one-time cleanup migration.
     await storage.set_server_settings_batch(
         {
             "acpx_agents": "cursor",
@@ -129,14 +132,39 @@ async def test_stale_removed_db_setting_rows_do_not_crash_startup_or_settings_ap
         },
         updated_by="pre-622-admin",
     )
+    async with storage._connect_db() as db:
+        await db.execute(
+            "DELETE FROM _migrations_applied WHERE key = ?",
+            ("remove_legacy_agent_settings_v1",),
+        )
+        await db.commit()
 
     try:
+        # 1. init_db migration removes the 3 obsolete rows and keeps valid ones.
+        await storage.init_db()
+        stored_after_migration = await storage.get_server_settings()
+        assert "acpx_agents" not in stored_after_migration
+        assert "cli_agents" not in stored_after_migration
+        assert "cursor_api_key" not in stored_after_migration
+        assert stored_after_migration["ai_provider"]["value"] == "claude"
+
+        # Migration is idempotent (re-running init_db is a safe no-op).
+        await storage.init_db()
+        assert set((await storage.get_server_settings()).keys()) == {"ai_provider"}
+
+        # 2. Even if an unknown row exists in server_settings, load_db_settings
+        # and the settings API ignore it cleanly without dropping valid overrides.
+        await storage.set_server_settings_batch(
+            {"unknown_future_setting": "ignored-value"},
+            updated_by="pre-622-admin",
+        )
         await load_db_settings()
         settings = get_settings()
         assert settings.ai_provider == "claude"
         assert not hasattr(settings, "acpx_agents")
         assert not hasattr(settings, "cli_agents")
         assert not hasattr(settings, "cursor_api_key")
+        assert not hasattr(settings, "unknown_future_setting")
 
         with TestClient(app) as test_client:
             listed = test_client.get("/api/admin/settings", headers=_admin_headers())
@@ -145,6 +173,7 @@ async def test_stale_removed_db_setting_rows_do_not_crash_startup_or_settings_ap
             assert "acpx_agents" not in keys
             assert "cli_agents" not in keys
             assert "cursor_api_key" not in keys
+            assert "unknown_future_setting" not in keys
 
             exported = test_client.get(
                 "/api/admin/settings/export", headers=_admin_headers()
