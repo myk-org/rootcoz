@@ -8964,6 +8964,20 @@ async def get_user_audit_snapshot(username: str) -> dict[str, Any] | None:
     return data
 
 
+_auth_revocation_version: int = 0
+
+
+def get_auth_revocation_version() -> int:
+    """Return a monotonic counter bumped on every auth/user-lifecycle revocation."""
+    return _auth_revocation_version
+
+
+def _bump_auth_revocation_version() -> None:
+    """Signal live SSE streams to re-check credentials against SQLite immediately."""
+    global _auth_revocation_version
+    _auth_revocation_version += 1
+
+
 async def delete_user(username: str) -> bool:
     """Delete a user and their sessions. Returns True if deleted."""
     username = _normalize_username(username)
@@ -9007,6 +9021,7 @@ async def delete_user(username: str) -> bool:
             )
         await db.commit()
         if cursor.rowcount > 0:
+            _bump_auth_revocation_version()
             logger.info("Deleted user '%s' and purged username-scoped state", username)
         return cursor.rowcount > 0
 
@@ -9075,6 +9090,7 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
                 # Invalidate all sessions so user must re-login with new role
                 await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
                 await db.commit()
+                _bump_auth_revocation_version()
             except ValueError:
                 raise
             except Exception:
@@ -9090,6 +9106,7 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
             # Invalidate all sessions so user must re-login with new role
             await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
             await db.commit()
+            _bump_auth_revocation_version()
 
             return username, raw_key
 
@@ -9966,6 +9983,7 @@ async def delete_session(token: str) -> None:
     async with _connect_db() as db:
         await db.execute("DELETE FROM sessions WHERE token = ?", (token_hash,))
         await db.commit()
+    _bump_auth_revocation_version()
 
 
 def _validate_user_status(status: str) -> None:
@@ -10114,6 +10132,8 @@ async def set_user_status(username: str, status: str) -> bool:
             (status, username),
         )
         await db.commit()
+        if cursor.rowcount > 0:
+            _bump_auth_revocation_version()
         return cursor.rowcount > 0
 
 
@@ -10337,6 +10357,7 @@ async def set_user_disabled(
             )
             invalidated = sessions.rowcount > 0
         await db.commit()
+        _bump_auth_revocation_version()
         return {
             "role": row["role"],
             "disabled": already_disabled,
@@ -10374,6 +10395,7 @@ async def rotate_user_key(username: str) -> str:
         # Invalidate all existing sessions for this user
         await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
         await db.commit()
+    _bump_auth_revocation_version()
     return raw_key
 
 
@@ -10397,6 +10419,7 @@ async def rotate_own_key(username: str) -> str:
         # Invalidate all existing sessions for this user
         await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
         await db.commit()
+    _bump_auth_revocation_version()
     return raw_key
 
 
@@ -10432,6 +10455,7 @@ async def rotate_admin_key(username: str, custom_key: str | None = None) -> str:
         # Invalidate all existing sessions for this user
         await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
         await db.commit()
+    _bump_auth_revocation_version()
     return raw_key
 
 
@@ -10442,6 +10466,8 @@ async def cleanup_expired_sessions() -> int:
             "DELETE FROM sessions WHERE expires_at <= datetime('now')"
         )
         await db.commit()
+        if cursor.rowcount > 0:
+            _bump_auth_revocation_version()
         return cursor.rowcount
 
 
@@ -12737,9 +12763,9 @@ async def complete_chat_message_if_generation(
             "UPDATE chat_messages SET content = ?, status = 'completed', "
             "ai_provider = ?, ai_model = ?, session_id = ? "
             "WHERE id = ? AND status = 'pending' "
-            "AND (chat_messages.username = 'admin' OR EXISTS "
-            "(SELECT 1 FROM users WHERE username = chat_messages.username "
-            "AND COALESCE(disabled, 0) = 0)) "
+            "AND NOT EXISTS (SELECT 1 FROM users "
+            "WHERE username = chat_messages.username "
+            "AND COALESCE(disabled, 0) != 0) "
             "AND (? = 1 OR ? IS NULL OR EXISTS (SELECT 1 FROM users "
             "WHERE username = chat_messages.username AND COALESCE(disabled, 0) = 0 "
             "AND COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) = ?)) "

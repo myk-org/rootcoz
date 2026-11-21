@@ -22337,10 +22337,15 @@ class TestUserLifecycleAndAdminSseRevocation:
         assert user_row is not None
         owner_id = int(user_row["id"])
 
-        artifact_dir = main_module._get_admin_artifacts_dir("alice")
+        artifact_dir = main_module._get_admin_artifacts_dir("alice", owner_id=owner_id)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_file = artifact_dir / "report.html"
         artifact_file.write_text("<h1>secret</h1>", encoding="utf-8")
+        legacy_artifact_dir = main_module._get_admin_artifacts_dir("alice")
+        legacy_artifact_dir.mkdir(parents=True, exist_ok=True)
+        (legacy_artifact_dir / "legacy.html").write_text(
+            "<h1>legacy</h1>", encoding="utf-8"
+        )
         await storage.add_chat_message(
             "job-1", "user", "ALICE_PRIVATE", username="alice"
         )
@@ -22366,10 +22371,45 @@ class TestUserLifecycleAndAdminSseRevocation:
         result = await main_module.delete_user_endpoint(request, "alice")
         assert result["deleted"] == "alice"
         assert not artifact_dir.exists()
+        assert not legacy_artifact_dir.exists()
         assert f"owner:{owner_id}" in cleanup_scopes
 
-        # Re-creating alice must not expose any prior private data or artifacts.
-        await storage.create_user("alice", role="reviewer")
+        # Re-creating alice (even as admin) gets a new owner_id and cannot reach
+        # any surviving old artifact or collide with the prior owner's path.
+        await storage.create_admin_user("alice")
+        new_alice = await storage.get_user_by_username("alice")
+        assert new_alice is not None
+        new_owner_id = int(new_alice["id"])
+        assert new_owner_id != owner_id
+
+        # Simulate a surviving file in the old owner_id directory: new alice
+        # must get 404 when trying to download it.
+        surviving_id = "11111111-1111-4111-8111-111111111111"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / f"{surviving_id}.html").write_text(
+            "<h1>old-secret</h1>", encoding="utf-8"
+        )
+        alice_req = SimpleNamespace(
+            state=SimpleNamespace(username="alice", role="admin", is_admin=True)
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await main_module.get_admin_chat_artifact(surviving_id, alice_req)
+        assert exc_info.value.status_code == 404
+
+        # New alice's saved artifact lands under user-<new_owner_id>, isolated
+        # from any delayed cleanup of the old owner_id.
+        saved = await main_module.save_admin_chat_artifact(
+            main_module.SaveArtifactRequest(
+                html_content="<h1>new-alice</h1>", filename="fresh.html"
+            ),
+            alice_req,
+        )
+        main_module._cleanup_admin_artifacts("alice", owner_id=owner_id)
+        resp = await main_module.get_admin_chat_artifact(
+            saved["artifact_id"], alice_req
+        )
+        assert resp.body == b"<h1>new-alice</h1>"
+
         assert await storage.get_chat_messages("job-1", username="alice") == []
         presets = await storage.list_filter_presets("alice", "dashboard")
         assert [(p["scope"], p["name"]) for p in presets] == [
@@ -22637,3 +22677,114 @@ class TestUserLifecycleAndAdminSseRevocation:
                 await body_boot.aclose()
         finally:
             clear_settings_cache()
+
+    async def test_bearer_admin_with_starlette_state_ignores_stale_session_cookie(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Starlette State stores attributes in _state; Bearer admin must not fail against stale cookie."""
+        from starlette.datastructures import State
+
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "starlette_state.db")
+        await storage.init_db()
+        _, raw_key = await storage.create_admin_user("bearer-adm")
+
+        state = State()
+        state.username = "bearer-adm"
+        state.is_admin = True
+        state.role = "admin"
+        state.auth_session_token = ""
+        req = SimpleNamespace(
+            state=state,
+            cookies={"rootcoz_session": "expired-or-non-admin-cookie"},
+            headers={"authorization": f"Bearer {raw_key}"},
+            client=None,
+            is_disconnected=AsyncMock(return_value=False),
+        )
+        assert await main_module._is_admin_sse_authorized(req) is True
+
+    async def test_multiplexed_admin_stream_and_log_tail_block_revoked_initial_chunks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Revoked admins receive zero initial navbar counts and zero remaining log tail lines."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sse_initial.db")
+        monkeypatch.setattr(main_module, "record_audit", AsyncMock())
+        await storage.init_db()
+        await storage.create_admin_user("adm-init")
+        await storage.create_admin_user("backup-admin")
+        tok = await storage.create_session("adm-init", is_admin=True, role="admin")
+
+        # 1. Multiplexed navbar+settings stream revoked before first chunk yields nothing.
+        req_mux = self._make_sse_request(username="adm-init", session_token=tok)
+        resp_mux = await main_module.stream_multiplexed(
+            req_mux, topics="navbar,settings"
+        )
+        body_mux = resp_mux.body_iterator
+        try:
+            res = await storage.set_user_disabled("adm-init", True)
+            assert res is not None and res["refused"] is None
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(anext(body_mux), timeout=1)
+        finally:
+            await body_mux.aclose()
+
+        # 2. Log tail re-checks per line so mid-tail disable stops remaining tail lines.
+        await storage.set_user_disabled("adm-init", False)
+        tok2 = await storage.create_session("adm-init", is_admin=True, role="admin")
+        log_file = tmp_path / "server.log"
+        log_file.write_text(
+            "INFO line-1\nINFO line-2-secret\nINFO line-3-secret\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(main_module, "_LOG_FILE", str(log_file))
+        req_log = self._make_sse_request(username="adm-init", session_token=tok2)
+        resp_log = await main_module.stream_logs(req_log, lines=10, level="")
+        body_log = resp_log.body_iterator
+        try:
+            first = await asyncio.wait_for(anext(body_log), timeout=1)
+            assert "line-1" in first
+            res = await storage.set_user_disabled("adm-init", True)
+            assert res is not None and res["refused"] is None
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(anext(body_log), timeout=1)
+        finally:
+            await body_log.aclose()
+
+    async def test_admin_sse_auth_check_caches_burst_and_invalidates_on_revocation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bursts reuse cached auth result until revocation version bumps or TTL elapses."""
+        from rootcoz import main as main_module
+        from rootcoz import storage
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sse_burst.db")
+        await storage.init_db()
+        await storage.create_admin_user("burst-adm")
+        await storage.create_admin_user("backup-admin")
+        tok = await storage.create_session("burst-adm", is_admin=True, role="admin")
+        req = self._make_sse_request(username="burst-adm", session_token=tok)
+
+        calls = 0
+        orig_check = main_module._is_admin_sse_authorized
+
+        async def _counting_check(r: Any) -> bool:
+            nonlocal calls
+            calls += 1
+            return await orig_check(r)
+
+        monkeypatch.setattr(main_module, "_is_admin_sse_authorized", _counting_check)
+
+        guard = main_module._make_admin_sse_auth_check(req, recheck_interval=60.0)
+        for _ in range(10):
+            assert await guard() is True
+        assert calls == 1
+
+        # Disabling bumps revocation version -> immediate re-check returns False.
+        res = await storage.set_user_disabled("burst-adm", True)
+        assert res is not None and res["refused"] is None
+        assert await guard() is False
+        assert calls == 2

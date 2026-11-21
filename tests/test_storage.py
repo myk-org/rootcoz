@@ -4853,5 +4853,20 @@ class TestUserLifecycleIsolation:
                     credential_generation=None,
                     server_source=True,
                 )
+
+                # Trusted-proxy SSO user without a users row still completes
+                # regular own-credential job chat turns (#619 / Qodo review).
+                _, pending_sso = await storage.add_chat_message_pair(
+                    "job-1", "q", username="sso-guest"
+                )
+                assert await storage.complete_chat_message_if_generation(
+                    pending_sso,
+                    content="sso-ok",
+                    ai_provider="openai",
+                    ai_model="gpt-4o",
+                    session_id="s7",
+                    credential_generation=None,
+                    server_source=False,
+                )
         finally:
             clear_settings_cache()

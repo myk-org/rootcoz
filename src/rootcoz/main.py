@@ -6217,6 +6217,7 @@ async def _ai_admin_role_current(username: str) -> bool:
 
 
 _ADMIN_MULTIPLEX_TOPICS = frozenset({"token-usage", "settings", "admin-chat"})
+_ADMIN_SSE_RECHECK_INTERVAL_SECONDS = 1.0
 
 
 async def _is_admin_sse_authorized(request: Request) -> bool:
@@ -6231,11 +6232,12 @@ async def _is_admin_sse_authorized(request: Request) -> bool:
         return False
 
     try:
-        state_vars = vars(request.state) if hasattr(request, "state") else {}
-        if "auth_session_token" in state_vars and isinstance(
-            state_vars["auth_session_token"], str
-        ):
-            session_token = state_vars["auth_session_token"]
+        # Read via getattr so Starlette's State (which stores keys in _state,
+        # not __dict__) honors auth_session_token="" set by AuthMiddleware when
+        # a Bearer admin overrides an unrelated or expired session cookie.
+        raw_state_token = getattr(request.state, "auth_session_token", None)
+        if isinstance(raw_state_token, str):
+            session_token = raw_state_token
         elif isinstance(getattr(request, "cookies", None), Mapping):
             raw_cookie = _read_cookie(request, "rootcoz_session")
             session_token = raw_cookie if isinstance(raw_cookie, str) else ""
@@ -6279,18 +6281,18 @@ async def _is_admin_sse_authorized(request: Request) -> bool:
                                 username,
                             )
                             return False
-                    else:
-                        session = await storage.get_session(token)
-                        if (
-                            not session
-                            or not session.get("is_admin")
-                            or str(session.get("username", "")) != username
-                        ):
-                            logger.info(
-                                "Admin SSE closed for '%s': Bearer credential revoked",
-                                username,
-                            )
-                            return False
+                        return True
+                    session = await storage.get_session(token)
+                    if (
+                        not session
+                        or not session.get("is_admin")
+                        or str(session.get("username", "")) != username
+                    ):
+                        logger.info(
+                            "Admin SSE closed for '%s': Bearer credential revoked",
+                            username,
+                        )
+                        return False
 
         still_admin = await _ai_admin_role_current(username)
         if not still_admin:
@@ -6306,6 +6308,42 @@ async def _is_admin_sse_authorized(request: Request) -> bool:
             exc_info=True,
         )
         return False
+
+
+def _make_admin_sse_auth_check(
+    request: Request,
+    *,
+    recheck_interval: float = _ADMIN_SSE_RECHECK_INTERVAL_SECONDS,
+) -> Callable[[], Awaitable[bool]]:
+    """Build a per-stream admin auth check that avoids per-item DB storms.
+
+    Always verifies against SQLite on the first call, immediately whenever
+    ``storage.get_auth_revocation_version()`` advances (any disable, demotion,
+    deletion, logout, or key rotation), and periodically every
+    ``recheck_interval`` seconds (catching natural session expiry).
+    """
+    last_checked: float | None = None
+    last_version = -1
+
+    async def _check() -> bool:
+        nonlocal last_checked, last_version
+        now = _time.monotonic()
+        version = storage.get_auth_revocation_version()
+        if (
+            last_checked is not None
+            and version == last_version
+            and (now - last_checked) < recheck_interval
+        ):
+            return True
+        authorized = await _is_admin_sse_authorized(request)
+        if authorized:
+            last_checked = now
+            last_version = version
+            return True
+        last_checked = None
+        return False
+
+    return _check
 
 
 async def _create_ai_auth_header(
@@ -16629,7 +16667,7 @@ async def stream_token_usage(request: Request) -> StreamingResponse:
         request,
         _token_usage_listeners,
         "usage-changed",
-        auth_check=partial(_is_admin_sse_authorized, request),
+        auth_check=_make_admin_sse_auth_check(request),
     )
 
 
@@ -16769,8 +16807,14 @@ async def stream_multiplexed(
 
         wait_tasks: list[asyncio.Task[Any]] = []
         _sse_connections += 1
+        admin_auth_check = (
+            _make_admin_sse_auth_check(request) if has_admin_topics else None
+        )
 
         try:
+            if admin_auth_check is not None and not await admin_auth_check():
+                return
+
             # Send initial navbar data on connect
             if navbar_requested:
                 try:
@@ -16822,7 +16866,7 @@ async def stream_multiplexed(
                     break
 
                 if not done and not pending_feed.retry_due():
-                    if has_admin_topics and not await _is_admin_sse_authorized(request):
+                    if admin_auth_check is not None and not await admin_auth_check():
                         break
                     yield ": keepalive\n\n"
                     continue
@@ -16830,7 +16874,7 @@ async def stream_multiplexed(
                 if await request.is_disconnected():
                     break
 
-                if has_admin_topics and not await _is_admin_sse_authorized(request):
+                if admin_auth_check is not None and not await admin_auth_check():
                     break
 
                 # Emit events for all fired topics, plus a due pending retry
@@ -19654,6 +19698,7 @@ async def stream_logs(
         return f"event: log\ndata: {line.replace(chr(10), '  ')}\n\n"
 
     async def event_generator() -> AsyncIterator[str]:
+        admin_auth_check = _make_admin_sse_auth_check(request)
         # Subscribe before reading the tail: a line logged while the tail is
         # being read then lands in the queue instead of falling into the gap
         # between the two sources.
@@ -19672,12 +19717,14 @@ async def stream_logs(
                         tail_lines = await asyncio.to_thread(
                             _read_log_tail, log_path, lines
                         )
-                        if not await _is_admin_sse_authorized(request):
+                        if not await admin_auth_check():
                             return
                         for line in tail_lines:
                             clean = _ANSI_RE.sub("", line)
                             tail_seen[clean] += 1
                             if _matches_level(clean):
+                                if not await admin_auth_check():
+                                    return
                                 yield _log_chunk(clean)
                     except OSError:
                         pass
@@ -19693,7 +19740,7 @@ async def stream_logs(
                 request,
                 subscription,
                 _render,
-                auth_check=partial(_is_admin_sse_authorized, request),
+                auth_check=admin_auth_check,
             ):
                 yield chunk
 
@@ -20118,7 +20165,7 @@ async def stream_audit_events(request: Request) -> StreamingResponse:
                 subscription,
                 _render,
                 gap_event="audit-gap",
-                auth_check=partial(_is_admin_sse_authorized, request),
+                auth_check=_make_admin_sse_auth_check(request),
             ):
                 yield chunk
 
@@ -20446,6 +20493,14 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
         # Read the account before it is gone: the row has to say what that account
         # had, or a permission that disappears with it can never be explained.
         snapshot = await storage.get_user_audit_snapshot(username)
+        # Clean any legacy username-keyed artifacts BEFORE delete_user frees
+        # the username; current DB accounts store artifacts under immutable
+        # user-<owner_id> directories so a recreated username can neither race
+        # with nor reach a prior owner's artifacts (#603).
+        await cleanup_off_loop(
+            f"owner:{owner_id}",
+            partial(_cleanup_admin_artifacts, stored_username),
+        )
         marker_written = await issue_attachments.write_owner_delete_marker(owner_id)
         try:
             deleted = await storage.delete_user(username)
@@ -20463,7 +20518,9 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
                 await _cleanup_deleted_owner_attachments(owner_id)
                 await cleanup_off_loop(
                     f"owner:{owner_id}",
-                    partial(_cleanup_admin_artifacts, stored_username),
+                    partial(
+                        _cleanup_admin_artifacts, stored_username, owner_id=owner_id
+                    ),
                 )
             elif marker_written:
                 await issue_attachments.remove_owner_delete_marker(owner_id)
@@ -20472,7 +20529,7 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
         await _cleanup_deleted_owner_attachments(owner_id)
         await cleanup_off_loop(
             f"owner:{owner_id}",
-            partial(_cleanup_admin_artifacts, stored_username),
+            partial(_cleanup_admin_artifacts, stored_username, owner_id=owner_id),
         )
 
     notify_pending_count_changed()
@@ -22649,7 +22706,7 @@ async def settings_stream(request: Request) -> StreamingResponse:
         request,
         _settings_listeners,
         "settings-changed",
-        auth_check=partial(_is_admin_sse_authorized, request),
+        auth_check=_make_admin_sse_auth_check(request),
     )
 
 
@@ -28253,7 +28310,7 @@ async def admin_chat_stream(request: Request) -> StreamingResponse:
         request,
         request.state.username,
         ADMIN_CHAT_JOB_ID,
-        auth_check=partial(_is_admin_sse_authorized, request),
+        auth_check=_make_admin_sse_auth_check(request),
     )
 
 
@@ -28624,21 +28681,49 @@ async def _process_admin_chat_message(
 _ADMIN_ARTIFACTS_BASE = Path("/tmp/rootcoz-admin-artifacts")
 
 
-def _get_admin_artifacts_dir(username: str) -> Path:
-    """Get the artifacts directory for an admin user."""
+def _get_admin_artifacts_dir(username: str, *, owner_id: int | None = None) -> Path:
+    """Get the artifacts directory for an admin user.
+
+    DB admins use their immutable ``users.id`` (``user-<id>``) so recreating
+    the same username never reaches surviving artifacts from a prior account
+    nor races with an in-flight deletion of the old account (#603). Bootstrap
+    ``admin`` (which has no users row) uses ``admin``.
+    """
     from rootcoz.temp_paths import sanitize_path_part
 
+    if owner_id is not None:
+        return _ADMIN_ARTIFACTS_BASE / f"user-{owner_id}"
     return _ADMIN_ARTIFACTS_BASE / sanitize_path_part(username)
 
 
-def _cleanup_admin_artifacts(username: str) -> DeleteResult:
+async def _resolve_admin_artifacts_owner_id(username: str) -> tuple[bool, int | None]:
+    """Resolve the immutable owner_id for an admin artifact caller.
+
+    Returns ``(True, None)`` for bootstrap ``admin``, ``(True, id)`` for an
+    active DB admin, and ``(False, None)`` otherwise.
+    """
+    if username == "admin":
+        return True, None
+    row = await storage.get_user_by_username(username)
+    if row is None or row.get("disabled") or row.get("role") != "admin":
+        return False, None
+    return True, int(row["id"])
+
+
+def _cleanup_admin_artifacts(
+    username: str, *, owner_id: int | None = None
+) -> DeleteResult:
     """Delete all artifacts for an admin user; a reaper step, never inline.
 
     ``delete_tree`` reports failed paths in ``DeleteResult.failed`` instead of
     raising, so that count — not the absence of an exception — says whether the
     artifacts are gone.
     """
-    artifacts_dir = _get_admin_artifacts_dir(username)
+    artifacts_dir = (
+        _get_admin_artifacts_dir(username, owner_id=owner_id)
+        if owner_id is not None
+        else _get_admin_artifacts_dir(username)
+    )
     if not artifacts_dir.exists():
         return DeleteResult(0, 0)
     reclaimed = delete_tree(artifacts_dir)
@@ -28666,6 +28751,9 @@ async def save_admin_chat_artifact(
     """Save an HTML report artifact from admin chat. Returns a download URL."""
     _require_admin(request)
     username = request.state.username
+    ok, owner_id = await _resolve_admin_artifacts_owner_id(username)
+    if not ok:
+        raise HTTPException(status_code=403, detail="Admin access required")
 
     # Sanitize filename — strip path separators, keep only the basename
     from rootcoz.temp_paths import sanitize_path_part
@@ -28678,18 +28766,29 @@ async def save_admin_chat_artifact(
         safe_filename += ".html"
 
     artifact_id = str(uuid.uuid4())
-    artifacts_dir = _get_admin_artifacts_dir(username)
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    artifacts_dir.chmod(0o700)
 
-    artifact_path = artifacts_dir / f"{artifact_id}.html"
-    try:
-        await asyncio.to_thread(
-            artifact_path.write_text, body.html_content, encoding="utf-8"
-        )
-    except OSError as exc:
-        logger.exception("Failed to save artifact")
-        raise HTTPException(status_code=500, detail="Failed to save artifact") from exc
+    async def _write_artifact() -> None:
+        artifacts_dir = _get_admin_artifacts_dir(username, owner_id=owner_id)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        artifacts_dir.chmod(0o700)
+        artifact_path = artifacts_dir / f"{artifact_id}.html"
+        try:
+            await asyncio.to_thread(
+                artifact_path.write_text, body.html_content, encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.exception("Failed to save artifact")
+            raise HTTPException(
+                status_code=500, detail="Failed to save artifact"
+            ) from exc
+
+    if owner_id is not None:
+        async with _hold_attachment_scope_locks(f"owner:{owner_id}"):
+            if not await storage.user_id_exists(owner_id):
+                raise HTTPException(status_code=403, detail="Admin access required")
+            await _write_artifact()
+    else:
+        await _write_artifact()
 
     logger.info(
         "Admin chat: saved artifact %s (%d chars) for %s",
@@ -28720,7 +28819,11 @@ async def get_admin_chat_artifact(
     except ValueError:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    artifacts_dir = _get_admin_artifacts_dir(username)
+    ok, owner_id = await _resolve_admin_artifacts_owner_id(username)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    artifacts_dir = _get_admin_artifacts_dir(username, owner_id=owner_id)
     artifact_path = (artifacts_dir / f"{artifact_id}.html").resolve()
     # Belt-and-suspenders: ensure resolved path stays under the artifacts dir
     if not artifact_path.is_relative_to(artifacts_dir.resolve()):
@@ -28752,6 +28855,7 @@ async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
     from rootcoz.engine.chat import cleanup_chat_repos, get_chat_workspace
 
     username = request.state.username
+    _ok, owner_id = await _resolve_admin_artifacts_owner_id(username)
 
     async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         await _require_chat_clear_version(ADMIN_CHAT_JOB_ID, username, request)
@@ -28767,7 +28871,8 @@ async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
         )
 
     await cleanup_off_loop(
-        ADMIN_CHAT_JOB_ID, partial(_cleanup_admin_artifacts, username)
+        ADMIN_CHAT_JOB_ID,
+        partial(_cleanup_admin_artifacts, username, owner_id=owner_id),
     )
     _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
     logger.info("Admin chat: cleared %d messages for user %s", count, username)
