@@ -2006,6 +2006,7 @@ async def init_admin_chat_session(
         repo_path=repo_path,
         log_prefix="Admin chat",
         custom_tools=custom_tools,
+        restrict_tools=True,
     )
 
 

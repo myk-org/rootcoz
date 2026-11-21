@@ -2241,6 +2241,12 @@ const blockedCases = [
   ["subagent", { tasks: [{ agent: "a", task: "t", cwd: 99 }] }],
   ["subagent", { chain: [{ agent: "a", task: "t", cwd: "/tmp" }] }],
   ["subagent", { chain: [{ agent: "a", task: "t", cwd: null }] }],
+  ["bash", { command: "cat /etc/passwd" }],
+  ["powershell", { command: "Get-Content /etc/passwd" }],
+  ["write", { path: "/tmp/evil.txt", content: "x" }],
+  ["write", { path: "../escape.txt", content: "x" }],
+  ["edit", { path: "/etc/passwd" }],
+  ["edit", { path: "link-etc" }],
 ];
 
 const failures = [];
@@ -2285,3 +2291,45 @@ console.log(`OK: ${allowedCases.length} allowed, ${blockedCases.length} blocked`
             f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
         assert proc.stdout.strip().startswith("OK:")
+
+    def test_atomic_install_is_idempotent_and_concurrent_safe(
+        self, tmp_path: Path
+    ) -> None:
+        """Unchanged re-installs preserve the inode and leave no .tmp files."""
+        import concurrent.futures
+
+        from rootcoz.engine.workspace_guard import (
+            GUARD_FILENAME,
+            install_workspace_path_guard,
+        )
+
+        workspace = tmp_path / "ws-atomic"
+        workspace.mkdir()
+        first = install_workspace_path_guard(workspace)
+        inode_before = first.stat().st_ino
+
+        second = install_workspace_path_guard(workspace)
+        assert second == first
+        assert second.stat().st_ino == inode_before
+
+        # Concurrent installs with changing extra_allowed_dirs must never expose
+        # a truncated guard file to concurrent readers.
+        extra_a = tmp_path / "extra-a"
+        extra_b = tmp_path / "extra-b"
+        extra_a.mkdir()
+        extra_b.mkdir()
+
+        def worker(i: int) -> None:
+            extra = (extra_a,) if i % 2 == 0 else (extra_b,)
+            p = install_workspace_path_guard(workspace, extra_allowed_dirs=extra)
+            text = p.read_text(encoding="utf-8")
+            assert "export default function rootcozPathGuard" in text
+            assert text.rstrip().endswith("}")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            futs = [pool.submit(worker, i) for i in range(40)]
+            for fut in futs:
+                fut.result()
+
+        ext_entries = [p.name for p in (workspace / ".pi" / "extensions").iterdir()]
+        assert ext_entries == [GUARD_FILENAME]

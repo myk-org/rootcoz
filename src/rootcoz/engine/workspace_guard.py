@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -19,7 +20,9 @@ from rootcoz.temp_paths import rootcoz_temp_base
 logger = get_child_logger(__name__)
 
 GUARD_FILENAME = "_rootcoz_path_guard.js"
-GUARDED_TOOLS: frozenset[str] = frozenset({"read", "ls", "grep", "find", "subagent"})
+GUARDED_TOOLS: frozenset[str] = frozenset(
+    {"read", "ls", "grep", "find", "write", "edit", "bash", "powershell", "subagent"}
+)
 
 _HISTORY_PROMPT_DOC = (
     Path(__file__).resolve().parent.parent
@@ -37,7 +40,9 @@ import { fileURLToPath } from "node:url";
 
 const EXTRA_ALLOWED_DIRS = __EXTRA_ALLOWED_DIRS__;
 const ALLOWED_READ_FILES = __ALLOWED_READ_FILES__;
-const FS_TOOLS = new Set(["read", "ls", "grep", "find"]);
+const FS_TOOLS = new Set(["read", "ls", "grep", "find", "write", "edit"]);
+const REQUIRED_PATH_TOOLS = new Set(["read", "write", "edit"]);
+const BLOCKED_SHELL_TOOLS = new Set(["bash", "powershell"]);
 const UNICODE_SPACES = /[\\u00A0\\u2000-\\u200A\\u202F\\u205F\\u3000]/g;
 const NARROW_NO_BREAK_SPACE = "\\u202F";
 
@@ -126,8 +131,8 @@ function checkFsPath(toolName, rawPath, cwdReal, allowedDirs, allowedReadFiles) 
   if (typeof rawPath !== "string") {
     return `Tool '${toolName}' requires a string path`;
   }
-  if (toolName === "read" && rawPath.trim() === "") {
-    return "Tool 'read' requires a non-empty path";
+  if (REQUIRED_PATH_TOOLS.has(toolName) && rawPath.trim() === "") {
+    return `Tool '${toolName}' requires a non-empty path`;
   }
   if (rawPath === "") {
     return null;
@@ -190,6 +195,12 @@ export default function rootcozPathGuard(pi) {
   pi.on("tool_call", async (event, ctx) => {
     try {
       const toolName = event?.toolName;
+      if (BLOCKED_SHELL_TOOLS.has(toolName)) {
+        return {
+          block: true,
+          reason: `Access denied: shell tool '${toolName}' is not allowed in confined workspace sessions`,
+        };
+      }
       if (!FS_TOOLS.has(toolName) && toolName !== "subagent") {
         return undefined;
       }
@@ -222,7 +233,7 @@ export default function rootcozPathGuard(pi) {
       }
 
       if (FS_TOOLS.has(toolName)) {
-        if (toolName === "read") {
+        if (REQUIRED_PATH_TOOLS.has(toolName)) {
           const reason = checkFsPath(
             toolName,
             input.path,
@@ -455,16 +466,56 @@ def install_workspace_path_guard(
     script = _GUARD_JS_TEMPLATE.replace(
         "__EXTRA_ALLOWED_DIRS__", json.dumps(allowed_extra_dirs)
     ).replace("__ALLOWED_READ_FILES__", json.dumps(allowed_read_files))
+    script_bytes = script.encode("utf-8")
 
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    # Skip rewrite when an existing regular guard file already has identical
+    # content so concurrent sessions sharing one workspace never race on it.
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(guard_path, flags, 0o600)
+        read_fd = os.open(guard_path, os.O_RDONLY | nofollow)
+    except FileNotFoundError:
+        read_fd = -1
     except OSError as exc:
+        raise ValueError(
+            f"Refusing to read workspace path guard at {guard_path}: {exc}"
+        ) from exc
+    if read_fd >= 0:
+        with os.fdopen(read_fd, "rb") as existing_fh:
+            if existing_fh.read() == script_bytes:
+                return guard_path
+
+    # Atomic temp-file + os.replace so concurrent Pi DefaultResourceLoader reads
+    # never observe a truncated or partially written guard file.
+    tmp_path = ext_dir / f".{GUARD_FILENAME}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
+    try:
+        fd = os.open(tmp_path, create_flags, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(script_bytes)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        if guard_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+            raise ValueError(
+                f"Refusing to overwrite symlinked workspace path guard: {guard_path}"
+            )
+        if guard_path.exists() and guard_path.is_dir():
+            tmp_path.unlink(missing_ok=True)
+            raise ValueError(
+                f"Refusing to overwrite directory at workspace path guard: {guard_path}"
+            )
+        os.replace(tmp_path, guard_path)
+    except ValueError:
+        raise
+    except OSError as exc:
+        tmp_path.unlink(missing_ok=True)
         raise ValueError(
             f"Refusing to write workspace path guard at {guard_path}: {exc}"
         ) from exc
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(script)
 
     logger.debug(
         "Installed workspace path guard at %s (extra_dirs=%d, allowed_files=%d)",
