@@ -672,4 +672,10 @@ class TestSidecarArgvFix:
 
     def test_entrypoint_puts_pi_on_path(self):
         entrypoint = (REPO_ROOT / "entrypoint.sh").read_text()
-        assert "sidecar-helper/node_modules/.bin" in entrypoint
+        assert "/app/sidecar-helper/bin" in entrypoint
+        assert "sidecar-helper/node_modules/.bin" not in entrypoint
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+        assert "/app/sidecar-helper/bin/pi" in dockerfile
+        assert "/app/sidecar-helper/bin/trail" in dockerfile
+        assert 'PATH="/app/sidecar-helper/bin:${PATH}"' in dockerfile
+        assert 'PATH="/app/sidecar-helper/node_modules/.bin' not in dockerfile

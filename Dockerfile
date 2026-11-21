@@ -120,8 +120,13 @@ COPY --chown=appuser:0 --from=sidecar-builder /sidecar/dist /app/sidecar-helper/
 COPY --chown=appuser:0 --from=sidecar-builder /sidecar/node_modules /app/sidecar-helper/node_modules
 COPY --chown=appuser:0 --from=sidecar-builder /sidecar/package.json /app/sidecar-helper/package.json
 COPY --chown=appuser:0 third_party/graft-LICENSE /app/third_party/graft-LICENSE
-# npm creates the trail bin link in /sidecar/node_modules/.bin, copied above.
-RUN test -x /app/sidecar-helper/node_modules/.bin/trail
+# Expose only the required sidecar CLIs (trail, pi) on PATH via a dedicated bin dir
+# so transitive npm binaries (e.g. acpx) from node_modules/.bin are never on PATH.
+RUN test -x /app/sidecar-helper/node_modules/.bin/trail \
+    && test -x /app/sidecar-helper/node_modules/.bin/pi \
+    && mkdir -p /app/sidecar-helper/bin \
+    && ln -sf /app/sidecar-helper/node_modules/.bin/trail /app/sidecar-helper/bin/trail \
+    && ln -sf /app/sidecar-helper/node_modules/.bin/pi /app/sidecar-helper/bin/pi
 
 # Copy entrypoint script
 COPY --chown=appuser:0 entrypoint.sh /app/entrypoint.sh
@@ -141,8 +146,8 @@ RUN find /home/appuser -type d -exec chmod g=u {} + \
 # Switch back to non-root user for runtime
 USER appuser
 
-# Ensure sidecar tools (trail) are in PATH
-ENV PATH="/app/sidecar-helper/node_modules/.bin:${PATH}"
+# Ensure allowlisted sidecar tools (trail, pi) are in PATH
+ENV PATH="/app/sidecar-helper/bin:${PATH}"
 # Set HOME for OpenShift compatibility (random UID has no passwd entry)
 ENV HOME="/home/appuser"
 ENV DO_NOT_TRACK=1
