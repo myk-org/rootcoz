@@ -68,7 +68,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `JENKINS_PASSWORD` | empty | string | yes | no | yes |
    | `JENKINS_SSL_VERIFY` | `true` | boolean | no | no | yes |
    | `JENKINS_TIMEOUT` | `30` | integer > 0 | no | no | yes |
-   | `JENKINS_ARTIFACTS_MAX_SIZE_MB` | `500` | integer > 0 | no | no | yes |
+   | `JENKINS_ARTIFACTS_MAX_SIZE_MB` | `500` | integer 1–2048 | no | no | yes |
    | `GET_JOB_ARTIFACTS` | `true` | boolean | no | no | yes |
 
    An empty `JENKINS_URL` means Jenkins is not configured, and each request can still carry its own credentials.

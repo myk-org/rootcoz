@@ -22,7 +22,7 @@ import jenkins
 from pi_sidecar_client import run_parallel_with_limit
 
 from rootcoz import get_child_logger
-from rootcoz.config import Settings
+from rootcoz.config import JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX, Settings
 from rootcoz.engine.core import (
     AnalysisIncompleteError,
     _failed_group_analyses,
@@ -809,20 +809,37 @@ class JenkinsSource(CISource):
                 param_overrides[key] = params[key]
 
         if settings is not None and settings.jenkins_url:
-            effective_settings = (
-                settings.model_copy(update=param_overrides)
-                if param_overrides
-                else settings
-            )
+            base = settings
         elif param_overrides.get("jenkins_url"):
             # Chat / reanalysis: credentials may exist only on the stored job.
             base = settings if settings is not None else Settings()
-            effective_settings = base.model_copy(update=param_overrides)
         else:
             logger.warning(
                 "Cannot reconstruct JenkinsSource: no settings or jenkins_url"
             )
             return None
+
+        if "jenkins_artifacts_max_size_mb" in param_overrides:
+            raw_size = param_overrides["jenkins_artifacts_max_size_mb"]
+            if isinstance(raw_size, bool):
+                parsed_size: int | None = None
+            else:
+                try:
+                    parsed_size = int(raw_size)
+                except TypeError, ValueError:
+                    parsed_size = None
+            if parsed_size is None or parsed_size <= 0:
+                param_overrides.pop("jenkins_artifacts_max_size_mb", None)
+            else:
+                param_overrides["jenkins_artifacts_max_size_mb"] = min(
+                    parsed_size,
+                    base.jenkins_artifacts_max_size_mb,
+                    JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX,
+                )
+
+        effective_settings = (
+            base.model_copy(update=param_overrides) if param_overrides else base
+        )
 
         return cls(
             job_name=job_name,
