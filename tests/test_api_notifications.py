@@ -242,9 +242,89 @@ class TestUnsubscribeNotifications:
         )
         assert resp.status_code == 404
 
+    def test_unsubscribe_allows_removing_legacy_non_public_subscription(
+        self, client_with_push
+    ):
+        """Legacy subscriptions stored prior to public-host enforcement can still be removed."""
+        cookies = _login_user(client_with_push, "alice")
+        legacy_endpoint = "https://127.0.0.1:9443/legacy-sub"
+        asyncio.run(
+            storage.save_push_subscription(
+                username="alice",
+                endpoint=legacy_endpoint,
+                p256dh_key="p256dh-legacy",  # pragma: allowlist secret  # gitleaks:allow
+                auth_key="auth-legacy",  # pragma: allowlist secret  # gitleaks:allow
+            )
+        )
+        resp = client_with_push.post(
+            "/api/notifications/unsubscribe",
+            json={"endpoint": legacy_endpoint},
+            headers=cookies,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "unsubscribed"
+        remaining = asyncio.run(storage.get_push_subscriptions_for_users(["alice"]))
+        assert remaining == []
+
 
 class TestEndpointHttpsValidation:
     """Tests for HTTPS endpoint validation."""
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://push.example.com/sub/insecure",
+            "https://127.0.0.1/sub/loopback",
+            "https://127.0.0.1:8443/sub/loopback",
+            "https://[::1]/sub/loopback6",
+            "https://169.254.169.254/latest/meta-data",
+            "https://10.0.0.1/internal",
+            "https://172.16.0.1/internal",
+            "https://192.168.1.1/internal",
+            "https://user:pass@push.example.com/sub/creds",  # pragma: allowlist secret
+            "https://localhost/sub/local",
+            "https://service.local/sub/mdns",
+            "https://metadata.google.internal/computeMetadata",
+        ],
+    )
+    def test_subscribe_rejects_invalid_or_non_public_endpoint(
+        self, client_with_push, endpoint: str
+    ):
+        cookies = _login_user(client_with_push, "alice")
+        resp = client_with_push.post(
+            "/api/notifications/subscribe",
+            json={
+                "endpoint": endpoint,
+                "p256dh_key": "p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
+                "auth_key": "auth-test",  # pragma: allowlist secret  # gitleaks:allow
+            },
+            headers=cookies,
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "https://fcm.googleapis.com/fcm/send/abc123",
+            "https://updates.push.services.mozilla.com/wpush/v2/abc123",
+            "https://web.push.apple.com/QAbc123",
+        ],
+    )
+    def test_subscribe_accepts_public_push_endpoints(
+        self, client_with_push, endpoint: str
+    ):
+        cookies = _login_user(client_with_push, "alice")
+        resp = client_with_push.post(
+            "/api/notifications/subscribe",
+            json={
+                "endpoint": endpoint,
+                "p256dh_key": "p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
+                "auth_key": "auth-test",  # pragma: allowlist secret  # gitleaks:allow
+            },
+            headers=cookies,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "subscribed"
 
     def test_subscribe_rejects_http_endpoint(self, client_with_push):
         cookies = _login_user(client_with_push, "alice")

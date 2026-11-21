@@ -24,11 +24,13 @@ from rootcoz.models import (
     PreviewIssueRequest,
     PreviewIssueResponse,
     ProductBugReport,
+    PushSubscriptionRequest,
     ReAnalyzeFailureRequest,
     ReAnalyzeRequest,
     SetTrackedInRequest,
     SimilarIssue,
     UnifiedAnalyzeRequest,
+    UnsubscribeRequest,
 )
 
 
@@ -1469,3 +1471,59 @@ class TestProductBugReportGithubMatches:
         )
         assert [m.number for m in report.github_matches] == [1]
         assert [m.number for m in fix.tests_repo_matches] == [2]
+
+
+class TestPushEndpointModels:
+    """Tests for Web Push endpoint URL validation on push models (#599)."""
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "https://fcm.googleapis.com/fcm/send/abc123",
+            "https://updates.push.services.mozilla.com/wpush/v2/abc123",
+            "https://web.push.apple.com/QAbc123",
+        ],
+    )
+    def test_accepts_public_https_push_endpoints(self, endpoint: str) -> None:
+        sub = PushSubscriptionRequest(
+            endpoint=endpoint,
+            p256dh_key="p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
+            auth_key="auth-test",  # pragma: allowlist secret  # gitleaks:allow
+        )
+        assert sub.endpoint == endpoint
+        assert UnsubscribeRequest(endpoint=endpoint).endpoint == endpoint
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://fcm.googleapis.com/fcm/send/abc123",
+            "https://127.0.0.1/push",
+            "https://[::1]/push",
+            "https://169.254.169.254/latest/meta-data",
+            "https://10.0.0.1/internal",
+            "https://192.168.1.1/internal",
+            "https://user:pass@fcm.googleapis.com/push",  # pragma: allowlist secret
+            "https://localhost/push",
+            "https://printer.local/push",
+            "https://metadata.google.internal/computeMetadata",
+        ],
+    )
+    def test_rejects_non_public_or_invalid_push_endpoints(self, endpoint: str) -> None:
+        with pytest.raises(ValidationError):
+            PushSubscriptionRequest(
+                endpoint=endpoint,
+                p256dh_key="p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
+                auth_key="auth-test",  # pragma: allowlist secret  # gitleaks:allow
+            )
+
+    def test_unsubscribe_allows_legacy_https_endpoints_but_rejects_http(self) -> None:
+        assert (
+            UnsubscribeRequest(endpoint="https://127.0.0.1/legacy").endpoint
+            == "https://127.0.0.1/legacy"
+        )
+        assert (
+            UnsubscribeRequest(endpoint="https://localhost/legacy").endpoint
+            == "https://localhost/legacy"
+        )
+        with pytest.raises(ValidationError):
+            UnsubscribeRequest(endpoint="http://fcm.googleapis.com/fcm/send/abc123")

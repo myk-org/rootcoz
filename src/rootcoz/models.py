@@ -38,7 +38,11 @@ from rootcoz.prow_validation import (
     validate_prow_job_name,
 )
 from rootcoz.repository import RESERVED_REPO_NAMES
-from rootcoz.url_utils import mask_stored_url, validate_http_url
+from rootcoz.url_utils import (
+    mask_stored_url,
+    validate_http_url,
+    validate_public_https_url,
+)
 
 logger = get_child_logger(__name__)
 
@@ -1637,7 +1641,7 @@ class ExporterInfo(BaseModel):
 
 
 class _PushEndpointMixin(BaseModel):
-    """Shared validation for Web Push endpoint URLs (HTTPS-only, length-bounded)."""
+    """Shared length-bounded HTTPS endpoint field for Web Push models."""
 
     endpoint: str = Field(max_length=2048, description="Push service endpoint URL")
 
@@ -1657,9 +1661,18 @@ class PushSubscriptionRequest(_PushEndpointMixin):
     )
     auth_key: str = Field(max_length=256, description="Client authentication secret")
 
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint_url(cls, v: str) -> str:
+        return validate_public_https_url(v, field_name="Push endpoint")
+
 
 class UnsubscribeRequest(_PushEndpointMixin):
-    """Request body for unsubscribing from Web Push notifications."""
+    """Request body for unsubscribing from Web Push notifications.
+
+    Retains the legacy HTTPS-prefix check so subscriptions stored prior to
+    public-host enforcement can still be removed cleanly.
+    """
 
 
 class BulkDeleteRequest(BaseModel):
