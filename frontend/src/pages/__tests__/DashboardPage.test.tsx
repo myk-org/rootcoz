@@ -3,10 +3,11 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DashboardPage } from '@/pages/DashboardPage'
-import { resetLastAppliedPresetForTests } from '@/lib/filterPresets'
+import { notifyPresetApplied, resetLastAppliedPresetForTests } from '@/lib/filterPresets'
 
 const apiGet = vi.fn()
 const apiPost = vi.fn()
+const apiPut = vi.fn()
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>()
   return {
@@ -14,6 +15,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     api: {
       get: (...args: unknown[]) => apiGet(...args),
       post: (...args: unknown[]) => apiPost(...args),
+      put: (...args: unknown[]) => apiPut(...args),
     },
   }
 })
@@ -99,6 +101,15 @@ function NavControls() {
       <button type="button" onClick={() => navigate(-1)}>Go back</button>
       <button type="button" onClick={() => navigate('/?search=external&team=net')}>Nav external</button>
       <button type="button" onClick={() => navigate('/')}>Nav clean</button>
+      <button
+        type="button"
+        onClick={() => {
+          notifyPresetApplied(1, 'dashboard')
+          navigate('/?team=storage')
+        }}
+      >
+        Sidebar preset no search
+      </button>
     </>
   )
 }
@@ -438,6 +449,7 @@ describe('DashboardPage search URL contract', () => {
   afterEach(() => {
     apiGet.mockReset()
     apiPost.mockReset()
+    apiPut.mockReset()
   })
 
   it('seeds input and first API request from ?search= with zero unfiltered flash', async () => {
@@ -598,7 +610,8 @@ describe('DashboardPage search URL contract', () => {
     fireEvent.change(input, { target: { value: 'initialtyping' } })
     expect(input).toHaveValue('initialtyping')
 
-    // External URL change before debounce settles
+    // External URL change before debounce settles — single fetch with new search+team (no stale request)
+    const countBeforeNav = requests.length
     await userEvent.click(screen.getByRole('button', { name: 'Nav external' }))
 
     await waitFor(() => expect(input).toHaveValue('external'))
@@ -607,6 +620,10 @@ describe('DashboardPage search URL contract', () => {
       expect(last?.get('search')).toBe('external')
       expect(last?.getAll('team')).toEqual(['net'])
     })
+    const navRequests = requests.slice(countBeforeNav)
+    expect(navRequests).toHaveLength(1)
+    expect(navRequests[0]?.get('search')).toBe('external')
+    expect(navRequests[0]?.getAll('team')).toEqual(['net'])
 
     // Wait past the 300ms debounce window to ensure the cancelled timer never overwrites URL
     await new Promise((r) => setTimeout(r, 350))
@@ -617,5 +634,75 @@ describe('DashboardPage search URL contract', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Nav clean' }))
     await waitFor(() => expect(input).toHaveValue(''))
     await waitFor(() => expect(requests.at(-1)?.get('search')).toBeNull())
+  })
+
+  it('uses immediate typed search for preset modified-state and quick Update before debounce settles', async () => {
+    const activePreset = {
+      id: 2,
+      name: 'Kubevirt failed',
+      page: 'dashboard',
+      scope: 'user',
+      filters: { search: 'kubevirt', status: ['failed'] },
+      created_at: '2026-01-02T00:00:00',
+      updated_at: '2026-01-02T00:00:00',
+    }
+    mockApi(5)
+    const fallback = apiGet.getMockImplementation()!
+    apiGet.mockImplementation((path: string) =>
+      path.startsWith('/api/user/filter-presets')
+        ? Promise.resolve([activePreset])
+        : fallback(path),
+    )
+    apiPut.mockResolvedValue({
+      ...activePreset,
+      filters: { search: 'kubevirt-v2', status: 'failed' },
+    })
+
+    renderPage('/?search=kubevirt&status=failed')
+    await waitFor(() => expect(requests[0]?.get('search')).toBe('kubevirt'))
+
+    // Apply preset so it becomes active
+    await userEvent.click(screen.getByTestId('filter-presets-trigger'))
+    await userEvent.click(screen.getByTestId('filter-preset-2'))
+    await waitFor(() =>
+      expect(screen.getByTestId('filter-presets-trigger').textContent).toContain('Kubevirt failed'),
+    )
+
+    // Edit search and immediately click Update before 300ms debounce completes
+    const input = screen.getByPlaceholderText('Filter jobs...')
+    fireEvent.change(input, { target: { value: 'kubevirt-v2' } })
+
+    const updateBtn = await screen.findByTestId('filter-preset-update')
+    await userEvent.click(updateBtn)
+
+    await waitFor(() =>
+      expect(apiPut).toHaveBeenCalledWith('/api/user/filter-presets/2', {
+        filters: { search: 'kubevirt-v2', status: 'failed' },
+      }),
+    )
+  })
+
+  it('cancels pending search typing on sidebar preset navigation even when URL search stays empty', async () => {
+    mockApi(5)
+    renderPage('/')
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+
+    // Start typing mid-debounce while URL search is empty
+    const input = screen.getByPlaceholderText('Filter jobs...')
+    fireEvent.change(input, { target: { value: 'draft' } })
+    expect(input).toHaveValue('draft')
+
+    // Click a sidebar preset that omits `search` (URL search remains empty)
+    await userEvent.click(screen.getByRole('button', { name: 'Sidebar preset no search' }))
+
+    await waitFor(() => expect(input).toHaveValue(''))
+    expect(screen.getByTestId('location-probe').textContent).toBe('/?team=storage')
+
+    // Wait past the 300ms debounce window — pending 'draft' must not overwrite the preset
+    await new Promise((r) => setTimeout(r, 350))
+    expect(input).toHaveValue('')
+    expect(screen.getByTestId('location-probe').textContent).toBe('/?team=storage')
+    expect(requests.at(-1)?.get('search')).toBeNull()
+    expect(requests.at(-1)?.getAll('team')).toEqual(['storage'])
   })
 })

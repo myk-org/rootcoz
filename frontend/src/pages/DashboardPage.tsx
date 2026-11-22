@@ -40,13 +40,12 @@ import { useTableSort } from '@/lib/useTableSort'
 import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, MinusCircle } from 'lucide-react'
 import { JobAttribution } from '@/components/shared/JobAttribution'
 import { useAuth } from '@/lib/auth'
-import { FILTER_PRESET_KEYS } from '@/lib/filterPresets'
+import { FILTER_PRESET_KEYS, PRESET_APPLIED_EVENT, type FilterPresetPage } from '@/lib/filterPresets'
 import {
   applyFiltersToParams,
   applyJobFiltersToParams,
   DEFAULT_TEST_NAME_MODE,
   EMPTY_JOB_FILTERS,
-  jobFiltersFromFilters,
   jobFiltersFromParams,
   TEST_NAME_WRITE_KEYS,
   type TestNameMode,
@@ -162,51 +161,67 @@ export function DashboardPage() {
   const [search, setSearch] = useState(urlSearch)
   const [debouncedSearch, setDebouncedSearch] = useState(urlSearch)
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const lastCommittedSearchRef = useRef(urlSearch)
+  const [prevUrlSearch, setPrevUrlSearch] = useState(urlSearch)
+  const [presetApplySeq, setPresetApplySeq] = useState(0)
+  const [prevPresetApplySeq, setPrevPresetApplySeq] = useState(0)
 
-  // Debounce search input (300ms) to avoid excessive backend requests
-  useEffect(() => {
+  const cancelPendingSearchDebounce = useCallback(() => {
     if (searchDebounceRef.current) {
       clearTimeout(searchDebounceRef.current)
       searchDebounceRef.current = null
     }
+  }, [])
+
+  // Sync external URL `search` changes (preset apply, sidebar navigation, back/forward)
+  // during render so `fetchJobs` never fires a stale request with the previous search
+  // when a navigation changes both `search` and another filter in the same commit.
+  if (urlSearch !== prevUrlSearch || presetApplySeq !== prevPresetApplySeq) {
+    setPrevUrlSearch(urlSearch)
+    setPrevPresetApplySeq(presetApplySeq)
+    setSearch(urlSearch)
+    setDebouncedSearch(urlSearch)
+  }
+
+  // Follow sidebar preset clicks even when the preset's `search` matches the current URL
+  // (e.g. both empty while un-debounced text is pending in the input).
+  useEffect(() => {
+    const onPresetApplied = (event: Event) => {
+      const applied = (event as CustomEvent<{ id: number; page: FilterPresetPage }>).detail
+      if (applied?.page !== 'dashboard') return
+      cancelPendingSearchDebounce()
+      setPresetApplySeq((n) => n + 1)
+    }
+    window.addEventListener(PRESET_APPLIED_EVENT, onPresetApplied)
+    return () => window.removeEventListener(PRESET_APPLIED_EVENT, onPresetApplied)
+  }, [cancelPendingSearchDebounce])
+
+  // Debounce search input (300ms) and commit both fetch state and URL (`replace: true`) together
+  useEffect(() => {
+    cancelPendingSearchDebounce()
     if (search === debouncedSearch) return
     searchDebounceRef.current = setTimeout(() => {
       searchDebounceRef.current = null
       setDebouncedSearch(search)
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev)
+        if (search) next.set('search', search)
+        else next.delete('search')
+        return next
+      }, { replace: true })
     }, 300)
-    return () => {
-      if (searchDebounceRef.current) {
-        clearTimeout(searchDebounceRef.current)
-        searchDebounceRef.current = null
-      }
-    }
-  }, [search, debouncedSearch])
+    return cancelPendingSearchDebounce
+  }, [search, debouncedSearch, setSearchParams, cancelPendingSearchDebounce])
 
-  // Persist committed search to URL (replace: true) while preserving other params
-  useEffect(() => {
-    if (debouncedSearch === lastCommittedSearchRef.current) return
-    lastCommittedSearchRef.current = debouncedSearch
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev)
-      if (debouncedSearch) next.set('search', debouncedSearch)
-      else next.delete('search')
-      return next
-    }, { replace: true })
-  }, [debouncedSearch, setSearchParams])
-
-  // Sync external URL `search` changes (preset apply, sidebar navigation, back/forward)
-  // without clobbering in-progress typing when another filter changes mid-debounce
-  useEffect(() => {
-    if (urlSearch === lastCommittedSearchRef.current) return
-    lastCommittedSearchRef.current = urlSearch
-    if (searchDebounceRef.current) {
-      clearTimeout(searchDebounceRef.current)
-      searchDebounceRef.current = null
-    }
-    setSearch(urlSearch)
-    setDebouncedSearch(urlSearch)
-  }, [urlSearch])
+  // Overlay the immediate displayed `search` onto the URL params passed to FilterPresetsMenu
+  // so modified-state, Save, and Update reflect newly typed text during the 300ms debounce
+  // without causing premature URL navigations or API fetches.
+  const presetSearchParams = useMemo(() => {
+    if (search === urlSearch) return searchParams
+    const next = new URLSearchParams(searchParams)
+    if (search) next.set('search', search)
+    else next.delete('search')
+    return next
+  }, [searchParams, search, urlSearch])
 
   const { sortKey, sortDir, handleSort } = useTableSort('dash', 'created_at', 'desc', ['created_at'])
   const [page, setPage] = useState(1)
@@ -666,16 +681,10 @@ export function DashboardPage() {
         {/* Filters — one shared bar, so both pages carry the same row (#546 A) */}
         <JobFilterBar
           page="dashboard"
-          searchParams={searchParams}
+          searchParams={presetSearchParams}
           onApplyPreset={(filters) => {
-            const presetSearch = jobFiltersFromFilters(filters).search
-            if (searchDebounceRef.current) {
-              clearTimeout(searchDebounceRef.current)
-              searchDebounceRef.current = null
-            }
-            lastCommittedSearchRef.current = presetSearch
-            setSearch(presetSearch)
-            setDebouncedSearch(presetSearch)
+            cancelPendingSearchDebounce()
+            setPresetApplySeq((n) => n + 1)
             setSearchParams(
               (prev) => applyFiltersToParams(prev, filters, FILTER_PRESET_KEYS.dashboard),
               { replace: true },
