@@ -4169,6 +4169,63 @@ class TestAnalyzeSourceFlag:
         kwargs = mock_client.analyze_file.call_args
         assert kwargs[0][0] == "<testsuites/>"
 
+    def test_analyze_source_file_forwards_job_name(self, mock_client, tmp_path):
+        xml_file = tmp_path / "results.xml"
+        xml_file.write_text("<testsuites/>")
+        mock_client.analyze_file.return_value = self._ANALYZE_RESPONSE
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--source",
+                "file",
+                "--file",
+                str(xml_file),
+                "--job-name",
+                "my-junit-suite",
+            ],
+        )
+        assert result.exit_code == 0
+        assert mock_client.analyze_file.call_args.kwargs["job_name"] == "my-junit-suite"
+
+    def test_submit_source_file_forwards_job_name(self, mock_client, tmp_path):
+        xml_file = tmp_path / "results.xml"
+        xml_file.write_text("<testsuites/>")
+        mock_client.submit_file.return_value = self._ANALYZE_RESPONSE
+        result = runner.invoke(
+            app,
+            [
+                "submit",
+                "--source",
+                "file",
+                "--file",
+                str(xml_file),
+                "--job-name",
+                "my-junit-suite",
+            ],
+        )
+        assert result.exit_code == 0
+        assert mock_client.submit_file.call_args.kwargs["job_name"] == "my-junit-suite"
+
+    def test_analyze_source_file_rejects_hostile_job_name(self, mock_client, tmp_path):
+        xml_file = tmp_path / "results.xml"
+        xml_file.write_text("<testsuites/>")
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--source",
+                "file",
+                "--file",
+                str(xml_file),
+                "--job-name",
+                "../evil",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "invalid job name" in result.output
+        mock_client.analyze_file.assert_not_called()
+
     def test_analyze_source_file_without_file_errors(self, mock_client):
         result = runner.invoke(
             app,

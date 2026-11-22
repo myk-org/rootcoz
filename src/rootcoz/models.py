@@ -417,6 +417,48 @@ class BaseAnalysisRequest(BaseModel):
         return v
 
 
+MAX_FILE_JOB_NAME_LENGTH = 500
+# Letters, digits, spaces, and safe punctuation (no path separators, control
+# chars, or shell/HTML/URL/log-tag metacharacters). Must start with an
+# alphanumeric character to reject leading '.' segments and '-' flags.
+FILE_JOB_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:()+-]*$")
+
+
+def validate_file_job_name(value: object) -> str:
+    """Validate a file-analysis job name.
+
+    Enforces length, printable characters, no path separators (``/``, ``\\``),
+    no ``..`` traversal sequences, no leading ``.``, and the allowed character
+    set. Never echoes the raw untrusted value in error messages.
+    """
+    if not isinstance(value, str):
+        raise TypeError("job_name must be a string")
+    name = value.strip()
+    if not name:
+        raise ValueError("job_name cannot be blank")
+    if len(name) > MAX_FILE_JOB_NAME_LENGTH:
+        raise ValueError(
+            f"job_name must be at most {MAX_FILE_JOB_NAME_LENGTH} characters"
+        )
+    if not name.isprintable():
+        raise ValueError(
+            "job_name must not contain control or non-printable characters"
+        )
+    if "/" in name or "\\" in name:
+        raise ValueError("job_name must not contain path separators ('/' or '\\')")
+    if ".." in name:
+        raise ValueError("job_name must not contain '..'")
+    if name.startswith("."):
+        raise ValueError("job_name must not start with '.'")
+    if not FILE_JOB_NAME_PATTERN.fullmatch(name):
+        raise ValueError(
+            "job_name contains invalid characters "
+            "(must start with a letter or digit; allowed: letters, digits, "
+            "spaces, and . _ - : ( ) +)"
+        )
+    return name
+
+
 class _JenkinsParamsMixin(BaseModel):
     """Shared Jenkins connection and polling fields."""
 
@@ -424,6 +466,8 @@ class _JenkinsParamsMixin(BaseModel):
     @classmethod
     def _strip_job_name(cls, v: str | None) -> str | None:
         if v is not None:
+            if not isinstance(v, str):
+                return v
             v = v.strip()
             if not v:
                 raise ValueError("job_name cannot be blank")
@@ -998,10 +1042,13 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
         description="Analysis type: jenkins (CI job), file (JUnit XML), raw (failure list), or prow (Prow CI job)"
     )
 
-    # Jenkins-specific fields (required when type="jenkins", optional otherwise)
+    # Jenkins/file job name (required for type="jenkins", optional for type="file")
     job_name: str | None = Field(
         default=None,
-        description="Jenkins job name (required for type=jenkins)",
+        description=(
+            "Job name (required for type=jenkins; optional for type=file, "
+            "overrides JUnit <testsuite name>)"
+        ),
     )
     build_number: int | None = Field(
         default=None,
@@ -1091,7 +1138,7 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
         return normalize_prow_url(v)
 
     @model_validator(mode="after")
-    def _validate_by_type(self) -> UnifiedAnalyzeRequest:
+    def _validate_by_type(self, info: ValidationInfo) -> UnifiedAnalyzeRequest:
         """Validate required fields based on analysis type."""
         if self.type == "jenkins":
             if not self.job_name:
@@ -1106,6 +1153,8 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
         elif self.type == "file":
             if not self.raw_xml:
                 raise ValueError("raw_xml is required for type=file")
+            if self.job_name is not None and not _is_stored_replay(info):
+                self.job_name = validate_file_job_name(self.job_name)
             if self.failures is not None:
                 raise ValueError(
                     "failures cannot be provided for type=file (use type=raw)"

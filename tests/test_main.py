@@ -1842,6 +1842,208 @@ class TestAnalyzeFailuresRawXml:
         )
 
 
+class TestFileJobNaming:
+    """Tests for JUnit suite-name derivation and explicit job_name on type=file (#637)."""
+
+    NAMED_XML = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<testsuite name="qe-ui-check-submit" tests="2" failures="1">'
+        '<testcase classname="tests.ui" name="test_submit" time="0.2">'
+        '<failure message="boom">traceback</failure>'
+        "</testcase>"
+        '<testcase classname="tests.ui" name="test_ok" time="0.1"/>'
+        "</testsuite>"
+    )
+    UNNAMED_XML = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<testsuite tests="1" failures="1">'
+        '<testcase classname="tests.ui" name="test_submit" time="0.2">'
+        '<failure message="boom">traceback</failure>'
+        "</testcase>"
+        "</testsuite>"
+    )
+    HOSTILE_SUITE_XML = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<testsuite name="../../etc/passwd" tests="1" failures="1">'
+        '<testcase classname="tests.ui" name="test_submit" time="0.2">'
+        '<failure message="boom">traceback</failure>'
+        "</testcase>"
+        "</testsuite>"
+    )
+
+    @pytest.mark.parametrize("endpoint", ["/analyze", "/submit"])
+    def test_suite_name_used_when_no_explicit_job_name(
+        self, test_client, endpoint: str
+    ) -> None:
+        payload: dict = {"type": "file", "raw_xml": self.NAMED_XML}
+        if endpoint == "/analyze":
+            payload.update({"ai_provider": "claude", "ai_model": "test-model"})
+        with patch(
+            "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+        ) as mock_process:
+            resp = test_client.post(endpoint, json=payload)
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        assert mock_process.await_args.kwargs["display_name"] == "qe-ui-check-submit"
+
+        result_resp = test_client.get(f"/results/{job_id}")
+        assert result_resp.status_code == 202
+        stored = result_resp.json()["result"]
+        assert stored["job_name"] == "qe-ui-check-submit"
+        assert stored["display_name"] == "qe-ui-check-submit"
+
+    @pytest.mark.parametrize("endpoint", ["/analyze", "/submit"])
+    def test_explicit_job_name_wins_over_suite_name(
+        self, test_client, endpoint: str
+    ) -> None:
+        payload: dict = {
+            "type": "file",
+            "raw_xml": self.NAMED_XML,
+            "job_name": "my-explicit-suite",
+        }
+        if endpoint == "/analyze":
+            payload.update({"ai_provider": "claude", "ai_model": "test-model"})
+        with patch(
+            "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+        ) as mock_process:
+            resp = test_client.post(endpoint, json=payload)
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        assert mock_process.await_args.kwargs["display_name"] == "my-explicit-suite"
+
+        result_resp = test_client.get(f"/results/{job_id}")
+        assert result_resp.status_code == 202
+        stored = result_resp.json()["result"]
+        assert stored["job_name"] == "my-explicit-suite"
+        assert stored["display_name"] == "my-explicit-suite"
+
+    def test_missing_suite_name_falls_back_to_file_analysis_id(
+        self, test_client
+    ) -> None:
+        data, mock_process = _post_analyze_queued(
+            test_client,
+            {
+                "type": "file",
+                "raw_xml": self.UNNAMED_XML,
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        job_id = data["job_id"]
+        expected = f"file-analysis-{job_id[:8]}"
+        assert mock_process.await_args.kwargs["display_name"] == expected
+
+        result_resp = test_client.get(f"/results/{job_id}")
+        assert result_resp.status_code == 202
+        stored = result_resp.json()["result"]
+        assert stored["job_name"] == expected
+
+    def test_hostile_xml_suite_name_falls_back_safely(self, test_client) -> None:
+        data, mock_process = _post_analyze_queued(
+            test_client,
+            {
+                "type": "file",
+                "raw_xml": self.HOSTILE_SUITE_XML,
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        job_id = data["job_id"]
+        expected = f"file-analysis-{job_id[:8]}"
+        assert mock_process.await_args.kwargs["display_name"] == expected
+        result_resp = test_client.get(f"/results/{job_id}")
+        assert result_resp.json()["result"]["job_name"] == expected
+
+    @pytest.mark.parametrize("endpoint", ["/analyze", "/submit"])
+    @pytest.mark.parametrize(
+        "hostile_name",
+        [
+            "../etc/passwd",
+            "folder/job",
+            "folder\\job",
+            "suite..name",
+            "suite\x00evil",
+            "<script>alert(1)</script>",
+            "x" * 501,
+            "   ",
+        ],
+    )
+    def test_hostile_explicit_job_name_rejected_with_422(
+        self, test_client, endpoint: str, hostile_name: str
+    ) -> None:
+        payload: dict = {
+            "type": "file",
+            "raw_xml": self.NAMED_XML,
+            "job_name": hostile_name,
+        }
+        if endpoint == "/analyze":
+            payload.update({"ai_provider": "claude", "ai_model": "test-model"})
+        resp = test_client.post(endpoint, json=payload)
+        assert resp.status_code == 422
+
+    def test_submit_completes_and_preserves_suite_name_in_dashboard_and_export(
+        self, test_client
+    ) -> None:
+        """Suite name flows into stored result, dashboard row, and ExportContext."""
+        from rootcoz.config import get_settings
+        from rootcoz.main import _build_export_context, _process_ci_source_analysis
+
+        with patch(
+            "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+        ) as mock_process:
+            resp = test_client.post(
+                "/submit",
+                json={"type": "file", "raw_xml": self.NAMED_XML},
+            )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        asyncio.run(_process_ci_source_analysis(**mock_process.await_args.kwargs))
+
+        result_resp = test_client.get(f"/results/{job_id}")
+        assert result_resp.status_code == 200
+        body = result_resp.json()
+        assert body["status"] == "completed"
+        assert body["result"]["job_name"] == "qe-ui-check-submit"
+
+        dash_resp = test_client.get("/api/dashboard")
+        assert dash_resp.status_code == 200
+        matching = [j for j in dash_resp.json() if j["job_id"] == job_id]
+        assert len(matching) == 1
+        assert matching[0]["job_name"] == "qe-ui-check-submit"
+
+        ctx = asyncio.run(
+            _build_export_context(
+                job_id=job_id,
+                result_data=body["result"],
+                settings=get_settings(),
+                fetch_history=False,
+                fetch_tracked_in_links=False,
+            )
+        )
+        assert ctx.job_name == "qe-ui-check-submit"
+
+        from rootcoz.storage import get_test_history, populate_failure_history
+
+        asyncio.run(populate_failure_history(job_id, body["result"]))
+        history = asyncio.run(
+            get_test_history("tests.ui.test_submit", job_name="qe-ui-check-submit")
+        )
+        assert history["failures"] == 1
+        assert history["recent_runs"][0]["job_name"] == "qe-ui-check-submit"
+
+    def test_reanalyze_restores_explicit_file_job_name(self) -> None:
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.file_source import FileSource
+
+        body = UnifiedAnalyzeRequest(
+            type="file", raw_xml=self.NAMED_XML, job_name="explicit-suite"
+        )
+        params = FileSource.build_request_params(body, None, {})
+        assert params["job_name"] == "explicit-suite"
+        restored = FileSource.restore_reanalyze_fields(params)
+        assert restored == {"raw_xml": self.NAMED_XML, "job_name": "explicit-suite"}
+
+
 class TestProwIdentityStamping:
     """Tests for ProwSource identity helpers."""
 

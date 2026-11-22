@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { api, ApiError, apiDetailMessages, extractApiDetail } from '@/lib/api'
 import { toIntInRange, PROW_JOB_NAME_RE, PROW_BUILD_ID_RE } from '@/lib/utils'
+import { extractSuiteNameFromXml, validateFileJobName } from '@/lib/junitXml'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
@@ -51,6 +52,8 @@ export function NewAnalysisPage() {
 
   // Raw XML (paste / upload)
   const [rawXml, setRawXml] = useState('')
+  const [xmlJobName, setXmlJobName] = useState('')
+  const [xmlJobNameEdited, setXmlJobNameEdited] = useState(false)
   const [uploadFileName, setUploadFileName] = useState('')
 
   // Prow fields
@@ -175,37 +178,54 @@ export function NewAnalysisPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
+  const xmlJobNameError = inputMode === 'paste' ? validateFileJobName(xmlJobName) : null
+
   const canSubmit =
     inputMode === 'jenkins'
       ? jobName.trim() !== '' && buildNumber !== '' && buildNumber > 0
       : inputMode === 'prow'
       ? PROW_JOB_NAME_RE.test(prowJobName.trim()) && PROW_BUILD_ID_RE.test(prowBuildId.trim())
+      : inputMode === 'paste'
+      ? rawXml.trim() !== '' && xmlJobNameError === null
       : rawXml.trim() !== ''
 
   const deferAiToTestsRepo = !!testsRepoUrl.trim() && !aiProvider && !aiModel
   const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, peerConfigs, enablePeers, false, canUseServerProviders, canUseFreeProviders, deferAiToTestsRepo)
 
+  const handleRawXmlChange = useCallback((nextXml: string) => {
+    setRawXml(nextXml)
+    if (!xmlJobNameEdited) {
+      setXmlJobName(extractSuiteNameFromXml(nextXml) ?? '')
+    }
+  }, [xmlJobNameEdited])
+
+  const handleXmlJobNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value
+    setXmlJobName(value)
+    setXmlJobNameEdited(value.trim() !== '')
+  }, [])
+
   const handleFileUpload = useCallback((file: File) => {
     setError('')
-    setRawXml('')
+    handleRawXmlChange('')
     setUploadFileName('')
     const reader = new FileReader()
     reader.onload = (e) => {
       const content = e.target?.result
       if (typeof content === 'string') {
-        setRawXml(content)
+        handleRawXmlChange(content)
         setUploadFileName(file.name)
       }
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
     reader.onerror = () => {
-      setRawXml('')
+      handleRawXmlChange('')
       setUploadFileName('')
       setError(`Failed to read file: ${file.name}`)
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
     reader.readAsText(file)
-  }, [])
+  }, [handleRawXmlChange])
 
   const handleSubmit = useCallback(async () => {
     if (!canSubmit) return
@@ -275,10 +295,12 @@ export function NewAnalysisPage() {
         const data = await api.post<{ job_id: string }>('/analyze', body)
         navigate(`/status/${data.job_id}`)
       } else {
+        const trimmedXmlJobName = inputMode === 'paste' ? xmlJobName.trim() : ''
         const body: Record<string, unknown> = {
           ...commonFields,
           type: 'file',
           raw_xml: rawXml,
+          ...(trimmedXmlJobName && { job_name: trimmedXmlJobName }),
           ...(tags.length > 0 && { tags }),
         }
         const data = await api.post<{ job_id: string }>('/analyze', body)
@@ -294,6 +316,7 @@ export function NewAnalysisPage() {
     canSubmit,
     inputMode,
     rawXml,
+    xmlJobName,
     jobName,
     buildNumber,
     aiProvider,
@@ -514,12 +537,34 @@ export function NewAnalysisPage() {
           {inputMode === 'paste' && (
           <Section title="Paste XML" dotColor="bg-signal-red" defaultOpen>
             <div className="space-y-1.5">
-              <FieldLabel>JUnit XML Content *</FieldLabel>
+              <FieldLabel htmlFor="paste-xml-job-name">Job Name</FieldLabel>
+              <Input
+                id="paste-xml-job-name"
+                placeholder="Derived from <testsuite name> or file-analysis-<id>"
+                value={xmlJobName}
+                onChange={handleXmlJobNameChange}
+                className={xmlJobNameError ? 'border-signal-red' : undefined}
+                aria-invalid={xmlJobNameError !== null || undefined}
+                aria-describedby={xmlJobNameError ? 'paste-xml-job-name-error' : 'paste-xml-job-name-hint'}
+              />
+              {xmlJobNameError ? (
+                <p id="paste-xml-job-name-error" role="alert" className="text-[11px] text-signal-red">
+                  {xmlJobNameError}
+                </p>
+              ) : (
+                <p id="paste-xml-job-name-hint" className="text-[11px] text-text-tertiary">
+                  Optional. Auto-filled from JUnit &lt;testsuite name&gt; when pasted; leave blank to auto-name.
+                </p>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <FieldLabel htmlFor="paste-xml-content">JUnit XML Content *</FieldLabel>
               <textarea
+                id="paste-xml-content"
                 className="flex w-full rounded-md border border-border-default bg-surface-elevated px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent min-h-[200px] resize-y font-mono"
                 placeholder="Paste JUnit XML content..."
                 value={rawXml}
-                onChange={(e) => setRawXml(e.target.value)}
+                onChange={(e) => handleRawXmlChange(e.target.value)}
               />
             </div>
           </Section>

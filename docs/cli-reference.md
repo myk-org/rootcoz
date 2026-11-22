@@ -80,7 +80,7 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 | Option | Purpose |
 | --- | --- |
 | `--source` | `jenkins` (default), `file`, `prow`, or `raw`. |
-| `--job-name`, `-j` | Job name. Required for `jenkins` and `prow`. |
+| `--job-name`, `-j` | Job name. Required for `jenkins` and `prow`; optional override for `file` (otherwise derived from JUnit `<testsuite name>`, falling back to `file-analysis-<id>`). |
 | `--build-number`, `-b` | Build number, or Prow build ID as a numeric string. Required for `jenkins` and `prow`. |
 | `--file`, `-f` | Path to a JUnit XML file. Required for `file`. |
 | `--prow-url`, `--gcs-bucket`, `--gcs-prefix` | Prow Deck URL, artifact bucket, and object prefix. `PROW_URL` and `GCS_BUCKET` also come from the environment. |

@@ -6992,7 +6992,7 @@ async def _enqueue_ci_source_analysis(
         "raw-re-analysis",
         "jenkins-re-analysis",
     }
-    if display_name in _GENERIC_FALLBACK_NAMES and not body.name:
+    if display_name in _GENERIC_FALLBACK_NAMES and not body.name and not body.job_name:
         display_name = f"{display_name}-{job_id[:8]}"
 
     # Build and persist initial state

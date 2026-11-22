@@ -7,6 +7,7 @@ import pytest
 from rootcoz.xml_enrichment import (
     apply_analysis_to_xml,
     extract_failures_from_xml,
+    extract_suite_name_from_xml,
 )
 
 JUNIT_XML_WITH_FAILURES = """<?xml version="1.0" encoding="UTF-8"?>
@@ -324,3 +325,92 @@ def test_enriched_xml_omits_github_properties_without_matches() -> None:
         assert not [name for name in prop_names if name.startswith("ai_github_match_")]
         system_out = testcase.find("system-out")
         assert "Possible GitHub Matches:" not in (system_out.text or "")
+
+
+class TestExtractSuiteNameFromXml:
+    """Tests for extract_suite_name_from_xml() (#637)."""
+
+    def test_root_testsuite_name(self) -> None:
+        xml = '<testsuite name="qe-ui-check-submit" tests="1"><testcase name="t1"/></testsuite>'
+        assert extract_suite_name_from_xml(xml) == "qe-ui-check-submit"
+
+    def test_strips_surrounding_whitespace(self) -> None:
+        xml = '<testsuite name="  qe-ui-check-submit  " tests="1"/>'
+        assert extract_suite_name_from_xml(xml) == "qe-ui-check-submit"
+
+    def test_first_named_testsuite_inside_testsuites(self) -> None:
+        xml = (
+            '<testsuites name="outer-suite">'
+            '<testsuite name="first-suite" tests="1"/>'
+            '<testsuite name="second-suite" tests="1"/>'
+            "</testsuites>"
+        )
+        assert extract_suite_name_from_xml(xml) == "first-suite"
+
+    def test_skips_unnamed_testsuite_inside_testsuites(self) -> None:
+        xml = (
+            "<testsuites>"
+            '<testsuite name="" tests="1"/>'
+            '<testsuite name="second-suite" tests="1"/>'
+            "</testsuites>"
+        )
+        assert extract_suite_name_from_xml(xml) == "second-suite"
+
+    def test_falls_back_to_testsuites_name_when_testsuite_unnamed(self) -> None:
+        xml = '<testsuites name="outer-suite"><testsuite tests="1"/></testsuites>'
+        assert extract_suite_name_from_xml(xml) == "outer-suite"
+
+    def test_namespaced_testsuite(self) -> None:
+        xml = '<testsuite xmlns="http://example.com/junit" name="ns-suite"/>'
+        assert extract_suite_name_from_xml(xml) == "ns-suite"
+
+    @pytest.mark.parametrize(
+        "suite_name",
+        [
+            "Kubernetes e2e suite",
+            "ocp-4.17_tier1:storage",
+            "unit-tests (py3.12)",
+            "com.example.Suite+1",
+        ],
+    )
+    def test_allows_safe_suite_names(self, suite_name: str) -> None:
+        xml = f'<testsuite name="{suite_name}"/>'
+        assert extract_suite_name_from_xml(xml) == suite_name
+
+    @pytest.mark.parametrize(
+        "xml",
+        [
+            "<testsuite tests='1'/>",
+            "<testsuite name='' tests='1'/>",
+            "<testsuite name='   ' tests='1'/>",
+            "<testsuites/>",
+            "<testsuites><testsuite/></testsuites>",
+            "not valid xml <<<<",
+            "",
+            "   ",
+            '<!DOCTYPE foo [<!ENTITY xxe "bar">]><testsuite name="&xxe;"/>',
+        ],
+    )
+    def test_missing_or_malformed_returns_none(self, xml: str) -> None:
+        assert extract_suite_name_from_xml(xml) is None
+
+    @pytest.mark.parametrize(
+        "hostile",
+        [
+            "../etc/passwd",
+            "foo/bar",
+            "foo\\bar",
+            "foo..bar",
+            ".hidden",
+            "..",
+            "&lt;script&gt;alert(1)&lt;/script&gt;",
+            "suite; rm -rf /",
+            "suite&#10;forged",
+            "[user=admin]",
+            "-leading-dash",
+            "a" * 501,
+        ],
+    )
+    def test_hostile_suite_name_rejected_and_returns_none(self, hostile: str) -> None:
+        xml = f'<testsuite name="{hostile}"/>'
+        assert extract_suite_name_from_xml(xml) is None

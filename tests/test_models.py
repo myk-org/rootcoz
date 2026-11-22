@@ -1519,3 +1519,85 @@ class TestPushEndpointModels:
         )
         with pytest.raises(ValidationError):
             UnsubscribeRequest(endpoint="http://fcm.googleapis.com/fcm/send/abc123")
+
+
+class TestFileJobNameValidation:
+    """Validation tests for optional job_name on type=file requests (#637)."""
+
+    @pytest.mark.parametrize(
+        "job_name",
+        [
+            "qe-ui-check-submit",
+            "TestSuite",
+            "com.example.MyTestSuite",
+            "Kubernetes e2e suite",
+            "ocp-4.17_tier1:storage",
+            "unit-tests (py3.12)",
+            "suite+extra",
+            "a" * 500,
+        ],
+    )
+    def test_valid_file_job_name_accepted(self, job_name: str) -> None:
+        from rootcoz.models import UnifiedAnalyzeRequest
+
+        req = UnifiedAnalyzeRequest(
+            type="file", raw_xml="<testsuites/>", job_name=f"  {job_name}  "
+        )
+        assert req.job_name == job_name
+
+    def test_omitted_file_job_name_allowed(self) -> None:
+        from rootcoz.models import UnifiedAnalyzeRequest
+
+        req = UnifiedAnalyzeRequest(type="file", raw_xml="<testsuites/>")
+        assert req.job_name is None
+
+    @pytest.mark.parametrize(
+        "hostile",
+        [
+            "",
+            "   ",
+            "../etc/passwd",
+            "foo/bar",
+            "foo\\bar",
+            "foo..bar",
+            ".",
+            "..",
+            ".hidden",
+            "suite\x00name",
+            "suite\nname",
+            "suite\r\nname",
+            "suite\x1b[31mred",
+            "suite\tname",
+            "<script>alert(1)</script>",
+            "suite; rm -rf /",
+            "[user=admin]",
+            "$(whoami)",
+            "-leading-dash",
+            "a" * 501,
+        ],
+    )
+    def test_hostile_file_job_name_rejected(self, hostile: str) -> None:
+        from rootcoz.models import UnifiedAnalyzeRequest
+
+        with pytest.raises(ValidationError):
+            UnifiedAnalyzeRequest(
+                type="file", raw_xml="<testsuites/>", job_name=hostile
+            )
+
+    def test_non_string_job_name_rejected_cleanly(self) -> None:
+        from rootcoz.models import UnifiedAnalyzeRequest
+
+        with pytest.raises(ValidationError):
+            UnifiedAnalyzeRequest(
+                type="file",
+                raw_xml="<testsuites/>",
+                job_name=123,  # type: ignore[arg-type]
+            )
+
+    def test_jenkins_folder_job_name_still_allowed(self) -> None:
+        from rootcoz.models import UnifiedAnalyzeRequest
+
+        req = UnifiedAnalyzeRequest(
+            type="jenkins", job_name="folder/my-job", build_number=42
+        )
+        assert req.job_name == "folder/my-job"
