@@ -28,7 +28,7 @@ export function SortableHeader({
     >
       <span className="inline-flex items-center gap-1">
         {label}
-        <span className={cn('text-[10px]', active ? 'text-text-primary' : 'text-text-tertiary')}>
+        <span className={cn('text-xs', active ? 'text-text-primary' : 'text-text-tertiary')}>
           {active ? (currentDirection === 'asc' ? '\u25B2' : '\u25BC') : '\u21C5'}
         </span>
       </span>

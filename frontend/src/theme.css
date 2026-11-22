@@ -120,25 +120,25 @@ html[data-theme='light'] {
   --color-border-muted: #d8dee4;
   --color-scrollbar-thumb-hover: #818b98;
 
-  --color-signal-red: #cf222e;
-  --color-signal-green: #1a7f37;
-  --color-signal-orange: #bc4c00;
-  --color-signal-amber: #9a6700;
-  --color-signal-blue: #0969da;
-  --color-signal-purple: #8250df;
+  --color-signal-red: #be1f2a;      /* on page 5.77 · card 6.14 · hover 5.42 · 15% tint on page/card 4.51/4.78 */
+  --color-signal-green: #187332;    /* on page 5.58 · card 5.94 · hover 5.24 · 15% tint on page/card 4.51/4.78 */
+  --color-signal-orange: #a84400;   /* on page 5.65 · card 6.01 · hover 5.31 · 15% tint on page/card 4.53/4.80 */
+  --color-signal-amber: #885b00;    /* on page 5.57 · card 5.93 · hover 5.23 · 15% tint on page/card 4.52/4.79 */
+  --color-signal-blue: #0860c7;     /* on page 5.62 · card 5.99 · hover 5.28 · 15% tint on page/card 4.51/4.78 */
+  --color-signal-purple: #7548c9;   /* on page 5.59 · card 5.95 · hover 5.26 · 15% tint on page/card 4.52/4.79 */
 
-  --color-glow-red: rgba(207, 34, 46, 0.08);
-  --color-glow-green: rgba(26, 127, 55, 0.1);
-  --color-glow-orange: rgba(188, 76, 0, 0.1);
-  --color-glow-blue: rgba(9, 105, 218, 0.1);
-  --color-glow-purple: rgba(130, 80, 223, 0.1);
+  --color-glow-red: rgba(190, 31, 42, 0.08);
+  --color-glow-green: rgba(24, 115, 50, 0.1);
+  --color-glow-orange: rgba(168, 68, 0, 0.1);
+  --color-glow-blue: rgba(8, 96, 199, 0.1);
+  --color-glow-purple: rgba(117, 72, 201, 0.1);
 
-  --color-text-primary: #1f2328;
-  --color-text-secondary: #59636e;
-  --color-text-tertiary: #818b98;
-  --color-text-link: #0969da;
+  --color-text-primary: #1f2328;    /* on page 14.84 · card 15.80 · hover 13.94 */
+  --color-text-secondary: #59636e;  /* on page  5.74 · card  6.11 · hover  5.40 */
+  --color-text-tertiary: #656d76;   /* on page  4.93 · card  5.25 · hover  4.63 */
+  --color-text-link: #0860c7;       /* on page  5.62 · card  5.99 · hover  5.28 */
 
-  --color-border-accent: rgba(9, 105, 218, 0.4);
+  --color-border-accent: rgba(8, 96, 199, 0.4);
 }
 
 body {
