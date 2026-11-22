@@ -34,7 +34,7 @@ from collections.abc import (
     Sequence,
 )
 from compression import zstd
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager
 
 # `field` is also a loop variable in three request-param helpers below, so the
 # dataclasses helper is imported under a name of its own.
@@ -26330,6 +26330,40 @@ async def _require_chat_clear_version(
         )
 
 
+async def _read_chat_history_payload(
+    job_id: str, username: str, *, limit: int, offset: int
+) -> dict[str, Any]:
+    """Read chat history from one SQLite WAL snapshot without blocking on chat locks.
+
+    Active turns and workspace preparations hold ``_hold_chat_lock`` across
+    multi-minute AI calls and git clones. Acquiring that lock here blocked
+    ``GET /api/chat/{job_id}`` and ``GET /api/admin/chat`` until reverse proxies
+    returned 504 Gateway Time-out. ``get_chat_history_snapshot`` pins a single
+    WAL read transaction so messages, total, active_session, and version stay
+    consistent while reads return immediately.
+    """
+    messages, total, session = await storage.get_chat_history_snapshot(
+        job_id, limit=limit, offset=offset, username=username
+    )
+    # Filter out hidden init messages (empty content + completed status, used for session_id storage)
+    # Keep pending messages even if empty (they show "Thinking..." in the UI)
+    messages = [
+        {k: v for k, v in m.items() if k != "session_id"}
+        for m in messages
+        if m.get("content") or m.get("status") in ("pending", "failed")
+    ]
+    active = await _available_chat_session(job_id, username, session=session)
+    version = _chat_session_version(
+        job_id, username, session["session_id"] if session else None
+    )
+    return {
+        "messages": messages,
+        "total": total,
+        "active_session": active,
+        "active_session_version": version,
+    }
+
+
 @app.get("/api/chat/{job_id}", operation_id="getChatHistory")
 async def get_chat_history(
     job_id: str,
@@ -26344,39 +26378,12 @@ async def get_chat_history(
         raise HTTPException(status_code=404, detail="Job not found")
 
     username = getattr(request.state, "username", "")
-    key = f"{job_id}:{username}"
-    preparing = _chat_prep_phases.get(key)
-    # /init holds the per-user chat lock for the whole workspace preparation.
-    # Blocking on it here would hide the very phase we report, so reads skip it
-    # while preparation is in flight — the snapshot below keeps them consistent
-    # instead, since a Start writes its session marker and welcome there.
-    lock: AbstractAsyncContextManager[Any] = (
-        nullcontext() if preparing else _hold_chat_lock(key)
+    preparing = _chat_prep_phases.get(f"{job_id}:{username}")
+    payload = await _read_chat_history_payload(
+        job_id, username, limit=limit, offset=offset
     )
-    async with lock:
-        messages, total, session = await storage.get_chat_history_snapshot(
-            job_id, limit=limit, offset=offset, username=username
-        )
-        # Filter out hidden init messages (empty content + completed status, used for session_id storage)
-        # Keep pending messages even if empty (they show "Thinking..." in the UI)
-        messages = [
-            {k: v for k, v in m.items() if k != "session_id"}
-            for m in messages
-            if m.get("content") or m.get("status") in ("pending", "failed")
-        ]
-        active = await _available_chat_session(job_id, username, session=session)
-        version = _chat_session_version(
-            job_id, username, session["session_id"] if session else None
-        )
-    return strip_sensitive_from_response(
-        {
-            "messages": messages,
-            "total": total,
-            "active_session": active,
-            "active_session_version": version,
-            "preparing": preparing,
-        }
-    )
+    payload["preparing"] = preparing
+    return strip_sensitive_from_response(payload)
 
 
 def _schedule_chat_index(
@@ -27780,6 +27787,7 @@ async def _process_chat_message(
                         return
 
                     turn_warnings: list[str] = []
+                    turn_started = _time.monotonic()
                     success, response_text, new_session_id = await chat_with_ai(
                         job_id=job_id,
                         job_name=result_data.get("job_name", "unknown"),
@@ -27802,6 +27810,7 @@ async def _process_chat_message(
                         ),
                         on_warning=turn_warnings.append,
                     )
+                    turn_elapsed = _time.monotonic() - turn_started
 
                     if abort_signal.is_set():
                         abort_signal.clear()
@@ -27824,7 +27833,12 @@ async def _process_chat_message(
 
                     if not success:
                         logger.error(
-                            "Chat AI call failed for job %s: %s", job_id, response_text
+                            "Chat AI call failed for job %s (provider=%s, model=%s, elapsed=%.1fs): %s",
+                            job_id,
+                            ai_provider,
+                            ai_model,
+                            turn_elapsed,
+                            response_text,
                         )
                         user_error = format_chat_ai_user_error(
                             response_text,
@@ -27904,10 +27918,13 @@ async def _process_chat_message(
                         )
                         return
                     logger.info(
-                        "Chat: message %d processed for job %s (session=%s)",
+                        "Chat: message %d processed for job %s (session=%s, provider=%s, model=%s, elapsed=%.1fs)",
                         assistant_msg_id,
                         job_id,
                         new_session_id,
+                        ai_provider,
+                        ai_model,
+                        turn_elapsed,
                     )
                     await _store_chat_turn_warning(job_id, username, turn_warnings)
                     # The answer is stored and pushed; the graph is built from
@@ -28370,26 +28387,10 @@ async def get_admin_chat_history(
     """Get admin chat history."""
     _require_admin(request)
     username = getattr(request.state, "username", "")
-    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
-        messages = await storage.get_chat_messages(
-            ADMIN_CHAT_JOB_ID, limit=limit, offset=offset, username=username
-        )
-        messages = [
-            {k: v for k, v in m.items() if k != "session_id"}
-            for m in messages
-            if m.get("content") or m.get("status") in ("pending", "failed")
-        ]
-        total = await storage.count_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
-        active = await _available_chat_session(ADMIN_CHAT_JOB_ID, username)
-        version = await _current_chat_session_version(ADMIN_CHAT_JOB_ID, username)
-    return strip_sensitive_from_response(
-        {
-            "messages": messages,
-            "total": total,
-            "active_session": active,
-            "active_session_version": version,
-        }
+    payload = await _read_chat_history_payload(
+        ADMIN_CHAT_JOB_ID, username, limit=limit, offset=offset
     )
+    return strip_sensitive_from_response(payload)
 
 
 @app.post("/api/admin/chat/init", operation_id="initAdminChat")
@@ -28762,6 +28763,7 @@ async def _process_admin_chat_message(
                 return
 
             turn_warnings: list[str] = []
+            turn_started = _time.monotonic()
             success, response_text, new_session_id = await admin_chat_with_ai(
                 message=message,
                 history=history,
@@ -28777,6 +28779,7 @@ async def _process_admin_chat_message(
                 ),
                 on_warning=turn_warnings.append,
             )
+            turn_elapsed = _time.monotonic() - turn_started
 
             if abort_signal.is_set():
                 abort_signal.clear()
@@ -28793,7 +28796,13 @@ async def _process_admin_chat_message(
                 return
 
             if not success:
-                logger.error("Admin chat AI call failed: %s", response_text)
+                logger.error(
+                    "Admin chat AI call failed (provider=%s, model=%s, elapsed=%.1fs): %s",
+                    ai_provider,
+                    ai_model,
+                    turn_elapsed,
+                    response_text,
+                )
                 user_error = format_chat_ai_user_error(
                     response_text,
                     is_admin=True,
@@ -28881,9 +28890,12 @@ async def _process_admin_chat_message(
                 )
                 return
             logger.info(
-                "Admin chat: message %d processed (session=%s)",
+                "Admin chat: message %d processed (session=%s, provider=%s, model=%s, elapsed=%.1fs)",
                 assistant_msg_id,
                 new_session_id,
+                ai_provider,
+                ai_model,
+                turn_elapsed,
             )
             await _store_chat_turn_warning(ADMIN_CHAT_JOB_ID, username, turn_warnings)
             notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
