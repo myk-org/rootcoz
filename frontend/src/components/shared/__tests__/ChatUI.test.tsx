@@ -1398,6 +1398,54 @@ it('cancels fallback polling once SSE chat-changed succeeds and bounds orphaned 
   warnSpy.mockRestore()
 })
 
+it('recovers via silence watchdog when SSE stalls silently after a pending chat-changed', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+  setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
+  render(page())
+  const composer = await screen.findByPlaceholderText(/Ask a question/)
+  await waitFor(() => expect(composer).toBeEnabled())
+  fireEvent.change(composer, { target: { value: 'stalled stream question' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  expect(await screen.findByText(/^Thinking\.\.\./)).toBeInTheDocument()
+
+  const userRow = {
+    id: 2,
+    job_id: 'job',
+    role: 'user',
+    content: 'stalled stream question',
+    username: 'alice',
+    ai_provider: '',
+    ai_model: '',
+    status: 'completed',
+    created_at: '2026-01-01T00:00:00Z',
+  }
+  const pending = pendingRow('2026-01-01T00:00:00Z')
+  let completed = false
+  get.mockImplementation(async (path: string) => path.startsWith('/api/ai-models')
+    ? catalog
+    : {
+        messages: [userRow, completed ? { ...pending, content: 'Recovered after SSE stall.', status: 'completed' } : pending],
+        total: 2,
+        active_session: ACTIVE_SESSION,
+        active_session_version: 'session-version',
+      })
+
+  // SSE delivers the initial pending chat-changed (cancelling fast polling), then stalls silently.
+  act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
+  await act(async () => { await Promise.resolve() })
+  completed = true
+
+  // Before 60s, no unnecessary poll fires beside SSE.
+  await act(async () => { vi.advanceTimersByTime(30000) })
+  expect(screen.queryByText('Recovered after SSE stall.')).not.toBeInTheDocument()
+
+  // At 60s of total silence, the watchdog probes history and delivers the reply without reload.
+  await act(async () => { vi.advanceTimersByTime(30000) })
+  expect(await screen.findByText('Recovered after SSE stall.')).toBeInTheDocument()
+  expect(composer).toBeEnabled()
+})
+
 it('replaces raw 504 with actionable copy on initial history load failure', async () => {
   const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
   setup()

@@ -27,6 +27,10 @@ const POLL_INITIAL_DELAY_MS = 2000
 const POLL_RECOVERY_DELAY_MS = 500
 const POLL_INTERVAL_MS = 3000
 const POLL_MAX_BACKOFF_MS = 10000
+// Silence watchdog: if an open SSE stream goes completely quiet (no chat-changed
+// and no chat-delta frames) while a turn is pending, probe history once so a
+// silently stalled proxy/NAT connection cannot hide a completed reply.
+const SSE_STALL_WATCHDOG_MS = 60_000
 // Generous upper bound so slow multi-minute turns stay alive while an orphaned
 // pending row (e.g. after a server restart) never polls an open tab forever.
 const POLL_MAX_DURATION_MS = 30 * 60 * 1000
@@ -244,6 +248,7 @@ export function ChatUI({
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const stallWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pollGenerationRef = useRef(0)
   const historyGenerationRef = useRef(0)
   const clearingRef = useRef(false)
@@ -308,6 +313,9 @@ export function ChatUI({
         return
       }
       if (typeof frameData.id !== 'number') return
+      if (stallWatchdogRef.current && pendingAssistantRef.current) {
+        armStallWatchdogRef.current(pendingAssistantRef.current.id)
+      }
       if (typeof frameData.snapshot === 'string') {
         // Catch-up frame for a stream that subscribed mid-turn: it replaces the
         // fragments, so a reconnect can never render the same text twice.
@@ -322,7 +330,15 @@ export function ChatUI({
       if (!frame) frame = requestAnimationFrame(flush)
     }
     source.addEventListener('chat-delta', onDelta)
+    source.onerror = () => {
+      if (!mountedRef.current || clearingRef.current) return
+      const pending = pendingAssistantRef.current
+      if (pending && !pollTimerRef.current) {
+        startPollRef.current(pending.id, POLL_INTERVAL_MS)
+      }
+    }
     return () => {
+      source.onerror = null
       source.removeEventListener('chat-delta', onDelta)
       source.close()
       if (frame) cancelAnimationFrame(frame)
@@ -411,6 +427,13 @@ export function ChatUI({
     }
   }, [])
 
+  const clearStallWatchdog = useCallback(() => {
+    if (stallWatchdogRef.current) {
+      clearTimeout(stallWatchdogRef.current)
+      stallWatchdogRef.current = null
+    }
+  }, [])
+
   // Cancel active polling
   const cancelPoll = useCallback(() => {
     pollGenerationRef.current++
@@ -418,7 +441,8 @@ export function ChatUI({
       clearTimeout(pollTimerRef.current)
       pollTimerRef.current = null
     }
-  }, [])
+    clearStallWatchdog()
+  }, [clearStallWatchdog])
 
   const pendingSinceMs = useCallback((): number | null => {
     const pending = pendingAssistantRef.current
@@ -427,6 +451,22 @@ export function ChatUI({
   }, [])
 
   const startPollRef = useRef<(assistantMsgId: number | null, initialDelayMs?: number) => void>(() => {})
+  const syncHistoryRef = useRef<() => void>(() => {})
+  const armStallWatchdogRef = useRef<(pendingId: number) => void>(() => {})
+
+  const armStallWatchdog = useCallback((pendingId: number) => {
+    clearStallWatchdog()
+    const since = pendingSinceMs()
+    if (since !== null && Date.now() - since >= POLL_MAX_DURATION_MS) return
+    stallWatchdogRef.current = setTimeout(() => {
+      stallWatchdogRef.current = null
+      if (!mountedRef.current || clearingRef.current || pollTimerRef.current) return
+      if (pendingAssistantRef.current?.id !== pendingId) return
+      console.debug('[ChatUI] SSE silence watchdog fired — probing history for pending msg', pendingId)
+      syncHistoryRef.current()
+    }, SSE_STALL_WATCHDOG_MS)
+  }, [clearStallWatchdog, pendingSinceMs])
+  armStallWatchdogRef.current = armStallWatchdog
 
   /** Single authoritative state updater for every successful history GET. */
   const applyHistoryResponse = useCallback((
@@ -477,19 +517,23 @@ export function ChatUI({
       setTransientNotice('')
     }
 
+    const pending = msgs.find(m => m.role === 'assistant' && m.status === 'pending')
     if (options.ensurePoll === false) {
       if (stillRecoveringSend && !pollTimerRef.current) {
         startPollRef.current(null, POLL_INTERVAL_MS)
+      } else if (pending && !pollTimerRef.current) {
+        armStallWatchdog(pending.id)
+      } else if (!pending) {
+        clearStallWatchdog()
       }
       return
     }
-    const pending = msgs.find(m => m.role === 'assistant' && m.status === 'pending')
     if (pending || stillRecoveringSend) {
       if (!pollTimerRef.current) startPollRef.current(pending?.id ?? null)
     } else {
       cancelPoll()
     }
-  }, [applySession, cancelPoll, settlePreparation])
+  }, [applySession, armStallWatchdog, cancelPoll, clearStallWatchdog, settlePreparation])
 
   // Polling fallback: active when SSE has not yet confirmed delivery or a
   // transport/gateway failure interrupted syncing. Bounded at 30 minutes so
@@ -716,6 +760,7 @@ export function ChatUI({
         setError(formatChatError(err, 'Failed to sync chat', GATEWAY_HISTORY_ERROR))
       })
   }, [applyHistoryResponse, pendingSinceMs])
+  syncHistoryRef.current = syncHistory
 
   const chatEvents = useMemo(() => ({
     'chat-changed': () => {
