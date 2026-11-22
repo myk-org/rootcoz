@@ -171,4 +171,58 @@ describe('ReportsPage filters', () => {
     expect(screen.getByRole('button', { name: 'Remove yuval' })).toBeInTheDocument()
     expect(screen.getByText('Mode: Analyzed')).toBeInTheDocument()
   })
+
+  it('keeps search in URL and presets without sending search to the reports API', async () => {
+    const presetWithoutSearch = {
+      id: 1,
+      name: 'Storage only',
+      page: 'reports',
+      scope: 'user',
+      filters: { team: ['storage'] },
+      created_at: '2026-01-01T00:00:00',
+      updated_at: '2026-01-01T00:00:00',
+    }
+    const presetWithSearch = {
+      id: 2,
+      name: 'Virt search',
+      page: 'reports',
+      scope: 'user',
+      filters: { search: 'virt', team: ['storage'] },
+      created_at: '2026-01-02T00:00:00',
+      updated_at: '2026-01-02T00:00:00',
+    }
+    const fallback = apiGet.getMockImplementation()!
+    apiGet.mockImplementation((path: string) =>
+      path.startsWith('/api/user/filter-presets')
+        ? Promise.resolve([presetWithoutSearch, presetWithSearch])
+        : fallback(path),
+    )
+
+    renderReports('/reports?search=kubevirt')
+    const input = screen.getByPlaceholderText('Filter reports...')
+    expect(input).toHaveValue('kubevirt')
+    await waitFor(() => expect(reportRequests.length).toBeGreaterThan(0))
+    expect(reportRequests.at(-1)?.get('search')).toBeNull()
+    expect(screen.getByTestId('location-probe').textContent).toBe('/reports?search=kubevirt')
+
+    // Applying a preset without search clears search from input and URL
+    await userEvent.click(screen.getByTestId('filter-presets-trigger'))
+    await userEvent.click(screen.getByTestId('filter-preset-1'))
+    await waitFor(() => expect(input).toHaveValue(''))
+    await waitFor(() =>
+      expect(screen.getByTestId('location-probe').textContent).toBe('/reports?team=storage'),
+    )
+    expect(reportRequests.at(-1)?.get('search')).toBeNull()
+
+    // Applying a preset with search restores search in input and URL, still omitted from API
+    await userEvent.click(screen.getByTestId('filter-presets-trigger'))
+    await userEvent.click(screen.getByTestId('filter-preset-2'))
+    await waitFor(() => expect(input).toHaveValue('virt'))
+    await waitFor(() => {
+      const sp = new URLSearchParams(screen.getByTestId('location-probe').textContent?.split('?')[1] ?? '')
+      expect(sp.get('search')).toBe('virt')
+      expect(sp.getAll('team')).toEqual(['storage'])
+    })
+    expect(reportRequests.at(-1)?.get('search')).toBeNull()
+  })
 })

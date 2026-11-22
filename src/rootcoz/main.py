@@ -19362,6 +19362,7 @@ async def delete_user_ai_credential(provider: str, request: Request) -> JSONResp
 # URL query param names each page's presets may carry (validated on save).
 _FILTER_PRESET_KEYS: dict[str, set[str]] = {
     "dashboard": {
+        "search",
         "team",
         "tier",
         "version",
@@ -19377,6 +19378,7 @@ _FILTER_PRESET_KEYS: dict[str, set[str]] = {
         "test_name_mode",
     },
     "reports": {
+        "search",
         "team",
         "tier",
         "version",
@@ -19405,6 +19407,12 @@ def _validate_filter_preset_filters(page: str, filters: dict[str, Any]) -> None:
         raise HTTPException(
             status_code=422,
             detail=f"Unknown filter key(s) for {page}: " + ", ".join(sorted(unknown)),
+        )
+    search = filters.get("search")
+    if search is not None and not isinstance(search, str):
+        raise HTTPException(
+            status_code=422,
+            detail="Filter 'search' must be a string",
         )
     test_name_mode = filters.get("test_name_mode")
     if test_name_mode is not None and test_name_mode not in storage.TEST_NAME_MODES:

@@ -215,7 +215,7 @@ function initStateFromParams(sp: URLSearchParams): ReportsState {
     submitters: jobFilters.submitted_by,
     labels: sp.getAll('label'),
     excludeLabels: sp.getAll('exclude_label'),
-    search: sp.get('search') ?? '',
+    search: jobFilters.search,
   }
 }
 
@@ -288,10 +288,11 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
       return { ...state, testName: action.name, testNameMode: action.mode }
     case 'APPLY_FILTERS': {
       // Apply a saved filter preset (#179): replace every filter field,
-      // keeping tab, search, and already-fetched report data intact.
+      // keeping tab and already-fetched report data intact.
       const f = jobFiltersFromFilters(action.filters)
       return {
         ...state,
+        search: f.search,
         teams: new Set(f.team),
         tiers: new Set(f.tier),
         versions: new Set(f.version),
@@ -663,6 +664,7 @@ export function ReportsPage() {
   // drift apart on a key name or a shape (#546).
   const jobFilterValues = useMemo<JobFilterValues>(() => ({
     ...EMPTY_JOB_FILTERS,
+    search,
     team: [...teams],
     tier: [...tiers],
     version: [...versions],
@@ -676,7 +678,7 @@ export function ReportsPage() {
     date_to: dateTo,
     test_name: testName,
     test_name_mode: testNameMode,
-  }), [teams, tiers, versions, labels, excludeLabels, statuses, reviewStatus, analysisState, normalizedSubmitters, dateFrom, dateTo, testName, testNameMode])
+  }), [search, teams, tiers, versions, labels, excludeLabels, statuses, reviewStatus, analysisState, normalizedSubmitters, dateFrom, dateTo, testName, testNameMode])
 
   // ─── URL → state sync (external navigation / shared links) ─────
   // Only dispatch when URL actually differs from current state — no flags, no races.
@@ -709,19 +711,18 @@ export function ReportsPage() {
   useEffect(() => {
     const params = new URLSearchParams()
     if (activeTab !== 'totals') params.set('report', TAB_URL_KEY[activeTab])
-    // `report` and `search` are not filter dimensions; every filter key goes in
-    // through the shared writer, which drops `all`/empty and writes the
+    // `report` is not a filter dimension; every filter key (including `search`)
+    // goes in through the shared writer, which drops `all`/empty and writes the
     // canonical `date_from`/`date_to` pair instead of the legacy aliases.
     const next = applyFiltersToParams(
       params,
       jobFiltersToFilters(jobFilterValues),
       FILTER_PRESET_KEYS.reports,
     )
-    if (search) next.set('search', search)
     if (next.toString() !== searchParams.toString()) {
       setSearchParams(next, { replace: true })
     }
-  }, [activeTab, jobFilterValues, search]) // eslint-disable-line react-hooks/exhaustive-deps -- searchParams/setSearchParams are read from closure on purpose: react-router gives them a fresh identity on every location change, so listing them re-runs this effect on external navigations and clobbers them
+  }, [activeTab, jobFilterValues]) // eslint-disable-line react-hooks/exhaustive-deps -- searchParams/setSearchParams are read from closure on purpose: react-router gives them a fresh identity on every location change, so listing them re-runs this effect on external navigations and clobbers them
 
   const fetchSeqRef = useRef(0)
 

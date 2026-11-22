@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { FILTER_PRESET_KEYS } from '../filterPresets'
 import {
   applyFiltersToParams,
   filtersEqual,
@@ -50,6 +51,13 @@ describe('filtersToQueryString', () => {
     expect(filtersToQueryString({ status: ['failed', 'aborted'], tier: '2' })).toBe(
       'status=failed&status=aborted&tier=2',
     )
+  })
+})
+
+describe('FILTER_PRESET_KEYS', () => {
+  it('includes search on both dashboard and reports', () => {
+    expect(FILTER_PRESET_KEYS.dashboard).toContain('search')
+    expect(FILTER_PRESET_KEYS.reports).toContain('search')
   })
 })
 
