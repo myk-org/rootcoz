@@ -23562,6 +23562,8 @@ class TestUserLifecycleAndAdminSseRevocation:
             assert cleared == "event: pending-count\ndata: 0\n\n"
         finally:
             await body_nav.aclose()
+
+
 #: An HTTPS deployment at a known public origin — what the same-origin proof on
 #: the SSO write routes is measured against, and a configured IdP so the routes
 #: get past "unknown provider" and reach that proof.
