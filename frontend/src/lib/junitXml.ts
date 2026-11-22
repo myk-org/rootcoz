@@ -68,22 +68,92 @@ function parseStartTagName(tagName: string, rawAttrs: string): string | null {
   }
 }
 
-function extractSuiteNameFromLargeXmlPrefix(rawXml: string): string | null {
-  const head = rawXml
-    .slice(0, FAST_XML_PREFIX_BYTES)
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<\?[\s\S]*?\?>/g, '')
-    .replace(/<!DOCTYPE[^>]*>/gi, '')
+function isTagNameChar(code: number): boolean {
+  return (
+    (code >= 0x41 && code <= 0x5a) || // A-Z
+    (code >= 0x61 && code <= 0x7a) || // a-z
+    (code >= 0x30 && code <= 0x39) || // 0-9
+    code === 0x5f || // _
+    code === 0x2d || // -
+    code === 0x2e || // .
+    code === 0x3a // :
+  )
+}
 
-  const tagRe =
-    /<(?:[A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]*)(\s(?:[^>"']|"[^"]*"|'[^']*')*)?>/g
+function findTagClose(text: string, start: number): number {
+  let quote = 0
+  for (let i = start; i < text.length; i++) {
+    const code = text.charCodeAt(i)
+    if (quote !== 0) {
+      if (code === quote) quote = 0
+    } else if (code === 0x22 || code === 0x27) {
+      quote = code
+    } else if (code === 0x3e) {
+      return i
+    }
+  }
+  return -1
+}
+
+function extractSuiteNameFromLargeXmlPrefix(rawXml: string): string | null {
+  const head = rawXml.slice(0, FAST_XML_PREFIX_BYTES)
+  const len = head.length
+  let i = 0
   let isRoot = true
   let fallbackName: string | null = null
-  let match: RegExpExecArray | null
 
-  while ((match = tagRe.exec(head)) !== null) {
-    const localName = match[1]
-    const rawAttrs = match[2] ?? ''
+  while (i < len) {
+    const lt = head.indexOf('<', i)
+    if (lt === -1 || lt + 1 >= len) break
+
+    const next = head.charCodeAt(lt + 1)
+    // Comment: <!-- ... -->
+    if (head.startsWith('<!--', lt)) {
+      const end = head.indexOf('-->', lt + 4)
+      if (end === -1) break
+      i = end + 3
+      continue
+    }
+    // CDATA: <![CDATA[ ... ]]>
+    if (head.startsWith('<![CDATA[', lt)) {
+      const end = head.indexOf(']]>', lt + 9)
+      if (end === -1) break
+      i = end + 3
+      continue
+    }
+    // Processing instruction: <? ... ?>
+    if (next === 0x3f) {
+      const end = head.indexOf('?>', lt + 2)
+      if (end === -1) break
+      i = end + 2
+      continue
+    }
+    // Declaration (<!DOCTYPE ...>, etc.) or closing tag (</...>)
+    if (next === 0x21 || next === 0x2f) {
+      const end = findTagClose(head, lt + 2)
+      if (end === -1) break
+      i = end + 1
+      continue
+    }
+
+    // Opening tag: <tagName ...>
+    let nameEnd = lt + 1
+    while (nameEnd < len && isTagNameChar(head.charCodeAt(nameEnd))) {
+      nameEnd++
+    }
+    if (nameEnd === lt + 1) {
+      i = lt + 1
+      continue
+    }
+
+    const tagClose = findTagClose(head, nameEnd)
+    if (tagClose === -1) break
+
+    const fullTag = head.slice(lt + 1, nameEnd)
+    const colon = fullTag.lastIndexOf(':')
+    const localName = colon >= 0 ? fullTag.slice(colon + 1) : fullTag
+    const rawAttrs = head.slice(nameEnd, tagClose)
+
     if (localName === 'testsuite') {
       const name = parseStartTagName('testsuite', rawAttrs)
       if (name) return name
@@ -92,6 +162,7 @@ function extractSuiteNameFromLargeXmlPrefix(rawXml: string): string | null {
       fallbackName = parseStartTagName('testsuites', rawAttrs)
     }
     isRoot = false
+    i = tagClose + 1
   }
   return fallbackName
 }

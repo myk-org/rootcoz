@@ -127,4 +127,20 @@ describe('extractSuiteNameFromXml', () => {
       ),
     ).toBeNull()
   })
+
+  it('handles large XML with repeated tag-like text inside CDATA in linear time', () => {
+    const hostileCdata = '<a '.repeat(25_000)
+    const xmlWithCdataBeforeSuite =
+      `<testsuites name="outer-cdata-suite"><system-out><![CDATA[${hostileCdata}]]></system-out>` +
+      `<testsuite name="late-suite"/></testsuites>`
+    expect(xmlWithCdataBeforeSuite.length).toBeGreaterThan(FAST_XML_PREFIX_BYTES)
+    const start = performance.now()
+    expect(extractSuiteNameFromXml(xmlWithCdataBeforeSuite)).toBe('outer-cdata-suite')
+    expect(performance.now() - start).toBeLessThan(200)
+
+    const xmlWithClosedCdata =
+      `<testsuites><system-out><![CDATA[<testsuite name="fake-inside-cdata"/>${'<a '.repeat(100)}]]></system-out>` +
+      `<testsuite name="real-after-cdata"><testcase>${'x'.repeat(FAST_XML_PREFIX_BYTES)}</testcase></testsuite></testsuites>`
+    expect(extractSuiteNameFromXml(xmlWithClosedCdata)).toBe('real-after-cdata')
+  })
 })
