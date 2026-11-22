@@ -73,4 +73,21 @@ describe('server settings provider picker', () => {
     expect(screen.getByRole('option', { name: 'OpenAI · User' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: /Google Vertex|Openai|Mygateway/ })).not.toBeInTheDocument()
   })
+
+  it('disambiguates google and google-vertex when both exist on server credentials', async () => {
+    get.mockResolvedValue({
+      providers: {
+        google: [{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google', credential_sources: ['server'] }],
+        'google-vertex': [{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google-vertex', credential_sources: ['server'] }],
+      },
+      provider_status: {},
+    })
+    const user = userEvent.setup()
+    render(<ProviderSelect value="google-vertex" onChange={() => {}} showCredentialSources />)
+    const picker = screen.getByRole('combobox')
+    await waitFor(() => expect(picker).toHaveTextContent('Gemini (Vertex) · Server'))
+    await user.click(picker)
+    expect(screen.getByRole('option', { name: 'Gemini (API) · Server' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Gemini (Vertex) · Server' })).toBeInTheDocument()
+  })
 })

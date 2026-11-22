@@ -57,6 +57,25 @@ describe('getPeerAiLabels', () => {
     ])
   })
 
+  it('keeps distinct google and google-vertex peers visible and restores custom provider casing', () => {
+    const labels = getPeerAiLabels(
+      [
+        debate([
+          main,
+          { ai_provider: 'google', ai_model: 'gemini-2.5-pro' },
+          { ai_provider: 'google-vertex', ai_model: 'gemini-2.5-pro' },
+          { ai_provider: 'acmeai', ai_model: 'model-1' },
+        ]),
+      ],
+      { acmeai: 'AcmeAI' },
+    )
+    expect(labels).toEqual([
+      'AcmeAI/model-1',
+      'Gemini (API)/gemini-2.5-pro',
+      'Gemini (Vertex)/gemini-2.5-pro',
+    ])
+  })
+
   it('returns empty when only main is present', () => {
     expect(getPeerAiLabels([debate([main])])).toEqual([])
   })

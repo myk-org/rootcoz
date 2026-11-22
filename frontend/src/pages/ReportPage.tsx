@@ -35,7 +35,7 @@ import { ReportPortalButton } from './report/ReportPortalButton'
 import { DatadogButton } from './report/DatadogButton'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { OriginJobBanner, ReanalyzedForwardBanner } from '@/components/shared/ReanalysisBanner'
-import { formatProviderLabel } from '@/lib/aiProviders'
+import { extractOriginalProviderIds, formatProviderLabel, formatProviderModelLabel } from '@/lib/aiProviders'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { useAuth } from '@/lib/auth'
 
@@ -416,11 +416,10 @@ function ReportContent() {
     .map(([repo, clone]) => ({ name: repo, reason: clone.reason }))
   const reviewedCount = reviewedKeyCount(allTestKeys, state.reviews)
 
-  /** Format the AI provider/model label for display. */
-  const formatAiLabel = (provider: string | undefined, model: string | undefined): string => {
-    const label = provider ? formatProviderLabel(provider) : ''
-    return label ? (model ? `${label} / ${model}` : label) : ''
-  }
+  const originalProviderIds = useMemo(
+    () => extractOriginalProviderIds(state.aiModels),
+    [state.aiModels],
+  )
 
   // Expand/collapse all for top-level failure cards
   const getFailureKeys = useCallback(
@@ -518,7 +517,7 @@ function ReportContent() {
         <div className="mt-2 flex flex-wrap items-center gap-3">
           {result.ai_provider && (
             <Badge variant="outline" className="whitespace-nowrap text-[10px]">
-              {formatAiLabel(result.ai_provider, result.ai_model)}
+              {formatProviderModelLabel(result.ai_provider, result.ai_model, originalProviderIds)}
             </Badge>
           )}
           {result.token_usage ? (
@@ -730,6 +729,7 @@ function ReportContent() {
         failures={result.failures ?? []}
         childJobAnalyses={result.child_job_analyses ?? []}
         repoUrls={repoUrls}
+        originalIds={originalProviderIds}
       />
 
       {/* ---- AI spend breakdown ---- */}
@@ -800,7 +800,7 @@ function ReportContent() {
         {state.completedAt && <p>Completed: {formatTimestamp(state.completedAt)}</p>}
         {result.ai_provider && (
           <p>
-            AI: {formatProviderLabel(result.ai_provider)}
+            AI: {formatProviderLabel(result.ai_provider, originalProviderIds)}
             {result.ai_model ? ` (${result.ai_model})` : ''}
           </p>
         )}

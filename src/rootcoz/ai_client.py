@@ -761,24 +761,17 @@ _LEGACY_PROVIDER_TARGETS: dict[str, tuple[str, ...]] = {
     "claude": ("google-vertex-claude",),
 }
 _PUBLIC_PROVIDER_NAMES: dict[str, str] = {
-    **{
-        provider_id: name
-        for name, provider_ids in _LEGACY_PROVIDER_TARGETS.items()
-        for provider_id in provider_ids
-    },
-    # Vertex Gemini is kept out of _LEGACY_PROVIDER_TARGETS so resolve_catalog_pair
-    # never guesses between google and google-vertex, while public surfaces still
-    # expose it as gemini instead of the internal transport ID.
-    "google-vertex": "gemini",
+    provider_id: name
+    for name, provider_ids in _LEGACY_PROVIDER_TARGETS.items()
+    for provider_id in provider_ids
 }
 
 
 def public_provider_name(provider: str) -> str:
     """Return the public name of a catalog provider ID (identity if unknown).
 
-    ``google-vertex-claude`` -> ``claude``; ``google`` and ``google-vertex``
-    -> ``gemini``. Anything the table does not know is already public and
-    passes through unchanged (preserving operator-configured custom casing).
+    ``google-vertex-claude`` -> ``claude``; ``google`` -> ``gemini``.  Anything
+    the table does not know is already public and passes through unchanged.
     """
     return _PUBLIC_PROVIDER_NAMES.get(normalize_provider(provider), provider)
 

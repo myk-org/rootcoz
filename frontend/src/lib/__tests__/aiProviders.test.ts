@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildProviderOptions,
+  disambiguateProviderLabels,
+  extractOriginalProviderIds,
   formatProviderLabel,
+  formatProviderModelLabel,
   KNOWN_PROVIDER_LABELS,
   normalizeProvider,
 } from '@/lib/aiProviders'
@@ -60,6 +63,10 @@ const BUILTIN_SIDECAR_PROVIDERS = [
   'zai-coding-cn',
 ] as const
 
+function findUnmappedBuiltinProviders(providerIds: readonly string[]): string[] {
+  return providerIds.filter((id) => !Object.hasOwn(KNOWN_PROVIDER_LABELS, normalizeProvider(id)))
+}
+
 describe('normalizeProvider', () => {
   it('lowercases and trims provider identifiers without alias rewriting', () => {
     expect(normalizeProvider('  OpenAI  ')).toBe('openai')
@@ -69,13 +76,23 @@ describe('normalizeProvider', () => {
 })
 
 describe('formatProviderLabel', () => {
-  it('maps every built-in sidecar provider id to an explicit public label without internal prefixes', () => {
+  it('maps every built-in sidecar provider id explicitly and flags unknown built-in ids', () => {
+    expect(findUnmappedBuiltinProviders(BUILTIN_SIDECAR_PROVIDERS)).toEqual([])
+    expect(findUnmappedBuiltinProviders([...BUILTIN_SIDECAR_PROVIDERS, 'unknown-sidecar-id'])).toEqual([
+      'unknown-sidecar-id',
+    ])
+
     for (const id of BUILTIN_SIDECAR_PROVIDERS) {
-      expect(KNOWN_PROVIDER_LABELS).toHaveProperty(id)
       const label = formatProviderLabel(id)
       expect(label).toBeTruthy()
       expect(label).not.toMatch(/google-vertex|acpx|cli/i)
       expect(label).not.toMatch(/^(Openai|Openrouter|Xai|Zai|Nvidia|Deepseek)$/)
+    }
+  })
+
+  it('contains no removed Cursor, ACPX, or CLI alias mappings', () => {
+    for (const removed of ['cursor', 'acpx-cursor', 'cli-cursor', 'cursor-cli', 'claude-cli', 'gemini-cli']) {
+      expect(Object.hasOwn(KNOWN_PROVIDER_LABELS, removed)).toBe(false)
     }
   })
 
@@ -88,29 +105,45 @@ describe('formatProviderLabel', () => {
     expect(formatProviderLabel('anthropic')).toBe('Anthropic')
   })
 
-  it('strips legacy acpx- and *-cli wrappers instead of leaking them', () => {
-    expect(formatProviderLabel('acpx-cursor')).toBe('Cursor')
-    expect(formatProviderLabel('cli-cursor')).toBe('Cursor')
-    expect(formatProviderLabel('cursor-cli')).toBe('Cursor')
-    expect(formatProviderLabel('claude-cli')).toBe('Claude')
-    expect(formatProviderLabel('gemini-cli')).toBe('Gemini')
-  })
-
-  it('preserves operator-configured casing for custom models.json providers consistently', () => {
-    const originalIds = { mygateway: 'MyGateway', acmeai: 'AcmeAI' }
-    // Folded catalog key + originalIds (dropdown options) matches raw casing (selected chips).
+  it('preserves operator-configured casing and affixes for custom models.json providers', () => {
+    const originalIds = extractOriginalProviderIds({
+      MyGateway: [],
+      AcmeAI: [],
+      'MyGateway-CLI': [],
+      'cli-proxy': [],
+    })
     expect(formatProviderLabel('mygateway', originalIds)).toBe('MyGateway')
     expect(formatProviderLabel('MyGateway')).toBe('MyGateway')
-    expect(formatProviderLabel('MyGateway', originalIds)).toBe('MyGateway')
     expect(formatProviderLabel('acmeai', originalIds)).toBe('AcmeAI')
-    // Lowercase-only unknown/legacy identifiers fall back to clean title case.
-    expect(formatProviderLabel('legacy')).toBe('Legacy')
+    expect(formatProviderLabel('mygateway-cli', originalIds)).toBe('MyGateway-CLI')
+    expect(formatProviderLabel('cli-proxy', originalIds)).toBe('Cli Proxy')
     expect(formatProviderLabel('')).toBe('')
+  })
+
+  it('does not collide with Object.prototype properties such as constructor or toString', () => {
+    expect(formatProviderLabel('constructor')).toBe('Constructor')
+    expect(formatProviderLabel('toString')).toBe('toString')
+    expect(buildProviderOptions(['constructor', 'toString', 'openai'])).toEqual([
+      { value: 'constructor', label: 'Constructor' },
+      { value: 'openai', label: 'OpenAI' },
+      { value: 'tostring', label: 'toString' },
+    ])
   })
 })
 
-describe('buildProviderOptions', () => {
-  it('maps built-in sidecar ids and custom providers through the shared label table sorted by label', () => {
+describe('formatProviderModelLabel', () => {
+  it('formats provider and optional model consistently using originalIds', () => {
+    const originalIds = extractOriginalProviderIds({ AcmeAI: [] })
+    expect(formatProviderModelLabel('google-vertex-claude', 'claude-sonnet-4-6')).toBe('Claude / claude-sonnet-4-6')
+    expect(formatProviderModelLabel('acmeai', 'model-1', originalIds)).toBe('AcmeAI / model-1')
+    expect(formatProviderModelLabel('acmeai', 'model-1', originalIds, '/')).toBe('AcmeAI/model-1')
+    expect(formatProviderModelLabel('openai', '')).toBe('OpenAI')
+    expect(formatProviderModelLabel(undefined, 'gpt-5')).toBe('')
+  })
+})
+
+describe('buildProviderOptions & disambiguateProviderLabels', () => {
+  it('maps built-in sidecar ids and custom providers sorted by label', () => {
     expect(buildProviderOptions([])).toEqual([])
     expect(
       buildProviderOptions(
@@ -124,6 +157,17 @@ describe('buildProviderOptions', () => {
       { value: 'mygateway', label: 'MyGateway' },
       { value: 'openai', label: 'OpenAI' },
     ])
+  })
+
+  it('disambiguates distinct provider ids that share a public label in the same catalog', () => {
+    expect(buildProviderOptions(['google', 'google-vertex', 'openai'])).toEqual([
+      { value: 'google', label: 'Gemini (API)' },
+      { value: 'google-vertex', label: 'Gemini (Vertex)' },
+      { value: 'openai', label: 'OpenAI' },
+    ])
+    expect(disambiguateProviderLabels(['google-vertex'])).toEqual({
+      'google-vertex': 'Gemini',
+    })
   })
 
   it('normalizes current selection casing and whitespace', () => {

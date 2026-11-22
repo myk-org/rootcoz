@@ -72,12 +72,14 @@ interface PeerAnalysisSummaryProps {
   failures: FailureAnalysis[]
   childJobAnalyses?: ChildJobAnalysis[]
   repoUrls: RepoUrl[]
+  originalIds?: Readonly<Record<string, string>>
 }
 
 export function PeerAnalysisSummary({
   failures,
   childJobAnalyses,
   repoUrls,
+  originalIds,
 }: PeerAnalysisSummaryProps) {
   const [expanded, setExpanded] = useState(false)
 
@@ -87,8 +89,8 @@ export function PeerAnalysisSummary({
   )
 
   const participatingAis = useMemo(
-    () => getPeerAiLabels(debateFailures),
-    [debateFailures],
+    () => getPeerAiLabels(debateFailures, originalIds),
+    [debateFailures, originalIds],
   )
   const consensusCount = useMemo(
     () => debateFailures.filter((d) => d.debate.consensus_reached).length,
@@ -145,7 +147,7 @@ export function PeerAnalysisSummary({
       {expanded && (
         <div className="border-t border-border-muted p-4 space-y-4">
           {debateFailures.map(({ id, testName, siblingTestNames, jobLabel, debate, primaryUsage }) => (
-            <DebateEntry key={id} testName={testName} siblingTestNames={siblingTestNames} jobLabel={jobLabel} debate={debate} primaryUsage={primaryUsage} repoUrls={repoUrls} />
+            <DebateEntry key={id} testName={testName} siblingTestNames={siblingTestNames} jobLabel={jobLabel} debate={debate} primaryUsage={primaryUsage} repoUrls={repoUrls} originalIds={originalIds} />
           ))}
         </div>
       )}
@@ -154,7 +156,7 @@ export function PeerAnalysisSummary({
 }
 
 /** A single failure's debate entry within the summary. */
-function DebateEntry({ testName, siblingTestNames, jobLabel, debate, primaryUsage, repoUrls }: { testName: string; siblingTestNames: string[]; jobLabel: string; debate: PeerDebate; primaryUsage?: FailureAnalysis['token_usage']; repoUrls: RepoUrl[] }) {
+function DebateEntry({ testName, siblingTestNames, jobLabel, debate, primaryUsage, repoUrls, originalIds }: { testName: string; siblingTestNames: string[]; jobLabel: string; debate: PeerDebate; primaryUsage?: FailureAnalysis['token_usage']; repoUrls: RepoUrl[]; originalIds?: Readonly<Record<string, string>> }) {
   const [timelineOpen, setTimelineOpen] = useState(false)
   const groupedRounds = useMemo(() => groupPeerRounds(debate.rounds), [debate.rounds])
 
@@ -213,7 +215,7 @@ function DebateEntry({ testName, siblingTestNames, jobLabel, debate, primaryUsag
               </p>
               <div className="space-y-2">
                 {entries.map((entry, index) => (
-                  <PeerRoundEntry key={`r${roundNum}-${index}`} entry={entry} repoUrls={repoUrls} primaryUsage={primaryUsage} compact />
+                  <PeerRoundEntry key={`r${roundNum}-${index}`} entry={entry} repoUrls={repoUrls} primaryUsage={primaryUsage} originalIds={originalIds} compact />
                 ))}
               </div>
             </div>

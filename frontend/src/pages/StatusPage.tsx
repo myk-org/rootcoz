@@ -15,7 +15,8 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { OriginJobBanner } from '@/components/shared/ReanalysisBanner'
-import { formatProviderLabel } from '@/lib/aiProviders'
+import { formatProviderModelLabel } from '@/lib/aiProviders'
+import { useCachedOriginalIds } from '@/lib/useProviderOptions'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { useAuth } from '@/lib/auth'
 
@@ -295,9 +296,10 @@ export function StatusPage() {
   const displayStatus = isTimeout ? 'timeout' : status
   const queuedAtDisplay = data?.created_at ? formatTimestamp(data.created_at) : null
 
+  const originalProviderIds = useCachedOriginalIds()
   const params = data?.result?.request_params
   const mainAi = params?.ai_provider && params?.ai_model
-    ? `${formatProviderLabel(params.ai_provider)} / ${params.ai_model}`
+    ? formatProviderModelLabel(params.ai_provider, params.ai_model, originalProviderIds)
     : null
   const peers = params?.peer_ai_configs
   const hasPeers = !!peers?.length
@@ -346,7 +348,7 @@ export function StatusPage() {
               <StatusChip status={displayStatus} />
               {data.result.request_params?.ai_provider && (
                 <Badge variant="outline" className="text-[10px]">
-                  {formatProviderLabel(data.result.request_params.ai_provider)}{data.result.request_params.ai_model ? ` / ${data.result.request_params.ai_model}` : ''}
+                  {formatProviderModelLabel(data.result.request_params.ai_provider, data.result.request_params.ai_model, originalProviderIds)}
                 </Badge>
               )}
               <div className="ml-auto flex items-center gap-3">
@@ -543,7 +545,7 @@ export function StatusPage() {
                     <div className="flex flex-col items-end gap-0.5">
                       {peers!.map((p, i) => (
                         <span key={i} className="font-mono text-xs">
-                          {formatProviderLabel(p.ai_provider)} / {p.ai_model}
+                          {formatProviderModelLabel(p.ai_provider, p.ai_model, originalProviderIds)}
                         </span>
                       ))}
                     </div>

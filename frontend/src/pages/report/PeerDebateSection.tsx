@@ -10,9 +10,10 @@ interface PeerDebateSectionProps {
   debate: PeerDebate
   repoUrls: RepoUrl[]
   primaryUsage?: FailureAnalysis['token_usage']
+  originalIds?: Readonly<Record<string, string>>
 }
 
-export function PeerDebateSection({ debate, repoUrls, primaryUsage }: PeerDebateSectionProps) {
+export function PeerDebateSection({ debate, repoUrls, primaryUsage, originalIds }: PeerDebateSectionProps) {
   const [expanded, setExpanded] = useState(false)
 
   const groupedRounds = groupPeerRounds(debate.rounds)
@@ -50,7 +51,7 @@ export function PeerDebateSection({ debate, repoUrls, primaryUsage }: PeerDebate
               </p>
               <div className="space-y-2">
                 {entries.map((entry, i) => (
-                  <PeerRoundEntry key={`${entry.role}-${entry.ai_provider}-${i}`} entry={entry} repoUrls={repoUrls} primaryUsage={primaryUsage} />
+                  <PeerRoundEntry key={`${entry.role}-${entry.ai_provider}-${i}`} entry={entry} repoUrls={repoUrls} primaryUsage={primaryUsage} originalIds={originalIds} />
                 ))}
               </div>
             </div>

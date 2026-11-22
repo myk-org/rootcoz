@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { PeerRound, TokenUsageSummary } from '@/types'
-import { formatProviderLabel } from '@/lib/aiProviders'
+import { formatProviderModelLabel } from '@/lib/aiProviders'
 import type { RepoUrl } from '@/lib/autoLink'
 import { Badge } from '@/components/ui/badge'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
@@ -12,9 +12,10 @@ interface PeerRoundEntryProps {
   repoUrls: RepoUrl[]
   compact?: boolean
   primaryUsage?: TokenUsageSummary | null
+  originalIds?: Readonly<Record<string, string>>
 }
 
-export function PeerRoundEntry({ entry, repoUrls, compact = false, primaryUsage }: PeerRoundEntryProps) {
+export function PeerRoundEntry({ entry, repoUrls, compact = false, primaryUsage, originalIds }: PeerRoundEntryProps) {
   const [detailsExpanded, setDetailsExpanded] = useState(false)
   const isOrchestrator = entry.role === 'orchestrator'
 
@@ -31,7 +32,7 @@ export function PeerRoundEntry({ entry, repoUrls, compact = false, primaryUsage 
           {isOrchestrator ? (compact ? 'Main AI' : 'Orchestrator') : 'Peer'}
         </Badge>
         <span className="font-mono text-[10px] text-text-tertiary">
-          {formatProviderLabel(entry.ai_provider)}/{entry.ai_model}
+          {formatProviderModelLabel(entry.ai_provider, entry.ai_model, originalIds, '/')}
         </span>
         {entry.classification && (
           <ClassificationBadge classification={entry.classification} className="text-[10px]" />
