@@ -216,7 +216,7 @@ function ReportContent() {
         if (classificationsResult.status === 'fulfilled') {
           const classMap: Record<string, string> = {}
           const sorted = [...(classificationsResult.value.classifications ?? [])]
-            .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+            .sort((a, b) => parseApiTimestamp(b.created_at).getTime() - parseApiTimestamp(a.created_at).getTime())
           for (const c of sorted) {
             // Use composite key to handle same test_name across different child jobs
             const key = reviewKey(c.test_name, c.job_name, c.child_build_number)
