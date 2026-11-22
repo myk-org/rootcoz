@@ -8,8 +8,10 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import { ChatMarkdown } from '@/components/shared/ChatMarkdown'
 import { Sparkles } from 'lucide-react'
 import { api } from '@/lib/api'
+import { isSafeHref } from '@/lib/autoLink'
 
 const LS_SEEN_KEY = 'rootcoz_last_seen_changelog_version'
 const LS_UPDATE_KEY = 'rootcoz_last_dismissed_update'
@@ -35,35 +37,11 @@ interface ReleaseData extends ReleaseSummary {
   releases?: ReleaseSummary[]
 }
 
-interface ReleaseGroup extends ReleaseSummary {
-  entries: { title: string; description: string }[]
-}
-
-/** Parse GitHub release markdown body into bullet points */
-function parseReleaseEntries(body: string | null | undefined): { title: string; description: string }[] {
-  const entries: { title: string; description: string }[] = []
-  for (const line of (body ?? '').split('\n')) {
-    // Match "- **Title** — Description (#123)" or "- **Title** - Description"
-    const match = line.match(/^-\s+\*\*(.+?)\*\*\s*[—\-–]\s*(.+)/)
-    if (match) {
-      entries.push({ title: match[1].trim(), description: match[2].trim() })
-      continue
-    }
-
-    // Fallback: any markdown bullet line
-    const bullet = line.match(/^-\s+(.+)/)
-    if (bullet) {
-      entries.push({ title: bullet[1].trim(), description: '' })
-    }
-  }
-  return entries
-}
-
 export function WhatsNewDialog() {
   const [open, setOpen] = useState(false)
   const [dontShowAgain, setDontShowAgain] = useState(false)
   const [release, setRelease] = useState<ReleaseData | null>(null)
-  const [groups, setGroups] = useState<ReleaseGroup[]>([])
+  const [groups, setGroups] = useState<ReleaseSummary[]>([])
   const [linkUrl, setLinkUrl] = useState('')
 
   useEffect(() => {
@@ -117,11 +95,10 @@ export function WhatsNewDialog() {
         // Grouped rendering when the backend returned aggregated releases;
         // fall back to the single top-level release body otherwise
         const summaries = data.releases?.length ? data.releases : [data]
-        const parsed = summaries.map((r) => ({ ...r, entries: parseReleaseEntries(r.body) }))
-        // What's New needs at least one entry across all groups to show;
-        // the update nag opens even for prose-only or empty release notes
+        // What's New needs at least one non-empty release body across all
+        // groups to show; the update nag opens even for empty release notes
         // (title + link still inform)
-        if (!parsed.some((g) => g.entries.length > 0) && !data.update_available) return
+        if (!summaries.some((g) => (g.body ?? '').trim().length > 0) && !data.update_available) return
 
         // "View full release notes" points at the newest release (last in
         // the oldest→newest list), or the top-level release when ungrouped
@@ -130,7 +107,7 @@ export function WhatsNewDialog() {
           : data
 
         setRelease(data)
-        setGroups(parsed)
+        setGroups(summaries)
         setLinkUrl(newest.html_url || data.html_url)
         setOpen(true)
       } catch {
@@ -192,22 +169,19 @@ export function WhatsNewDialog() {
                     : `v${group.version}`}
                 </p>
               )}
-              <ul className="space-y-3" role="list">
-                {group.entries.map((entry, idx) => (
-                  <li key={idx} className="flex gap-3">
-                    <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-signal-blue" />
-                    <div>
-                      <p className="text-sm font-medium text-text-primary">{entry.title}</p>
-                      <p className="text-xs text-text-secondary">{entry.description}</p>
-                    </div>
-                  </li>
-                ))}
-              </ul>
+              {group.body?.trim() && (
+                <ChatMarkdown
+                  content={group.body}
+                  allowArtifactLinks={false}
+                  allowImages={false}
+                  className="prose-h1:text-base prose-h2:text-sm prose-h3:text-sm"
+                />
+              )}
             </section>
           ))}
         </div>
 
-        {linkUrl && (
+        {linkUrl && isSafeHref(linkUrl) && (
           <p className="text-xs text-text-tertiary">
             <a href={linkUrl} target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">
               View full release notes →

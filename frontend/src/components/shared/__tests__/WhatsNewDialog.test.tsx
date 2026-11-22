@@ -430,12 +430,12 @@ describe('WhatsNewDialog', () => {
       unmount()
     })
 
-    it('What\'s New with no parsed entries across all groups does not open', async () => {
+    it('What\'s New with empty release bodies across all groups does not open', async () => {
       mockApiGet.mockResolvedValue({
         ...whatsNewAggregated,
-        body: 'Prose only, no bullets.',
+        body: '   ',
         releases: [
-          { ...whatsNewAggregated.releases[0], body: 'Prose only, no bullets.' },
+          { ...whatsNewAggregated.releases[0], body: '   ' },
           { ...whatsNewAggregated.releases[1], body: '' },
         ],
       })
@@ -445,6 +445,84 @@ describe('WhatsNewDialog', () => {
       })
       await new Promise((r) => setTimeout(r, 50))
       expect(screen.queryByText("What's New")).not.toBeInTheDocument()
+    })
+  })
+
+  describe('markdown rendering (#642)', () => {
+    const richBody = [
+      '### Features',
+      '',
+      '- **Shared dashboard and report filters.** Both pages share one filter bar.',
+      '- **Visible analysis queue.** `max_concurrent_analyses` defaults to 10 in `pending` state. See [the docs](https://example.com/release-notes).',
+      '- External image: ![Screenshot](https://tracker.example/pixel.png)',
+      '- Unsafe link: [click me](javascript:alert(1))',
+      '- Raw HTML: <img src="x" onerror="alert(1)" /><script>window.__xss = true</script>',
+    ].join('\n')
+
+    it('renders headings, bold text, inline code, lists, and safe links as semantic elements', async () => {
+      mockApiGet.mockResolvedValue({
+        ...upToDateRelease,
+        version: '4.15.0',
+        server_version: '4.15.0',
+        body: richBody,
+      })
+
+      render(<WhatsNewDialog />)
+
+      await waitFor(() => {
+        expect(screen.getByText("What's New")).toBeInTheDocument()
+      })
+
+      const dialog = screen.getByRole('dialog')
+
+      // Heading renders as semantic h3
+      const heading = screen.getByRole('heading', { level: 3, name: 'Features' })
+      expect(heading).toBeInTheDocument()
+
+      // Bold text renders inside <strong>, never literal **
+      const boldEl = screen.getByText('Shared dashboard and report filters.')
+      expect(boldEl.tagName).toBe('STRONG')
+      expect(dialog.textContent).not.toContain('**')
+
+      // Inline code renders inside <code>, never literal backticks
+      const codeEl = screen.getByText('max_concurrent_analyses')
+      expect(codeEl.tagName).toBe('CODE')
+      expect(screen.getByText('pending').tagName).toBe('CODE')
+      expect(dialog.textContent).not.toContain('`')
+
+      // Bullet list renders semantic <ul> / <li> elements
+      expect(dialog.querySelectorAll('ul li').length).toBeGreaterThanOrEqual(2)
+
+      // External link opens in a new tab with rel="noopener noreferrer"
+      const docsLink = screen.getByRole('link', { name: 'the docs' })
+      expect(docsLink).toHaveAttribute('href', 'https://example.com/release-notes')
+      expect(docsLink).toHaveAttribute('target', '_blank')
+      expect(docsLink).toHaveAttribute('rel', 'noopener noreferrer')
+
+      // Unsafe javascript: href is neutralized into a plain span
+      const unsafeLink = screen.getByText('click me')
+      expect(unsafeLink.tagName).toBe('SPAN')
+      expect(dialog.querySelector('a[href^="javascript:"]')).toBeNull()
+
+      // Markdown images do not silently fetch third-party URLs; they render as safe links
+      const imageLink = screen.getByRole('link', { name: 'Screenshot' })
+      expect(imageLink).toHaveAttribute('href', 'https://tracker.example/pixel.png')
+      expect(imageLink).toHaveAttribute('target', '_blank')
+      expect(imageLink).toHaveAttribute('rel', 'noopener noreferrer')
+
+      // Raw embedded HTML and Markdown images never produce <img> or <script> DOM nodes
+      expect(dialog.querySelector('img')).toBeNull()
+      expect(dialog.querySelector('script')).toBeNull()
+      expect((window as unknown as Record<string, unknown>).__xss).toBeUndefined()
+
+      // Scrollable container and "View full release notes" link remain intact
+      const scrollContainer = dialog.querySelector('.overflow-y-auto')
+      expect(scrollContainer).not.toBeNull()
+      expect(scrollContainer?.className).toContain('max-h-[50vh]')
+      const fullNotesLink = screen.getByRole('link', { name: 'View full release notes →' })
+      expect(fullNotesLink).toHaveAttribute('href', upToDateRelease.html_url)
+      expect(fullNotesLink).toHaveAttribute('target', '_blank')
+      expect(fullNotesLink).toHaveAttribute('rel', 'noopener noreferrer')
     })
   })
 })

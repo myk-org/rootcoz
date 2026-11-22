@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, type FormEvent } from 'react'
-import { api, isExpectedTokenSyncError } from '@/lib/api'
+import { api, extractApiDetail, isExpectedTokenSyncError } from '@/lib/api'
 import { persistTokensToServer } from '@/lib/tokens'
 import { setUsername, getUsername } from '@/lib/cookies'
 import { Card, CardContent } from '@/components/ui/card'
@@ -76,11 +76,18 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       setJiraTokenValue((prev) => prev || server.jt)
       setJiraSaTokenValue((prev) => prev || server.jst)
     } catch (err) {
-      // 401 (no cookie yet) and 404 (user not registered) are expected; log anything else.
+      // 401 (no cookie yet) and 404 (account has no DB row, e.g. unregistered
+      // user or bootstrap admin) are expected and skip console.error noise;
+      // still surface the server's detail in the banner so no failure is silent.
       if (!isExpectedTokenSyncError(err)) {
         console.error('Failed to hydrate tokens from server:', err)
       }
-      setTokensError('Could not read your saved tracker credentials.')
+      const detail = extractApiDetail(err)
+      setTokensError(
+        detail
+          ? `Could not read your saved tracker credentials: ${detail}`
+          : 'Could not read your saved tracker credentials.',
+      )
     }
   }, [])
 
@@ -105,7 +112,7 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       const result = await api.post<{ new_api_key: string }>('/api/auth/rotate-key')
       setNewApiKey(result.new_api_key)
     } catch (err) {
-      setRotateError(err instanceof Error ? err.message : 'Failed to rotate key')
+      setRotateError(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to rotate key'))
     } finally {
       setRotating(false)
     }
