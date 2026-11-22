@@ -113,6 +113,40 @@ def domain_allowed(domain: str, allowed: frozenset[str]) -> bool:
     return any(domain == entry or domain.endswith("." + entry) for entry in allowed)
 
 
+def stored_identity_domain_refusal(email: str | None, settings: Settings) -> str | None:
+    """Why a *linked* identity's address no longer satisfies ``SSO_ALLOWED_DOMAINS``.
+
+    The verification rules are not re-run: the address was checked when the
+    identity was linked, and what a domain revocation has to reach is the address
+    itself. This is the login-time policy (:func:`check_domain`) applied to an
+    identity that outlived the last sign-in — a device approval happens against a
+    live session, so without this a removed domain would still mint a CLI session.
+
+    Args:
+        email: The address recorded on the linked identity.
+        settings: Application settings (``SSO_ALLOWED_DOMAINS``).
+
+    Returns:
+        ``domain_not_allowed`` when the list is set and the address does not match
+        it, else ``None``. A malformed list is refused the same way the login
+        path refuses it, rather than raising out of the poll.
+    """
+    try:
+        allowed = settings.sso_allowed_domains_set
+    except ValueError:
+        logger.error("SSO domain allow-list is malformed; refusing the device sign-in")
+        return "callback_misconfigured"
+    if not allowed:
+        return None
+    address = (email or "").strip().lower()
+    if "@" not in address:
+        return "domain_not_allowed"
+    domain = canonical_domain(address.rsplit("@", 1)[-1])
+    if domain is None or not domain_allowed(domain, allowed):
+        return "domain_not_allowed"
+    return None
+
+
 def check_domain(claims: ClaimSet, settings: Settings) -> None:
     """Apply the deployment's SSO domain policy to one login.
 

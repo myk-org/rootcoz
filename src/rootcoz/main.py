@@ -1766,37 +1766,58 @@ _AUDIT_SAFE_DETAIL_KEYS: frozenset[str] = frozenset(
 # (`auth.sso_device_started`) is a success row that is equally cheap to produce.
 # The budget itself is `audit_auth_failure_max_per_minute`, whose name predates
 # these members and is kept for config compatibility.
-_AUDIT_THROTTLED_ACTIONS: frozenset[str] = frozenset(
-    {
-        "auth.login_failed",
-        "auth.login_blocked",
-        # The SSO flow has the same unauthenticated-refusal surface (callback
-        # refusals, ticket failures, /link credential failures), so its rows get
-        # the same per-minute guard.
-        "auth.sso_login_failed",
-        "auth.sso_login_blocked",
-        # Device-flow start is an anonymous public POST that writes a row per
-        # call (the code itself is created either way), so it needs the same
-        # per-minute budget — otherwise the trail can be filled without a
-        # credential.
-        "auth.sso_device_started",
-        # SSO login/link start is an anonymous public GET whose provider names are
-        # enumerable from /api/auth/sso/providers: without the budget, anyone can
-        # add rows at request rate.
-        "auth.sso_login_start",
-        # A refused device approval costs one row per call and its 404 branch is
-        # reached by trying codes: the trail must not be fillable that way. The
-        # row is written in the shared code-lookup helper, so the budget is the
-        # one place a flood is stopped.
-        "auth.sso_device_approve_refused",
-        # A proxy name outside ALLOWED_USERS is refused on /login and again on
-        # every request the middleware resolves, so an unlisted visitor writes a
-        # row per request/retry. The same per-minute budget as the other auth
-        # refusals applies; a dropped row never changes the refusal itself, which
-        # is a decision of the auth strategy, not of this audit row.
-        "auth.proxy_provision_refused",
-    }
+#: The throttle budget is spent **per family**, never across them. A single shared
+#: budget let an anonymous flood of SSO starts drop the `auth.login_failed` rows
+#: an incident is reconstructed from — the noisy family must not be able to spend
+#: the quiet one's allowance.
+_AUDIT_THROTTLE_GROUPS: dict[str, frozenset[str]] = {
+    # What a credential guesser produces: the trail an investigation reads. The
+    # SSO flow has the same unauthenticated-refusal surface (callback refusals,
+    # ticket failures, /link credential failures), so it belongs here.
+    "credential_failure": frozenset(
+        {
+            "auth.login_failed",
+            "auth.login_blocked",
+            "auth.sso_login_failed",
+            "auth.sso_login_blocked",
+        }
+    ),
+    # Anonymous entry points a stranger can drive at request rate. Each row is
+    # cheap to produce without a credential: a device-flow start is a public POST,
+    # an SSO login/link start is a public GET whose provider names are enumerable
+    # from /api/auth/sso/providers, a refused approval is reached by trying codes,
+    # and a proxy name outside ALLOWED_USERS is refused on every request.
+    "anonymous_start": frozenset(
+        {
+            "auth.sso_device_started",
+            "auth.sso_login_start",
+            "auth.sso_device_approve_refused",
+            "auth.proxy_provision_refused",
+        }
+    ),
+}
+
+#: Union of the families: what the throttle applies to at all. Kept derived, so a
+#: new action cannot join one list and be missed by the other.
+_AUDIT_THROTTLED_ACTIONS: frozenset[str] = frozenset().union(
+    *_AUDIT_THROTTLE_GROUPS.values()
 )
+
+
+def audit_throttle_actions(action: str) -> tuple[str, ...] | None:
+    """The actions sharing ``action``'s per-minute budget, or ``None``.
+
+    Args:
+        action: The audit action about to be written.
+
+    Returns:
+        The family's actions (what the budget counts), or ``None`` when the action
+        is not throttled at all.
+    """
+    for actions in _AUDIT_THROTTLE_GROUPS.values():
+        if action in actions:
+            return tuple(sorted(actions))
+    return None
 
 
 # Credential-shaped content inside a free-text detail value (#379). Each
@@ -2071,12 +2092,13 @@ async def record_audit(
     logger.info(f"[AUDIT] {message}", extra={"dedup_exempt": True})
     resolved_actor = actor or "anonymous"
     throttle: storage.AuditThrottle | None = None
-    if action in _AUDIT_THROTTLED_ACTIONS:
+    family = audit_throttle_actions(action)
+    if family is not None:
         limit = get_settings().audit_auth_failure_max_per_minute
         if limit > 0:
             throttle = storage.AuditThrottle(
                 limit=limit,
-                actions=tuple(sorted(_AUDIT_THROTTLED_ACTIONS)),
+                actions=family,
                 since=storage.audit_timestamp(
                     datetime.now(UTC) - timedelta(seconds=60)
                 ),
@@ -20677,6 +20699,20 @@ async def _redeem_claimed_device_code(
             request, provider, f"account_{block_reason}", subject=username
         )
         return JSONResponse(content={"status": "denied"})
+
+    # A domain revocation must reach a live session too. Approval happens against
+    # a browser session, so the domain check that guards every SSO sign-in is
+    # re-applied here against the linked identity that approved — otherwise a
+    # removed domain still mints a CLI session until that session expires.
+    if provider is not None:
+        identities = await storage.list_user_identities(username)
+        approving = next((i for i in identities if i.get("provider") == provider), None)
+        refusal = auth_identity.stored_identity_domain_refusal(
+            (approving or {}).get("email"), settings
+        )
+        if refusal is not None:
+            await _audit_sso_refusal(request, provider, refusal, subject=username)
+            return JSONResponse(content={"status": "denied"})
 
     # A row-less bootstrap admin is an administrator by construction, exactly as
     # ``/api/auth/login`` resolves it; everybody else is resolved from their row.

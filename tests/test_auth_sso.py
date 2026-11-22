@@ -4190,6 +4190,72 @@ async def test_an_account_that_became_unusable_is_denied_at_redemption(
         assert polled.json()["status"] == "denied"
 
 
+async def test_a_revoked_domain_does_not_mint_a_device_session(
+    temp_db_path: Path,
+) -> None:
+    """A domain removed while the browser session lives must reach the CLI too.
+
+    Approval runs on a live session, so without a re-check here a removed domain
+    would keep minting fresh device sessions until that session expired — the
+    opposite of "removing a domain cuts off an already-linked account".
+    """
+    env = {**_SSO_ENV, "SSO_ALLOWED_DOMAINS": "redhat.com"}
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("alice", status="active")
+        await storage.add_user_identity(
+            "alice", "google", "sub-1", email="alice@elsewhere.example"
+        )
+        session = await storage.create_session("alice", auth_provider="google")
+        started = _start_device(client)
+        client.cookies.set("rootcoz_session", session)
+        approved = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
+        )
+        assert approved.status_code == 200, approved.text
+        client.cookies.clear()
+
+        polled = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        )
+
+        assert polled.json()["status"] == "denied"
+        rows = [
+            r
+            for r in await _audit_actions(temp_db_path)
+            if r["action"].startswith("auth.sso_")
+        ]
+        assert any("domain_not_allowed" in json.dumps(r) for r in rows), rows
+
+
+async def test_an_allowed_domain_still_mints_the_device_session(
+    temp_db_path: Path,
+) -> None:
+    """The control: the same flow with an admitted domain hands over a token."""
+    env = {**_SSO_ENV, "SSO_ALLOWED_DOMAINS": "redhat.com"}
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("alice", status="active")
+        await storage.add_user_identity(
+            "alice", "google", "sub-1", email="alice@redhat.com"
+        )
+        session = await storage.create_session("alice", auth_provider="google")
+        started = _start_device(client)
+        client.cookies.set("rootcoz_session", session)
+        client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
+        )
+        client.cookies.clear()
+
+        polled = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        )
+
+        assert polled.json()["status"] == "approved"
+
+
 async def test_a_downgrade_after_approval_is_not_undone_by_redemption(
     temp_db_path: Path,
 ) -> None:
