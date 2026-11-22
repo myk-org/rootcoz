@@ -50,6 +50,24 @@ function repoPathQualifier(normalizedUrl: string): string {
   }
 }
 
+function repoHostPathQualifier(normalizedUrl: string): string {
+  try {
+    const parsed = new URL(normalizedUrl)
+    const path = parsed.pathname.replace(/^\/+/, '')
+    return path ? `${parsed.host}/${path}` : parsed.host
+  } catch {
+    return normalizedUrl
+  }
+}
+
+function countLabels(items: Array<{ label: string }>): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const item of items) {
+    counts.set(item.label, (counts.get(item.label) ?? 0) + 1)
+  }
+  return counts
+}
+
 /**
  * Build deduplicated, stably-keyed repository picker options.
  *
@@ -97,20 +115,41 @@ export function buildRepoOptions(repos?: RepoEntry[]): RepoOption[] {
     urlCounts.set(entry.normalizedUrl, (urlCounts.get(entry.normalizedUrl) ?? 0) + 1)
   }
 
-  const labeled = unique.map((entry) => {
+  let labeled = unique.map((entry) => {
     const collides =
       (nameCounts.get(entry.name) ?? 0) > 1 ||
       (urlCounts.get(entry.normalizedUrl) ?? 0) > 1
     const label = collides && entry.normalizedRef
       ? `${entry.name} @ ${formatRepoRef(entry.normalizedRef)}`
       : entry.name
-    return { entry, label }
+    return { entry, baseLabel: label, label }
   })
 
-  // Fallback disambiguator if two distinct URLs still produce the same label (e.g. forks on the same branch).
-  const labelCounts = new Map<string, number>()
+  // If shortened commit SHAs collapse distinct refs onto the same label, expand them to full refs.
+  const refsByLabel = new Map<string, Set<string>>()
   for (const item of labeled) {
-    labelCounts.set(item.label, (labelCounts.get(item.label) ?? 0) + 1)
+    const refs = refsByLabel.get(item.label) ?? new Set<string>()
+    refs.add(item.entry.normalizedRef)
+    refsByLabel.set(item.label, refs)
+  }
+  labeled = labeled.map((item) => {
+    if ((refsByLabel.get(item.label)?.size ?? 0) > 1 && item.entry.normalizedRef) {
+      const expanded = `${item.entry.name} @ ${item.entry.normalizedRef}`
+      return { ...item, baseLabel: expanded, label: expanded }
+    }
+    return item
+  })
+
+  // Fallback disambiguators when distinct URLs still share a label (forks, mirrors on different hosts/schemes).
+  const qualifiers = [repoPathQualifier, repoHostPathQualifier, (url: string) => url]
+  for (const qualify of qualifiers) {
+    const labelCounts = countLabels(labeled)
+    if (!labeled.some((item) => (labelCounts.get(item.label) ?? 0) > 1)) break
+    labeled = labeled.map((item) =>
+      (labelCounts.get(item.label) ?? 0) > 1
+        ? { ...item, label: `${item.baseLabel} (${qualify(item.entry.normalizedUrl)})` }
+        : item,
+    )
   }
 
   return labeled.map(({ entry, label }) => ({
@@ -118,8 +157,6 @@ export function buildRepoOptions(repos?: RepoEntry[]): RepoOption[] {
     name: entry.name,
     url: entry.url,
     ref: entry.ref,
-    label: (labelCounts.get(label) ?? 0) > 1
-      ? `${label} (${repoPathQualifier(entry.normalizedUrl)})`
-      : label,
+    label,
   }))
 }

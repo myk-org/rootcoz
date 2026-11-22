@@ -107,4 +107,30 @@ describe('buildRepoOptions', () => {
     expect(options[1].label).toBe('cdi @ main (myfork/cdi)')
     expect(options[0].value).not.toBe(options[1].value)
   })
+
+  it('expands colliding 7-char SHA prefixes to full refs within the same repo', () => {
+    const shaA = '87b98b49e2c5802816cbb787dadac9475c0cab32' // pragma: allowlist secret
+    const shaB = '87b98b4000000000000000000000000000000001' // pragma: allowlist secret
+    const options = buildRepoOptions([
+      { name: 'cdi', url: 'https://github.com/kubevirt/cdi', ref: shaA },
+      { name: 'cdi', url: 'https://github.com/kubevirt/cdi', ref: shaB },
+    ])
+
+    expect(options).toHaveLength(2)
+    expect(options[0].label).toBe(`cdi @ ${shaA}`)
+    expect(options[1].label).toBe(`cdi @ ${shaB}`)
+    expect(options[0].label).not.toBe(options[1].label)
+  })
+
+  it('qualifies mirrors on different hosts that share path, name, and ref', () => {
+    const options = buildRepoOptions([
+      { name: 'cdi', url: 'https://github.com/kubevirt/cdi', ref: 'main' },
+      { name: 'cdi', url: 'https://gitlab.example.com/kubevirt/cdi', ref: 'main' },
+    ])
+
+    expect(options).toHaveLength(2)
+    expect(options[0].label).toBe('cdi @ main (github.com/kubevirt/cdi)')
+    expect(options[1].label).toBe('cdi @ main (gitlab.example.com/kubevirt/cdi)')
+    expect(options[0].label).not.toBe(options[1].label)
+  })
 })
