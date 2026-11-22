@@ -19,7 +19,7 @@ vi.mock('@/lib/auth', () => ({
   useAuth: () => ({ role: 'operator', isOperator: true, isViewer: false }),
 }))
 
-function makeResponse(allowUnreviewedPush: boolean): ResultResponse {
+function makeResponse(allowUnreviewedPush: boolean, jobName = 'gate-job'): ResultResponse {
   return {
     job_id: 'job-1',
     jenkins_url: null,
@@ -29,7 +29,7 @@ function makeResponse(allowUnreviewedPush: boolean): ResultResponse {
     result_url: null,
     result: {
       job_id: 'job-1',
-      job_name: 'gate-job',
+      job_name: jobName,
       build_number: 1,
       jenkins_url: null,
       status: 'completed',
@@ -71,10 +71,10 @@ function makeResponse(allowUnreviewedPush: boolean): ResultResponse {
 
 /** Renders the report with the given hatch state and returns a switch that
  *  flips it for subsequent result fetches. */
-function renderReport(allowUnreviewedPush: boolean) {
+function renderReport(allowUnreviewedPush: boolean, jobName = 'gate-job') {
   let hatchOn = allowUnreviewedPush
   vi.mocked(api.get).mockImplementation(async (path) => {
-    if (path === '/results/job-1') return makeResponse(hatchOn)
+    if (path === '/results/job-1') return makeResponse(hatchOn, jobName)
     if (path === '/results/job-1/comments') return { comments: [], reviews: {} }
     if (path === '/api/ai-models') return { providers: {} }
     if (path.startsWith('/history/classifications')) return { classifications: [] }
@@ -121,5 +121,10 @@ describe('report push-gate flag freshness', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /push to datadog/i })).toBeEnabled()
     })
+  })
+
+  it('renders the derived JUnit suite job_name on the report page heading', async () => {
+    renderReport(false, 'qe-ui-check-submit')
+    expect(await screen.findByText('qe-ui-check-submit')).toBeInTheDocument()
   })
 })

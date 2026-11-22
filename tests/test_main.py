@@ -1842,6 +1842,266 @@ class TestAnalyzeFailuresRawXml:
         )
 
 
+class TestFileJobNaming:
+    """Tests for JUnit suite-name derivation and explicit job_name on type=file (#637)."""
+
+    NAMED_XML = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<testsuite name="qe-ui-check-submit" tests="2" failures="1">'
+        '<testcase classname="tests.ui" name="test_submit" time="0.2">'
+        '<failure message="boom">traceback</failure>'
+        "</testcase>"
+        '<testcase classname="tests.ui" name="test_ok" time="0.1"/>'
+        "</testsuite>"
+    )
+    UNNAMED_XML = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<testsuite tests="1" failures="1">'
+        '<testcase classname="tests.ui" name="test_submit" time="0.2">'
+        '<failure message="boom">traceback</failure>'
+        "</testcase>"
+        "</testsuite>"
+    )
+    HOSTILE_SUITE_XML = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<testsuite name="../../etc/passwd" tests="1" failures="1">'
+        '<testcase classname="tests.ui" name="test_submit" time="0.2">'
+        '<failure message="boom">traceback</failure>'
+        "</testcase>"
+        "</testsuite>"
+    )
+
+    @pytest.mark.parametrize("endpoint", ["/analyze", "/submit"])
+    def test_suite_name_used_when_no_explicit_job_name(
+        self, test_client, endpoint: str
+    ) -> None:
+        payload: dict = {"type": "file", "raw_xml": self.NAMED_XML}
+        if endpoint == "/analyze":
+            payload.update({"ai_provider": "claude", "ai_model": "test-model"})
+        with patch(
+            "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+        ) as mock_process:
+            resp = test_client.post(endpoint, json=payload)
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        assert mock_process.await_args.kwargs["display_name"] == "qe-ui-check-submit"
+
+        result_resp = test_client.get(f"/results/{job_id}")
+        assert result_resp.status_code == 202
+        stored = result_resp.json()["result"]
+        assert stored["job_name"] == "qe-ui-check-submit"
+        assert stored["display_name"] == "qe-ui-check-submit"
+
+    @pytest.mark.parametrize("endpoint", ["/analyze", "/submit"])
+    def test_explicit_job_name_wins_over_suite_name(
+        self, test_client, endpoint: str
+    ) -> None:
+        payload: dict = {
+            "type": "file",
+            "raw_xml": self.NAMED_XML,
+            "job_name": "my-explicit-suite",
+        }
+        if endpoint == "/analyze":
+            payload.update({"ai_provider": "claude", "ai_model": "test-model"})
+        with patch(
+            "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+        ) as mock_process:
+            resp = test_client.post(endpoint, json=payload)
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        assert mock_process.await_args.kwargs["display_name"] == "my-explicit-suite"
+
+        result_resp = test_client.get(f"/results/{job_id}")
+        assert result_resp.status_code == 202
+        stored = result_resp.json()["result"]
+        assert stored["job_name"] == "my-explicit-suite"
+        assert stored["display_name"] == "my-explicit-suite"
+
+    def test_missing_suite_name_falls_back_to_file_analysis_id(
+        self, test_client
+    ) -> None:
+        data, mock_process = _post_analyze_queued(
+            test_client,
+            {
+                "type": "file",
+                "raw_xml": self.UNNAMED_XML,
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        job_id = data["job_id"]
+        expected = f"file-analysis-{job_id[:8]}"
+        assert mock_process.await_args.kwargs["display_name"] == expected
+
+        result_resp = test_client.get(f"/results/{job_id}")
+        assert result_resp.status_code == 202
+        stored = result_resp.json()["result"]
+        assert stored["job_name"] == expected
+
+    def test_hostile_xml_suite_name_falls_back_safely(self, test_client) -> None:
+        data, mock_process = _post_analyze_queued(
+            test_client,
+            {
+                "type": "file",
+                "raw_xml": self.HOSTILE_SUITE_XML,
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        job_id = data["job_id"]
+        expected = f"file-analysis-{job_id[:8]}"
+        assert mock_process.await_args.kwargs["display_name"] == expected
+        result_resp = test_client.get(f"/results/{job_id}")
+        assert result_resp.json()["result"]["job_name"] == expected
+
+    @pytest.mark.parametrize("endpoint", ["/analyze", "/submit"])
+    @pytest.mark.parametrize(
+        "hostile_name",
+        [
+            "../etc/passwd",
+            "folder/job",
+            "folder\\job",
+            "suite..name",
+            "suite\x00evil",
+            "<script>alert(1)</script>",
+            "x" * 501,
+            "   ",
+        ],
+    )
+    def test_hostile_explicit_job_name_rejected_with_422(
+        self, test_client, endpoint: str, hostile_name: str
+    ) -> None:
+        payload: dict = {
+            "type": "file",
+            "raw_xml": self.NAMED_XML,
+            "job_name": hostile_name,
+        }
+        if endpoint == "/analyze":
+            payload.update({"ai_provider": "claude", "ai_model": "test-model"})
+        resp = test_client.post(endpoint, json=payload)
+        assert resp.status_code == 422
+
+    def test_submit_completes_and_preserves_suite_name_in_dashboard_and_export(
+        self, test_client
+    ) -> None:
+        """Suite name flows into stored result, dashboard row, and ExportContext."""
+        from rootcoz.config import get_settings
+        from rootcoz.main import _build_export_context, _process_ci_source_analysis
+
+        with patch(
+            "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+        ) as mock_process:
+            resp = test_client.post(
+                "/submit",
+                json={"type": "file", "raw_xml": self.NAMED_XML},
+            )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        asyncio.run(_process_ci_source_analysis(**mock_process.await_args.kwargs))
+
+        result_resp = test_client.get(f"/results/{job_id}")
+        assert result_resp.status_code == 200
+        body = result_resp.json()
+        assert body["status"] == "completed"
+        assert body["result"]["job_name"] == "qe-ui-check-submit"
+
+        dash_resp = test_client.get("/api/dashboard")
+        assert dash_resp.status_code == 200
+        matching = [j for j in dash_resp.json() if j["job_id"] == job_id]
+        assert len(matching) == 1
+        assert matching[0]["job_name"] == "qe-ui-check-submit"
+
+        ctx = asyncio.run(
+            _build_export_context(
+                job_id=job_id,
+                result_data=body["result"],
+                settings=get_settings(),
+                fetch_history=False,
+                fetch_tracked_in_links=False,
+            )
+        )
+        assert ctx.job_name == "qe-ui-check-submit"
+
+        from rootcoz.storage import get_test_history, populate_failure_history
+
+        asyncio.run(populate_failure_history(job_id, body["result"]))
+        history = asyncio.run(
+            get_test_history("tests.ui.test_submit", job_name="qe-ui-check-submit")
+        )
+        assert history["failures"] == 1
+        assert history["recent_runs"][0]["job_name"] == "qe-ui-check-submit"
+
+    def test_reanalyze_restores_explicit_file_job_name(self) -> None:
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.file_source import FileSource
+
+        body = UnifiedAnalyzeRequest(
+            type="file", raw_xml=self.NAMED_XML, job_name="explicit-suite"
+        )
+        params = FileSource.build_request_params(body, None, {})
+        assert params["job_name"] == "explicit-suite"
+        restored = FileSource.restore_reanalyze_fields(params)
+        assert restored == {"raw_xml": self.NAMED_XML, "job_name": "explicit-suite"}
+
+    def test_xml_suite_literally_named_file_analysis_does_not_get_id_suffix(
+        self, test_client
+    ) -> None:
+        xml = (
+            '<testsuite name="file-analysis" tests="1" failures="1">'
+            '<testcase name="t1"><failure message="boom"/></testcase>'
+            "</testsuite>"
+        )
+        with patch(
+            "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+        ) as mock_process:
+            resp = test_client.post("/submit", json={"type": "file", "raw_xml": xml})
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        assert mock_process.await_args.kwargs["display_name"] == "file-analysis"
+        stored = test_client.get(f"/results/{job_id}").json()["result"]
+        assert stored["job_name"] == "file-analysis"
+
+    def test_raw_request_with_stray_job_name_still_gets_unique_fallback_suffix(
+        self, test_client
+    ) -> None:
+        with patch(
+            "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+        ) as mock_process:
+            resp = test_client.post(
+                "/submit",
+                json={
+                    "type": "raw",
+                    "job_name": "stray-name",
+                    "failures": [{"test_name": "t1", "error": "boom"}],
+                },
+            )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        expected = f"raw-analysis-{job_id[:8]}"
+        assert mock_process.await_args.kwargs["display_name"] == expected
+        stored = test_client.get(f"/results/{job_id}").json()["result"]
+        assert stored["job_name"] == expected
+
+    def test_resolve_request_display_name_offloads_file_source_to_thread(self) -> None:
+        from rootcoz.main import _resolve_request_display_name
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.file_source import FileSource
+
+        body = UnifiedAnalyzeRequest(type="file", raw_xml=self.NAMED_XML)
+        calls: list[tuple[object, tuple[object, ...]]] = []
+
+        async def _fake_to_thread(func, *args, **kwargs):
+            calls.append((func, args))
+            return func(*args, **kwargs)
+
+        with patch("rootcoz.main.asyncio.to_thread", side_effect=_fake_to_thread):
+            display_name, is_fallback = asyncio.run(_resolve_request_display_name(body))
+
+        assert display_name == "qe-ui-check-submit"
+        assert is_fallback is False
+        assert calls == [(FileSource.resolve_display_name, (body,))]
+
+
 class TestProwIdentityStamping:
     """Tests for ProwSource identity helpers."""
 
@@ -3481,26 +3741,124 @@ class TestDashboardSubmittersEndpoint:
 
 
 class TestFaviconEndpoint:
-    """Tests for the GET /favicon.ico endpoint."""
+    """Tests for the GET /favicon.svg and GET /favicon.ico endpoints."""
 
-    def test_favicon_returns_svg(self, test_client) -> None:
-        """Test that GET /favicon.ico returns 200 with image/svg+xml content type."""
-        response = test_client.get("/favicon.ico")
+    _UNAUTH_HEADERS: ClassVar[dict[str, str]] = {"Authorization": ""}
+    _FRONTEND_PUBLIC: ClassVar[Path] = (
+        Path(__file__).resolve().parent.parent / "frontend" / "public"
+    )
+
+    @pytest.mark.parametrize("path", ["/favicon.svg", "/favicon.ico"])
+    def test_favicon_unauthenticated_returns_svg_with_cache_header(
+        self, test_client, path: str
+    ) -> None:
+        """Both /favicon.svg and /favicon.ico return 200 unauthenticated with SVG and Cache-Control."""
+        response = test_client.get(path, headers=self._UNAUTH_HEADERS)
         assert response.status_code == 200
         assert response.headers["content-type"] == "image/svg+xml"
-
-    def test_favicon_contains_svg_content(self, test_client) -> None:
-        """Test that the favicon response body contains a valid SVG tag."""
-        response = test_client.get("/favicon.ico")
-        assert response.status_code == 200
+        cache_control = response.headers.get("cache-control", "")
+        assert cache_control
+        assert "max-age" in cache_control
         assert "<svg" in response.text
 
-    def test_favicon_has_cache_control(self, test_client) -> None:
-        """Test that the favicon response has a Cache-Control header with max-age."""
-        response = test_client.get("/favicon.ico")
-        assert response.status_code == 200
-        cache_control = response.headers.get("cache-control", "")
-        assert "max-age" in cache_control
+    def test_favicon_routes_serve_identical_single_source_bytes(
+        self, test_client
+    ) -> None:
+        """/favicon.svg and /favicon.ico return byte-identical content from frontend/public/favicon.svg."""
+        expected = (self._FRONTEND_PUBLIC / "favicon.svg").read_bytes()
+        svg_resp = test_client.get("/favicon.svg", headers=self._UNAUTH_HEADERS)
+        ico_resp = test_client.get("/favicon.ico", headers=self._UNAUTH_HEADERS)
+        assert svg_resp.status_code == 200
+        assert ico_resp.status_code == 200
+        assert svg_resp.content == ico_resp.content == expected
+
+    def test_favicon_prefers_dist_over_public_fallback(
+        self, test_client, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Both favicon routes serve frontend/dist/favicon.svg when built dist/ exists."""
+        dist = tmp_path / "dist"
+        public = tmp_path / "public"
+        dist.mkdir()
+        public.mkdir()
+        dist_svg = b'<svg xmlns="http://www.w3.org/2000/svg"><text>dist</text></svg>'
+        public_svg = (
+            b'<svg xmlns="http://www.w3.org/2000/svg"><text>public</text></svg>'
+        )
+        (dist / "favicon.svg").write_bytes(dist_svg)
+        (public / "favicon.svg").write_bytes(public_svg)
+        monkeypatch.setattr("rootcoz.main._FRONTEND_DIR", dist)
+
+        for path in ("/favicon.svg", "/favicon.ico"):
+            response = test_client.get(path, headers=self._UNAUTH_HEADERS)
+            assert response.status_code == 200
+            assert response.headers["content-type"] == "image/svg+xml"
+            assert response.content == dist_svg
+
+    def test_favicon_falls_back_to_public_in_dev(
+        self, test_client, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Both favicon routes fall back to frontend/public/favicon.svg when dist/ lacks it."""
+        dist = tmp_path / "dist"
+        public = tmp_path / "public"
+        public.mkdir()
+        public_svg = b'<svg xmlns="http://www.w3.org/2000/svg"><text>dev</text></svg>'
+        (public / "favicon.svg").write_bytes(public_svg)
+        monkeypatch.setattr("rootcoz.main._FRONTEND_DIR", dist)
+
+        for path in ("/favicon.svg", "/favicon.ico"):
+            response = test_client.get(path, headers=self._UNAUTH_HEADERS)
+            assert response.status_code == 200
+            assert response.headers["content-type"] == "image/svg+xml"
+            assert response.content == public_svg
+
+    def test_favicon_caches_asset_bytes_across_requests(
+        self, test_client, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Repeated favicon requests serve cached bytes without re-reading disk."""
+        dist = tmp_path / "dist"
+        dist.mkdir()
+        svg_bytes = b'<svg xmlns="http://www.w3.org/2000/svg"><text>cached</text></svg>'
+        svg_path = dist / "favicon.svg"
+        svg_path.write_bytes(svg_bytes)
+        monkeypatch.setattr("rootcoz.main._FRONTEND_DIR", dist)
+        monkeypatch.setattr("rootcoz.main._favicon_cache", None)
+
+        first = test_client.get("/favicon.svg", headers=self._UNAUTH_HEADERS)
+        assert first.status_code == 200
+        assert first.content == svg_bytes
+
+        # Remove the file on disk; subsequent requests must still be served from cache
+        svg_path.unlink()
+        second = test_client.get("/favicon.ico", headers=self._UNAUTH_HEADERS)
+        assert second.status_code == 200
+        assert second.content == svg_bytes
+
+    def test_favicon_returns_404_when_asset_missing(
+        self, test_client, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Both favicon routes return 404 when neither dist/ nor public/ has favicon.svg."""
+        monkeypatch.setattr("rootcoz.main._FRONTEND_DIR", tmp_path / "dist")
+        for path in ("/favicon.svg", "/favicon.ico"):
+            response = test_client.get(path, headers=self._UNAUTH_HEADERS)
+            assert response.status_code == 404
+
+    def test_public_assets_single_favicon_and_no_unused_icons(self) -> None:
+        """frontend/public/favicon.svg exists (copied to dist by Vite) and unused icons.svg is removed."""
+        assert (self._FRONTEND_PUBLIC / "favicon.svg").is_file()
+        assert not (self._FRONTEND_PUBLIC / "icons.svg").exists()
+
+    def test_service_worker_icon_resolves_cleanly(self, test_client) -> None:
+        """frontend/public/sw.js references /favicon.svg and that route resolves cleanly."""
+        sw_content = (self._FRONTEND_PUBLIC / "sw.js").read_text(encoding="utf-8")
+        assert "'/favicon.svg'" in sw_content
+
+        sw_resp = test_client.get("/sw.js", headers=self._UNAUTH_HEADERS)
+        assert sw_resp.status_code == 200
+        assert "'/favicon.svg'" in sw_resp.text
+
+        icon_resp = test_client.get("/favicon.svg", headers=self._UNAUTH_HEADERS)
+        assert icon_resp.status_code == 200
+        assert icon_resp.headers["content-type"] == "image/svg+xml"
 
 
 class TestCommentEndpoints:

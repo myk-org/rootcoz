@@ -799,11 +799,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
           defaultAiProvider={result?.ai_provider ?? ''}
           defaultAiModel={result?.ai_model ?? ''}
           defaultProjectKey={serverJiraProjectKey}
-          availableRepos={
-            repoUrls.length > 0
-              ? repoUrls.map(({ name, url }) => ({ name, url }))
-              : undefined
-          }
+          availableRepos={repoUrls.length > 0 ? repoUrls : undefined}
           onIssueCreated={(url) => {
             // Refetch tracked-in to get real data from server
             getTrackedIn(jobId)

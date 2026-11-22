@@ -18,6 +18,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { formatCompactNumber } from '@/lib/format'
+import { formatTimestamp } from '@/lib/utils'
 import { FileText, Download, Eye, Loader2, Search } from 'lucide-react'
 
 interface TranscriptItem {
@@ -47,12 +48,6 @@ interface TranscriptsResponse {
 const ID_DISPLAY_LIMIT = 13
 
 const shortId = (id: string): string => `${id.slice(0, ID_DISPLAY_LIMIT)}…`
-
-// SQLite CURRENT_TIMESTAMP is timezone-less UTC in `YYYY-MM-DD HH:MM:SS`;
-// Date.parse would read it as local time. Normalize to an explicit UTC ISO
-// string before parsing so the tooltip is correct for admins outside UTC.
-const parseDbTimestamp = (value: string): number =>
-  Date.parse(value.includes('T') ? value : `${value.trim().replace(' ', 'T')}Z`)
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -233,9 +228,7 @@ export function AdminTranscriptsPage() {
                       className="text-sm"
                       title={
                         item.context?.chat_last_activity
-                          ? `Last chat activity: ${formatDate(
-                              parseDbTimestamp(item.context.chat_last_activity) / 1000,
-                            )}`
+                          ? `Last chat activity: ${formatTimestamp(item.context.chat_last_activity)}`
                           : undefined
                       }
                     >
