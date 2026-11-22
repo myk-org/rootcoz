@@ -248,6 +248,7 @@ export function ChatUI({
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pollActiveRef = useRef(false)
   const stallWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pollGenerationRef = useRef(0)
   const historyGenerationRef = useRef(0)
@@ -333,7 +334,7 @@ export function ChatUI({
     source.onerror = () => {
       if (!mountedRef.current || clearingRef.current) return
       const pending = pendingAssistantRef.current
-      if (pending && !pollTimerRef.current) {
+      if (pending && !pollActiveRef.current) {
         startPollRef.current(pending.id, POLL_INTERVAL_MS)
       }
     }
@@ -437,6 +438,7 @@ export function ChatUI({
   // Cancel active polling
   const cancelPoll = useCallback(() => {
     pollGenerationRef.current++
+    pollActiveRef.current = false
     if (pollTimerRef.current) {
       clearTimeout(pollTimerRef.current)
       pollTimerRef.current = null
@@ -460,7 +462,7 @@ export function ChatUI({
     if (since !== null && Date.now() - since >= POLL_MAX_DURATION_MS) return
     stallWatchdogRef.current = setTimeout(() => {
       stallWatchdogRef.current = null
-      if (!mountedRef.current || clearingRef.current || pollTimerRef.current) return
+      if (!mountedRef.current || clearingRef.current || pollActiveRef.current) return
       if (pendingAssistantRef.current?.id !== pendingId) return
       console.debug('[ChatUI] SSE silence watchdog fired — probing history for pending msg', pendingId)
       syncHistoryRef.current()
@@ -519,9 +521,9 @@ export function ChatUI({
 
     const pending = msgs.find(m => m.role === 'assistant' && m.status === 'pending')
     if (options.ensurePoll === false) {
-      if (stillRecoveringSend && !pollTimerRef.current) {
+      if (stillRecoveringSend && !pollActiveRef.current) {
         startPollRef.current(null, POLL_INTERVAL_MS)
-      } else if (pending && !pollTimerRef.current) {
+      } else if (pending && !pollActiveRef.current) {
         armStallWatchdog(pending.id)
       } else if (!pending) {
         clearStallWatchdog()
@@ -529,7 +531,7 @@ export function ChatUI({
       return
     }
     if (pending || stillRecoveringSend) {
-      if (!pollTimerRef.current) startPollRef.current(pending?.id ?? null)
+      if (!pollActiveRef.current) startPollRef.current(pending?.id ?? null)
     } else {
       cancelPoll()
     }
@@ -543,6 +545,7 @@ export function ChatUI({
     initialDelayMs: number = POLL_INITIAL_DELAY_MS,
   ) => {
     cancelPoll()
+    pollActiveRef.current = true
     const generation = pollGenerationRef.current
     const maxTime = Date.now() + POLL_MAX_DURATION_MS
     let consecutiveFailures = 0
@@ -552,6 +555,7 @@ export function ChatUI({
       if (pollGenerationRef.current !== generation) return
       if (Date.now() > maxTime) {
         console.warn('[ChatUI] Poll timed out after 30 minutes')
+        pollActiveRef.current = false
         pollTimerRef.current = null
         setTransientNotice('')
         setHistoryFailed(true)
@@ -571,6 +575,7 @@ export function ChatUI({
             : msgs.some(m => m.role === 'assistant' && m.status === 'pending')
           if (!stillPending && !recoveringSendRef.current) {
             console.debug('[ChatUI] Poll completed — assistant response received')
+            pollActiveRef.current = false
             pollTimerRef.current = null
           } else {
             pollTimerRef.current = setTimeout(poll, POLL_INTERVAL_MS)
@@ -580,6 +585,7 @@ export function ChatUI({
           if (pollGenerationRef.current !== generation || clearingRef.current || !mountedRef.current) return
           logChatTransportError('Chat poll', err, sessionChoiceRef.current, pendingSinceMs())
           if (!isTransientTransportError(err)) {
+            pollActiveRef.current = false
             pollTimerRef.current = null
             setHistoryFailed(true)
             setTransientNotice('')
@@ -751,7 +757,7 @@ export function ChatUI({
           setTransientNotice(
             recoveringSendRef.current ? GATEWAY_SEND_RECOVERY_NOTICE : GATEWAY_TURN_SYNC_NOTICE,
           )
-          if (!pollTimerRef.current) {
+          if (!pollActiveRef.current) {
             startPollRef.current(pendingAssistantRef.current?.id ?? null, POLL_INTERVAL_MS)
           }
           return
@@ -856,7 +862,7 @@ export function ChatUI({
         // a duplicate send until history confirms whether this message landed.
         if (hasSubmittedUserMessage(messagesRef.current, prevMaxId, trimmed)) {
           const pending = pendingAssistantRef.current
-          if (pending && !pollTimerRef.current) startPollForResponse(pending.id)
+          if (pending && !pollActiveRef.current) startPollForResponse(pending.id)
           return
         }
         pendingSendRef.current = { content: trimmed, prevMaxId, startedAt: sendStartedAt, cleanChecks: 0 }

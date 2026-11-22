@@ -1446,6 +1446,33 @@ it('recovers via silence watchdog when SSE stalls silently after a pending chat-
   expect(composer).toBeEnabled()
 })
 
+it('does not invalidate an in-flight fallback poll when the delta stream errors repeatedly', async () => {
+  vi.useFakeTimers()
+  MockEventSource.reset()
+  setup({ messages: [pendingRow('2026-01-01T00:00:00Z')], total: 1, active_session: ACTIVE_SESSION })
+  render(page())
+  const source = await openDeltaStream()
+
+  // Initial load armed fallback polling; replace GET with a slow deferred promise.
+  let resolveSlowPoll!: (value: unknown) => void
+  get.mockImplementation((path: string) => path.startsWith('/api/ai-models')
+    ? Promise.resolve(catalog)
+    : new Promise(resolve => { resolveSlowPoll = resolve }))
+
+  // Trigger the poll so fetchMessages() is now in flight (pollTimerRef is null, pollActiveRef is true).
+  await act(async () => { vi.advanceTimersByTime(2000) })
+  expect(resolveSlowPoll).toBeDefined()
+
+  // Repeated delta stream failures while the poll fetch is in flight must NOT restart/invalidate it.
+  act(() => { source.fail(); source.fail() })
+
+  const done = { ...pendingRow('2026-01-01T00:00:00Z'), content: 'Survived stream flap.', status: 'completed' }
+  await act(async () => {
+    resolveSlowPoll({ messages: [done], total: 1, active_session: ACTIVE_SESSION, active_session_version: 'session-version' })
+  })
+  expect(await screen.findByText('Survived stream flap.')).toBeInTheDocument()
+})
+
 it('replaces raw 504 with actionable copy on initial history load failure', async () => {
   const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
   setup()
