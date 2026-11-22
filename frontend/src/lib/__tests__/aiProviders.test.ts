@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildProviderOptions,
+  collectProviderIds,
   disambiguateProviderLabels,
   extractOriginalProviderIds,
   formatProviderLabel,
@@ -186,5 +187,18 @@ describe('buildProviderOptions & disambiguateProviderLabels', () => {
       { value: 'claude', label: 'Claude' },
       { value: 'gemini', label: 'Gemini' },
     ])
+  })
+
+  it('preserves full-catalog disambiguated labels when filtering selectable provider options', () => {
+    const fullLabels = disambiguateProviderLabels(['google', 'google-vertex'])
+    expect(buildProviderOptions(['google-vertex'], [], undefined, fullLabels)).toEqual([
+      { value: 'google-vertex', label: 'Gemini (Vertex)' },
+    ])
+  })
+
+  it('collectProviderIds flattens single strings and iterables while dropping empty values', () => {
+    expect(
+      collectProviderIds(['google', null, '', '  '], ' google-vertex ', undefined, ['openai']),
+    ).toEqual(['google', 'google-vertex', 'openai'])
   })
 })

@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { ReportProvider } from '../ReportContext'
+import { StateCtx, initialState } from '../reportState'
 import { FailureCard } from '../FailureCard'
 import type { FailureAnalysis, GroupedFailure, PeerDebate, TokenUsageSummary } from '@/types'
 
@@ -212,5 +213,50 @@ describe('FailureCard duplicate matches', () => {
     showBugReport({ jira_matches: [], github_matches: undefined })
     expect(screen.queryByText('Matching Jira Issues')).toBeNull()
     expect(screen.queryByText('Matching GitHub Issues')).toBeNull()
+  })
+})
+
+describe('FailureCard provider label disambiguation', () => {
+  beforeEach(() => { sessionStorage.clear(); auth.role = 'reviewer' })
+
+  it('disambiguates reanalyzed_with and _superseded_by google-vertex when catalog only lists google', () => {
+    const failure: FailureAnalysis = {
+      id: 'id-0',
+      test_name: 'test-0',
+      error: 'boom',
+      error_signature: 'shared',
+      analysis: { classification: 'CODE ISSUE', pattern: '', affected_tests: [], details: '', artifacts_evidence: '' },
+      reanalyzed_with: { ai_provider: 'google-vertex', ai_model: 'gemini-2.5-pro' },
+      previous_analyses: [
+        {
+          classification: 'PRODUCT BUG',
+          pattern: '',
+          affected_tests: [],
+          details: 'older analysis',
+          artifacts_evidence: '',
+          _superseded_by: { ai_provider: 'google-vertex', ai_model: 'gemini-2.5-pro', timestamp: '2026-01-01T00:00:00Z' },
+        },
+      ],
+    }
+    const group: GroupedFailure = { id: 'group-id-0', signature: 'shared', tests: [failure], count: 1 }
+    render(
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <StateCtx.Provider
+            value={{
+              ...initialState,
+              aiModels: {
+                google: [{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google', credential_sources: ['server'] }],
+              },
+            }}
+          >
+            <FailureCard group={group} jobId="job-1" index={0} />
+          </StateCtx.Provider>
+        </TooltipProvider>
+      </MemoryRouter>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /test-0/i }))
+    expect(screen.getByText('Gemini (Vertex) / gemini-2.5-pro')).toBeInTheDocument()
+    expect(screen.getByText(/re-analyzed with Gemini \(Vertex\)\/gemini-2\.5-pro/)).toBeInTheDocument()
   })
 })

@@ -9,7 +9,7 @@ import { api, extractApiDetail } from '@/lib/api'
 import { useSessionState } from '@/lib/useSessionState'
 import { unescapeCodeContent } from '@/lib/format'
 import { formatRelativeTime } from '@/lib/utils'
-import { useReportState, useReportDispatch } from '@/pages/report/reportState'
+import { useReportState, useReportDispatch, useReportProviderLabels } from '@/pages/report/reportState'
 import { reviewKey } from '@/lib/reviewKey'
 import { getTrackedIn, notifyReviewChanged, putReviewed, runBatched, scopeKey, scopedReviewState } from './failureUpdates'
 import { BULK_SELECT_CHECKBOX_CLASS } from '@/lib/constants'
@@ -32,7 +32,7 @@ import { ReAnalyzeDialog } from './ReAnalyzeDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { UuidCopyButton } from '@/components/shared/UuidCopyButton'
-import { disambiguateProviderLabels, extractOriginalProviderIds, formatProviderModelLabel } from '@/lib/aiProviders'
+import { formatProviderModelLabel } from '@/lib/aiProviders'
 import { useAuth } from '@/lib/auth'
 import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw, Link2, X } from 'lucide-react'
 
@@ -197,13 +197,8 @@ interface FailureCardProps {
 export function FailureCard({ group, jobId, childJobName, childBuildNumber, index, activeHash }: FailureCardProps) {
   const scopedChildJobName = childJobName ?? ''
   const scopedChildBuildNumber = childBuildNumber ?? 0
-  const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, result, classifications, trackedIn, selection, aiModels } = useReportState()
-  const originalProviderIds = useMemo(() => extractOriginalProviderIds(aiModels), [aiModels])
-  const catalogProviderIds = useMemo(() => Object.keys(aiModels), [aiModels])
-  const providerLabels = useMemo(
-    () => disambiguateProviderLabels(catalogProviderIds, originalProviderIds),
-    [catalogProviderIds, originalProviderIds],
-  )
+  const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, result, classifications, trackedIn, selection } = useReportState()
+  const { originalProviderIds, catalogProviderIds, providerLabels } = useReportProviderLabels(group.tests)
   const dispatch = useReportDispatch()
   const { role, isOperator, isAdmin, username } = useAuth()
   const isViewer = role === 'viewer'
@@ -663,7 +658,16 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
             })()}
 
             {/* Peer debate trail */}
-            {rep.peer_debate && <PeerDebateSection debate={rep.peer_debate} repoUrls={repoUrls} primaryUsage={usage} originalIds={originalProviderIds} catalogProviderIds={catalogProviderIds} />}
+            {rep.peer_debate && (
+              <PeerDebateSection
+                debate={rep.peer_debate}
+                repoUrls={repoUrls}
+                primaryUsage={usage}
+                originalIds={originalProviderIds}
+                catalogProviderIds={catalogProviderIds}
+                providerLabels={providerLabels}
+              />
+            )}
 
             {/* ACTIONS line: Re-analyze, issue buttons, include links */}
             <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-border-muted">

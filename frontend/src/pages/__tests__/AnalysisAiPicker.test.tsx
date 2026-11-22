@@ -3,7 +3,9 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
+import { AnalysisProviderSelect } from '@/components/shared/AnalysisAiPicker'
 import { ReAnalyzeDialog } from '@/pages/report/ReAnalyzeDialog'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
 import { writeLastAiPair } from '@/lib/lastAiPair'
 import type { AnalysisResult, AiModelsResponse } from '@/types'
@@ -437,5 +439,32 @@ describe('new analysis stored default (#591)', () => {
     expect(screen.getByRole('option', { name: 'MyGateway · Server' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'OpenAI · User' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: /Google Vertex|Openai|Mygateway/ })).not.toBeInTheDocument()
+  })
+
+  it('preserves transport disambiguation across forceServer filtering and unavailable placeholders', async () => {
+    const dualGeminiCatalog: AiModelsResponse = {
+      providers: {
+        google: [{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google', credential_sources: ['user'] }],
+        'google-vertex': [{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google-vertex', credential_sources: ['server'] }],
+      },
+      provider_status: {},
+    }
+    get.mockImplementation(async () => dualGeminiCatalog)
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(
+      <TooltipProvider>
+        <AnalysisProviderSelect value="google" onChange={onChange} forceServer={true} />
+      </TooltipProvider>,
+    )
+    const trigger = await screen.findByRole('combobox', { name: 'AI Provider' })
+    // google is filtered out by forceServer=true, so the placeholder must stay
+    // collision-aware ("Gemini (API) (unavailable)"), not ambiguous "Gemini (unavailable)".
+    await waitFor(() => expect(trigger).toHaveTextContent('Gemini (API) (unavailable)'))
+    await user.click(trigger)
+    // The selectable server option must also keep its full-catalog qualifier so
+    // it agrees with ChatUI/Report headers and stays stable across forceServer toggles.
+    expect(await screen.findByRole('option', { name: 'Gemini (Vertex) · Server' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Gemini · Server' })).not.toBeInTheDocument()
   })
 })

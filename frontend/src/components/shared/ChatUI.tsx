@@ -3,9 +3,9 @@ import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { useSSE } from '@/lib/useSSE'
 import { Button } from '@/components/ui/button'
 import { AnalysisModelNotice, AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
-import { disambiguateProviderLabels, formatProviderModelLabel } from '@/lib/aiProviders'
+import { formatProviderModelLabel } from '@/lib/aiProviders'
 import { isAnalysisAiAvailable } from '@/lib/analysisAi'
-import { useProviderCatalog } from '@/lib/useProviderOptions'
+import { useCatalogProviderLabels } from '@/lib/useProviderLabels'
 import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
 import { useAuth } from '@/lib/auth'
 import { useAiSelection } from '@/lib/useAiSelection'
@@ -240,19 +240,10 @@ export function ChatUI({
   // entry elsewhere in the app falls back to the analysed pair instead.
   const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultProvider, defaultModel, { respectCleared: false })
   const { canUseServerProviders, canUseFreeProviders, role } = useAuth()
-  const { providers, providerStatus, originalIds } = useProviderCatalog()
-  const providerLabels = useMemo(
-    () =>
-      disambiguateProviderLabels(
-        [
-          ...Object.keys(providers),
-          ...(sessionChoice?.provider ? [sessionChoice.provider] : []),
-          ...messages.map((m) => m.ai_provider).filter(Boolean),
-        ],
-        originalIds,
-      ),
-    [providers, sessionChoice?.provider, messages, originalIds],
-  )
+  const { providers, providerStatus, originalIds, providerLabels } = useCatalogProviderLabels([
+    sessionChoice?.provider,
+    ...messages.map((m) => m.ai_provider),
+  ])
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
   const [copiedAll, setCopiedAll] = useState(false)

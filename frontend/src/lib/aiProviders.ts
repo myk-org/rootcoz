@@ -171,11 +171,36 @@ export function formatProviderLabel(
 }
 
 /**
+ * Collect non-empty provider IDs from any mix of single values and iterables.
+ * Shared across components so provider-label disambiguation uses one canonical
+ * collection step instead of repeating inline array construction.
+ */
+export function collectProviderIds(
+  ...sources: ReadonlyArray<Iterable<string | null | undefined> | string | null | undefined>
+): string[] {
+  const ids: string[] = []
+  for (const source of sources) {
+    if (!source) continue
+    if (typeof source === 'string') {
+      const trimmed = source.trim()
+      if (trimmed) ids.push(trimmed)
+      continue
+    }
+    for (const raw of source) {
+      if (!raw) continue
+      const trimmed = raw.trim()
+      if (trimmed) ids.push(trimmed)
+    }
+  }
+  return ids
+}
+
+/**
  * Resolve display labels for a set of distinct provider IDs, adding a short
  * transport qualifier only when two distinct IDs collide on the same base label.
  */
 export function disambiguateProviderLabels(
-  ids: Iterable<string>,
+  ids: Iterable<string | null | undefined>,
   originalIds?: Readonly<Record<string, string>>,
 ): Record<string, string> {
   const uniqueIds = new Set<string>()
@@ -235,9 +260,23 @@ export function buildProviderOptions(
   providerKeys: Iterable<string>,
   currentValues: Iterable<string> = [],
   originalIds?: Readonly<Record<string, string>>,
+  disambiguatedLabels?: Readonly<Record<string, string>>,
 ): AiProviderOption[] {
-  const labels = disambiguateProviderLabels([...providerKeys, ...currentValues], originalIds)
-  return Object.keys(labels)
-    .map((value) => ({ value, label: labels[value] }))
+  const combined = collectProviderIds(providerKeys, currentValues)
+  const fallbackLabels = disambiguatedLabels
+    ? undefined
+    : disambiguateProviderLabels(combined, originalIds)
+  const uniqueKeys = new Set<string>()
+  for (const raw of combined) {
+    uniqueKeys.add(normalizeProvider(raw))
+  }
+  return [...uniqueKeys]
+    .map((value) => ({
+      value,
+      label:
+        ownRecordValue(disambiguatedLabels, value)
+        ?? ownRecordValue(fallbackLabels, value)
+        ?? formatProviderLabel(value, originalIds, disambiguatedLabels),
+    }))
     .sort((a, b) => a.label.localeCompare(b.label) || a.value.localeCompare(b.value))
 }

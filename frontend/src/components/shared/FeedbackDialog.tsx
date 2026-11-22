@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { api, getRecentFailedCalls } from '@/lib/api'
 import { createIssueFailureMessage, createOutcomeUnknown } from '@/lib/issueCreateError'
 import { getRecentErrors } from '@/lib/errorCapture'
@@ -26,8 +26,8 @@ import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { CheckCircle2, ExternalLink } from 'lucide-react'
-import { disambiguateProviderLabels, formatProviderModelLabel } from '@/lib/aiProviders'
-import { useProviderCatalog } from '@/lib/useProviderOptions'
+import { formatProviderModelLabel } from '@/lib/aiProviders'
+import { useCatalogProviderLabels } from '@/lib/useProviderLabels'
 import { completeAiPairOverride } from '@/lib/analysisAi'
 import { useAiSelection } from '@/lib/useAiSelection'
 import type {
@@ -52,11 +52,6 @@ export function FeedbackDialog({ open, onOpenChange, capabilities }: FeedbackDia
   const [description, setDescription] = useState('')
   // Empty = server default (resolved server-side). Shared with the other AI surfaces.
   const { aiProvider, aiModel, setAiPair } = useAiSelection()
-  const { providerKeys, originalIds: originalProviderIds } = useProviderCatalog()
-  const providerLabels = useMemo(
-    () => disambiguateProviderLabels(providerKeys, originalProviderIds),
-    [providerKeys, originalProviderIds],
-  )
   const [phase, setPhase] = useState<Phase>('form')
   const [issueUrl, setIssueUrl] = useState('')
   const [attachments, setAttachments] = useState<File[]>([])
@@ -76,6 +71,7 @@ export function FeedbackDialog({ open, onOpenChange, capabilities }: FeedbackDia
   const [previewLabels, setPreviewLabels] = useState<string[]>([])
   // Server-RESOLVED pair for attribution — never the values this dialog sent.
   const [previewAi, setPreviewAi] = useState({ provider: '', model: '', generated: false })
+  const { originalIds: originalProviderIds, providerLabels } = useCatalogProviderLabels([previewAi.provider])
   // The account row is the only credential source, so ask it when the dialog opens
   // — the same row the server reads when it files the issue.
   const tokenPresence = useUserTokenPresence(open)

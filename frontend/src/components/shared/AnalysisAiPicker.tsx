@@ -3,6 +3,7 @@ import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import { CredentialSourceLabel, ServerAccessHint, ServerAccessTooltip, UnverifiedModelsWarning } from '@/components/shared/CredentialSourceLabel'
 import { useId } from 'react'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
+import { useCatalogProviderLabels } from '@/lib/useProviderLabels'
 import { useAuth } from '@/lib/auth'
 import { buildProviderOptions, formatProviderLabel, normalizeProvider } from '@/lib/aiProviders'
 import { allowsUnverified, usableModels, visibleModels, analysisProviderIds, credentialLabel } from '@/lib/analysisAi'
@@ -18,11 +19,21 @@ export function AnalysisProviderSelect({ value, onChange, forceServer, label = '
   /** Offer "Server default" ('' — no override). Only where an empty pair is legal. */
   allowDefault?: boolean
 }) {
-  const { providers, providerStatus, originalIds } = useProviderCatalog()
+  const current = normalizeProvider(value)
+  // Disambiguate against the full catalog (+ current value when unavailable) so
+  // option labels, unavailable placeholders, and Chat/Report headers agree and
+  // never shift when forceServer toggles.
+  const { providers, providerStatus, originalIds, providerLabels } = useCatalogProviderLabels(
+    current ? [current] : undefined,
+  )
   const { canUseServerProviders, canUseFreeProviders } = useAuth()
   const hintId = useId()
-  const options = buildProviderOptions(analysisProviderIds(providers, providerStatus, forceServer), [], originalIds)
-  const current = normalizeProvider(value)
+  const options = buildProviderOptions(
+    analysisProviderIds(providers, providerStatus, forceServer),
+    [],
+    originalIds,
+    providerLabels,
+  )
   const available = options.some((option) => option.value === current)
   const selectedLabel = credentialLabel(usableModels(providers, current, forceServer, providerStatus), allowsUnverified(providerStatus, current, forceServer), forceServer)
   const hasDeniedServer = !canUseServerProviders && !canUseFreeProviders && options.some((option) => credentialLabel(usableModels(providers, option.value, forceServer, providerStatus)).includes('Server'))
@@ -34,7 +45,7 @@ export function AnalysisProviderSelect({ value, onChange, forceServer, label = '
       {hasDeniedServer && <ServerAccessHint id={hintId} />}
       <ServerAccessTooltip show={available && !canUseServerProviders && !canUseFreeProviders && selectedLabel.includes('Server')}>
         <SelectTrigger aria-label={label} aria-describedby={hasDeniedServer ? hintId : undefined}>
-          <SelectValue placeholder={current ? `${formatProviderLabel(current, originalIds)} (unavailable)` : 'Select provider...'} />
+          <SelectValue placeholder={current ? `${formatProviderLabel(current, originalIds, providerLabels)} (unavailable)` : 'Select provider...'} />
         </SelectTrigger>
       </ServerAccessTooltip>
       <SelectContent>

@@ -8,7 +8,7 @@ import { buildRepoUrls, type RepoUrl } from '@/lib/autoLink'
 import { groupFailures } from '@/lib/grouping'
 import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
 import type { ResultResponse, CommentsAndReviews, AiModelsResponse } from '@/types'
-import { useReportState, useReportDispatch, useRefreshEnrichments } from '@/pages/report/reportState'
+import { useReportState, useReportDispatch, useRefreshEnrichments, useReportProviderLabels } from '@/pages/report/reportState'
 import { reviewKey } from '@/lib/reviewKey'
 import { ReportProvider } from './report/ReportContext'
 import { FailureCard } from './report/FailureCard'
@@ -35,7 +35,7 @@ import { ReportPortalButton } from './report/ReportPortalButton'
 import { DatadogButton } from './report/DatadogButton'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { OriginJobBanner, ReanalyzedForwardBanner } from '@/components/shared/ReanalysisBanner'
-import { disambiguateProviderLabels, extractOriginalProviderIds, formatProviderLabel, formatProviderModelLabel } from '@/lib/aiProviders'
+import { formatProviderLabel, formatProviderModelLabel } from '@/lib/aiProviders'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { useAuth } from '@/lib/auth'
 
@@ -425,22 +425,7 @@ function ReportContent() {
     .map(([repo, clone]) => ({ name: repo, reason: clone.reason }))
   const reviewedCount = reviewedKeyCount(allTestKeys, state.reviews)
 
-  const originalProviderIds = useMemo(
-    () => extractOriginalProviderIds(state.aiModels),
-    [state.aiModels],
-  )
-  const providerLabels = useMemo(
-    () =>
-      disambiguateProviderLabels(
-        [
-          ...Object.keys(state.aiModels),
-          ...(result?.ai_provider ? [result.ai_provider] : []),
-          ...(result?.request_params?.peer_ai_configs ?? []).map((p) => p.ai_provider).filter(Boolean),
-        ],
-        originalProviderIds,
-      ),
-    [state.aiModels, result, originalProviderIds],
-  )
+  const { originalProviderIds, catalogProviderIds, providerLabels } = useReportProviderLabels()
 
   // Expand/collapse all for top-level failure cards
   const getFailureKeys = useCallback(
@@ -751,7 +736,8 @@ function ReportContent() {
         childJobAnalyses={result.child_job_analyses ?? []}
         repoUrls={repoUrls}
         originalIds={originalProviderIds}
-        catalogProviderIds={Object.keys(state.aiModels)}
+        catalogProviderIds={catalogProviderIds}
+        providerLabels={providerLabels}
       />
 
       {/* ---- AI spend breakdown ---- */}

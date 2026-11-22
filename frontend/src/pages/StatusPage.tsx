@@ -15,8 +15,8 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { OriginJobBanner } from '@/components/shared/ReanalysisBanner'
-import { disambiguateProviderLabels, formatProviderModelLabel } from '@/lib/aiProviders'
-import { useProviderCatalog } from '@/lib/useProviderOptions'
+import { formatProviderModelLabel } from '@/lib/aiProviders'
+import { useCatalogProviderLabels } from '@/lib/useProviderLabels'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { useAuth } from '@/lib/auth'
 
@@ -296,21 +296,12 @@ export function StatusPage() {
   const displayStatus = isTimeout ? 'timeout' : status
   const queuedAtDisplay = data?.created_at ? formatTimestamp(data.created_at) : null
 
-  const { providerKeys, originalIds: originalProviderIds } = useProviderCatalog()
   const params = data?.result?.request_params
   const peers = params?.peer_ai_configs
-  const providerLabels = useMemo(
-    () =>
-      disambiguateProviderLabels(
-        [
-          ...providerKeys,
-          ...(params?.ai_provider ? [params.ai_provider] : []),
-          ...(peers ?? []).map((p) => p.ai_provider),
-        ],
-        originalProviderIds,
-      ),
-    [providerKeys, params?.ai_provider, peers, originalProviderIds],
-  )
+  const { originalIds: originalProviderIds, providerLabels } = useCatalogProviderLabels([
+    params?.ai_provider,
+    ...(peers ?? []).map((p) => p.ai_provider),
+  ])
   const mainAi = params?.ai_provider && params?.ai_model
     ? formatProviderModelLabel(params.ai_provider, params.ai_model, originalProviderIds, ' / ', providerLabels)
     : null

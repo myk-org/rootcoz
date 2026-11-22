@@ -7,7 +7,7 @@ import { groupPeerRounds } from '@/lib/peerDebate'
 import { resolvedSignature } from '@/lib/grouping'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ChevronDown, ChevronRight, Users } from 'lucide-react'
-import { disambiguateProviderLabels } from '@/lib/aiProviders'
+import { useProviderLabels } from '@/lib/useProviderLabels'
 import { getPeerAiLabels } from './peerAiLabels'
 
 interface FailureWithDebate {
@@ -75,6 +75,7 @@ interface PeerAnalysisSummaryProps {
   repoUrls: RepoUrl[]
   originalIds?: Readonly<Record<string, string>>
   catalogProviderIds?: readonly string[]
+  providerLabels?: Readonly<Record<string, string>>
 }
 
 export function PeerAnalysisSummary({
@@ -83,6 +84,7 @@ export function PeerAnalysisSummary({
   repoUrls,
   originalIds,
   catalogProviderIds,
+  providerLabels: inheritedProviderLabels,
 }: PeerAnalysisSummaryProps) {
   const [expanded, setExpanded] = useState(false)
 
@@ -91,20 +93,15 @@ export function PeerAnalysisSummary({
     [failures, childJobAnalyses],
   )
 
-  const providerLabels = useMemo(
-    () =>
-      disambiguateProviderLabels(
-        [
-          ...(catalogProviderIds ?? []),
-          ...debateFailures.flatMap(({ debate }) => [
-            ...(debate.ai_configs ?? []).map((c) => c.ai_provider),
-            ...debate.rounds.map((r) => r.ai_provider),
-          ]),
-        ],
-        originalIds,
-      ),
-    [catalogProviderIds, debateFailures, originalIds],
+  const localProviderLabels = useProviderLabels(
+    catalogProviderIds ?? [],
+    debateFailures.flatMap(({ debate }) => [
+      ...(debate.ai_configs ?? []).map((c) => c.ai_provider),
+      ...debate.rounds.map((r) => r.ai_provider),
+    ]),
+    originalIds,
   )
+  const providerLabels = inheritedProviderLabels ?? localProviderLabels
 
   const participatingAis = useMemo(
     () => getPeerAiLabels(debateFailures, originalIds, providerLabels),

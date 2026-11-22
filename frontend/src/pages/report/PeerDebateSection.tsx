@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import type { FailureAnalysis, PeerDebate } from '@/types'
 import type { RepoUrl } from '@/lib/autoLink'
 import { Badge } from '@/components/ui/badge'
 import { PeerRoundEntry } from '@/components/shared/PeerRoundEntry'
-import { disambiguateProviderLabels } from '@/lib/aiProviders'
+import { useProviderLabels } from '@/lib/useProviderLabels'
 import { groupPeerRounds } from '@/lib/peerDebate'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 
@@ -13,24 +13,22 @@ interface PeerDebateSectionProps {
   primaryUsage?: FailureAnalysis['token_usage']
   originalIds?: Readonly<Record<string, string>>
   catalogProviderIds?: readonly string[]
+  providerLabels?: Readonly<Record<string, string>>
 }
 
-export function PeerDebateSection({ debate, repoUrls, primaryUsage, originalIds, catalogProviderIds }: PeerDebateSectionProps) {
+export function PeerDebateSection({ debate, repoUrls, primaryUsage, originalIds, catalogProviderIds, providerLabels: inheritedProviderLabels }: PeerDebateSectionProps) {
   const [expanded, setExpanded] = useState(false)
 
   const groupedRounds = groupPeerRounds(debate.rounds)
-  const providerLabels = useMemo(
-    () =>
-      disambiguateProviderLabels(
-        [
-          ...(catalogProviderIds ?? []),
-          ...(debate.ai_configs ?? []).map((c) => c.ai_provider),
-          ...debate.rounds.map((r) => r.ai_provider),
-        ],
-        originalIds,
-      ),
-    [catalogProviderIds, debate.ai_configs, debate.rounds, originalIds],
+  const localProviderLabels = useProviderLabels(
+    catalogProviderIds ?? [],
+    [
+      ...(debate.ai_configs ?? []).map((c) => c.ai_provider),
+      ...debate.rounds.map((r) => r.ai_provider),
+    ],
+    originalIds,
   )
+  const providerLabels = inheritedProviderLabels ?? localProviderLabels
 
   return (
     <div className="rounded-md border border-border-muted">
