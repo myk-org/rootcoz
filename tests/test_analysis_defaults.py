@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from rootcoz import storage
+from rootcoz.config import Settings
 from tests.conftest import admin_login, make_app_client
 
 
@@ -117,6 +118,19 @@ class TestDefaultServerSettingsAuth:
 
 class TestDefaultServerSettingsResponse:
     """Test response structure and values."""
+
+    def test_the_sso_admission_rule_is_not_returned_as_a_default(self, client):
+        """sso_allowed_domains is deployment policy, hidden like ALLOWED_USERS.
+
+        The endpoint answers any authenticated role and the hiding set is checked
+        without regard to role, so this holds for a viewer too: the deployment's
+        admit-list is not something a signed-in stranger gets to read.
+        """
+        cookies = admin_login(client)
+        data = client.get("/api/default-server-settings", cookies=cookies).json()
+        assert "sso_allowed_domains" not in data
+        # Hidden from the defaults endpoint, not removed from the product.
+        assert "sso_allowed_domains" in Settings.model_fields
 
     def test_returns_all_settings_fields(self, client):
         """Response contains all non-sensitive Settings model fields."""

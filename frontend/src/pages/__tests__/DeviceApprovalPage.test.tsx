@@ -176,6 +176,59 @@ it('keeps the last submitted code when lookups answer out of order', async () =>
   )
 })
 
+it('does not claim approval when a newer lookup landed during the approve flight', async () => {
+  // Approve code A is in flight; a lookup for code B resolves before the
+  // approve completes.  The screen now describes B, so the component must
+  // NOT announce A as approved — it surfaces a notice instead.
+  let resolveApprove!: () => void
+  post.mockImplementation((url: string) => {
+    if (url === '/api/auth/sso/device/approve') {
+      return new Promise<void>((r) => {
+        resolveApprove = r
+      })
+    }
+    // lookup — resolve immediately with appropriate code
+    const code = post.mock.calls.at(-1)?.[1]?.user_code ?? 'AAAA-AAAA'
+    return Promise.resolve({
+      user_code: code,
+      provider: null,
+      client_name: code === 'AAAA-AAAA' ? 'laptop-a' : 'laptop-b',
+      expires_at: '2030-01-01 00:00:00',
+      authorized: false,
+    })
+  })
+
+  renderPage()
+
+  // Look up and start approving code A
+  await typeCode('AAAA-AAAA')
+  await userEvent.click(screen.getByRole('button', { name: /look up/i }))
+  await screen.findByText(/laptop-a/)
+  await userEvent.click(
+    screen.getByRole('button', { name: /approve sign-in/i }),
+  )
+
+  // While approve is in flight, type a new code and look it up
+  await userEvent.clear(screen.getByLabelText(/device code/i))
+  await typeCode('BBBB-BBBB')
+  await userEvent.click(screen.getByRole('button', { name: /look up/i }))
+  await screen.findByText(/laptop-b/)
+
+  // Now let the original approve resolve
+  await act(async () => {
+    resolveApprove()
+  })
+
+  // Must NOT show the "Approved." banner
+  expect(screen.queryByText(/Approved\./)).toBeNull()
+  // Must surface a notice about the code having changed
+  expect(screen.getByText(/displayed code changed/i)).toBeTruthy()
+  // The approve button for the new code should still be available
+  expect(
+    screen.getByRole('button', { name: /approve sign-in/i }),
+  ).toBeTruthy()
+})
+
 it('reports a code the server does not know', async () => {
   post.mockRejectedValue(new Error('That code is not valid'))
   renderPage()

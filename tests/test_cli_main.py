@@ -5632,6 +5632,27 @@ class TestAuthLoginCommand:
         assert result.exit_code == 0
         assert "google" in result.output
 
+    def test_auth_sso_identities_escapes_provider_reported_text(self, mock_client):
+        """An IdP-supplied address must not be able to drive the terminal.
+
+        The table formatter prints cell strings verbatim, so a provider that
+        reports an escape sequence would otherwise rewrite the operator's screen.
+        """
+        mock_client.user_identities.return_value = {
+            "identities": [
+                {
+                    "provider": "google",
+                    "email": "\x1b[31mred\x1b]0;pwned\x07@example.com",
+                }
+            ],
+            "unlinkable": True,
+        }
+        result = runner.invoke(app, ["auth", "sso-identities"])
+        assert result.exit_code == 0
+        assert "\x1b" not in result.output
+        assert "\\x1b" in result.output
+        assert "@example.com" in result.output
+
     def test_auth_sso_unlink_asks_first(self, mock_client):
         mock_client.delete_user_identity.return_value = {"ok": True}
         declined = runner.invoke(app, ["auth", "sso-unlink", "google"], input="n\n")

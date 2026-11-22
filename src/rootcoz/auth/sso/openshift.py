@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -250,7 +251,7 @@ class OpenShiftProvider(SSOProvider):
             try:
                 identity = await request_json(
                     "GET",
-                    f"{self._api_url}{_IDENTITY_PATH.format(name=name)}",
+                    f"{self._api_url}{_IDENTITY_PATH.format(name=quote(name, safe=''))}",
                     reason="userinfo_failed",
                     headers=headers,
                 )

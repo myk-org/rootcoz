@@ -931,6 +931,31 @@ async def test_openshift_reads_the_account_from_the_api_server() -> None:
     assert identity_request.url.host == "api.example.com"
 
 
+async def test_an_identity_name_carrying_url_syntax_is_encoded_as_one_segment() -> None:
+    """A name with '#', '?' or '/' must not change the shape of the URL.
+
+    Unencoded, the request would be cut at the '#' and the cluster would answer 404
+    for a name it never received — a real account that simply cannot sign in.
+    """
+    name = "oidc:b#o?b/x"
+    user = {"metadata": {"uid": "u-2", "name": "bob"}, "identities": [name]}
+    transport, seen = _openshift_transport(
+        user, {name: {"extra": {"email": ["bob@example.com"]}}}
+    )
+    with _github_client(transport):
+        claims = await _openshift_provider().exchange(
+            code="c", code_verifier="", redirect_uri="https://x/cb", nonce=""
+        )
+
+    assert claims.email == "bob@example.com"
+    identity_request = next(r for r in seen if "/identities/" in r.url.path)
+    # The escape is what keeps the name one segment: httpx re-encodes on the wire.
+    assert b"%23" in identity_request.url.raw_path
+    assert b"%3F" in identity_request.url.raw_path
+    assert b"%2F" in identity_request.url.raw_path
+    assert identity_request.url.raw_path.endswith(b"oidc%3Ab%23o%3Fb%2Fx")
+
+
 @pytest.mark.parametrize(
     "user",
     [

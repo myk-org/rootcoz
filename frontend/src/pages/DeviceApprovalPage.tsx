@@ -68,15 +68,27 @@ export function DeviceApprovalPage() {
   }
 
   async function handleApprove() {
+    const seq = lookupSeqRef.current
     setBusy(true)
     setError('')
     try {
       // The code that was *described*, not whatever is in the box now: the
       // client name the person just read must belong to the code being approved.
       await api.post('/api/auth/sso/device/approve', { user_code: info?.user_code })
+      if (seq !== lookupSeqRef.current) {
+        // A newer lookup landed while the approve was in flight — the screen
+        // now describes a different code, so claiming "approved" would be
+        // misleading.  Let them review the new code first.
+        setError(
+          'The displayed code changed while approving — check the new code before approving.',
+        )
+        return
+      }
       setApproved(true)
     } catch (err) {
-      setError(extractApiDetail(err) ?? 'That code could not be approved.')
+      if (seq === lookupSeqRef.current) {
+        setError(extractApiDetail(err) ?? 'That code could not be approved.')
+      }
     } finally {
       setBusy(false)
     }

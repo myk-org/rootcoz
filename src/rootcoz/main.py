@@ -585,6 +585,7 @@ _DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
         "require_approval",
         "admin_wait_approve_msg",
         "allowed_users",
+        "sso_allowed_domains",
         "log_level",
         "metadata_rules_file",
         "enable_github_issues",

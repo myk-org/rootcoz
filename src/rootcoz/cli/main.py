@@ -4251,8 +4251,18 @@ def _print_identities(payload: dict[str, Any], *, as_json: bool) -> None:
     if not identities:
         typer.echo("No provider is connected to this account.")
         return
+    # provider-reported values (the address above all) reach a table formatter
+    # that does not escape terminal controls, so an IdP-supplied string could
+    # rewrite the operator's terminal. Same escaper as every other untrusted cell.
+    printable = [
+        {
+            key: sanitize_terminal_text(value) if isinstance(value, str) else value
+            for key, value in identity.items()
+        }
+        for identity in identities
+    ]
     print_output(
-        identities,
+        printable,
         columns=["provider", "email", "created_at"],
         as_json=False,
     )
