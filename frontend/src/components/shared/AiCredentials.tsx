@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { api } from '@/lib/api'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { resetProviderCatalogCache, useProviderCatalog } from '@/lib/useProviderOptions'
 import { normalizeProvider } from '@/lib/aiProviders'
 import { Button } from '@/components/ui/button'
@@ -9,6 +9,33 @@ import { ModelCombobox } from './ModelCombobox'
 
 type Provider = { provider: string; configured: boolean; supports_user_keys: boolean }
 
+const FALLBACK_LOAD_ERROR = 'Could not load AI credentials'
+const BOOTSTRAP_ADMIN_REMEDY =
+  'Sign in with a registered account to store personal AI provider keys.'
+
+function describeLoadError(err: unknown): {
+  message: string
+  remedy: string | null
+  noCredentialStore: boolean
+} {
+  const detail = extractApiDetail(err)
+  if (!detail) {
+    return { message: FALLBACK_LOAD_ERROR, remedy: null, noCredentialStore: false }
+  }
+  // 403 from _credential_user() means the signed-in identity (bootstrap admin)
+  // has no database user row, so it cannot store personal keys — surface the
+  // server's reason and tell the user what to do instead of a dead end.
+  const noCredentialStore =
+    err instanceof ApiError &&
+    err.status === 403 &&
+    /bootstrap admin|database user|no credential store/i.test(detail)
+  return {
+    message: detail,
+    remedy: noCredentialStore ? BOOTSTRAP_ADMIN_REMEDY : null,
+    noCredentialStore,
+  }
+}
+
 export function AiCredentials() {
   const [providers, setProviders] = useState<Provider[] | null>(null)
   const [selected, setSelected] = useState('')
@@ -17,29 +44,44 @@ export function AiCredentials() {
   const { providers: catalog, providerStatus: rawStatus } = useProviderCatalog()
   const catalogStatus = rawStatus ?? {}
   const keyRef = useRef('')
+  const noCredentialStoreRef = useRef(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const [errorRemedy, setErrorRemedy] = useState<string | null>(null)
   const [notice, setNotice] = useState('')
 
   // Eligibility flags mirror a server setting that can change while the
   // page is open (AMBIENT_AUTH_PROVIDERS needs no restart), so the list is
   // refetched on focus and after every mutation instead of patched locally.
-  function refreshProviders() {
+  const fetchProviders = useCallback((isActive: () => boolean = () => true) => {
     return api.get<{ providers: Provider[] }>('/api/user/ai-credentials')
-      .then((result) => { setProviders(result.providers) })
-      .catch(() => { setError('Could not load AI credentials') })
-  }
+      .then((result) => {
+        if (!isActive()) return
+        noCredentialStoreRef.current = false
+        setProviders(result.providers)
+        setError('')
+        setErrorRemedy(null)
+      })
+      .catch((err: unknown) => {
+        if (!isActive()) return
+        const { message, remedy, noCredentialStore } = describeLoadError(err)
+        noCredentialStoreRef.current = noCredentialStore
+        setError(message)
+        setErrorRemedy(remedy)
+      })
+  }, [])
 
   useEffect(() => {
     let active = true
-    api.get<{ providers: Provider[] }>('/api/user/ai-credentials')
-      .then((result) => { if (active) setProviders(result.providers) })
-      .catch(() => { if (active) setError('Could not load AI credentials') })
-    const onFocus = () => { refreshProviders() }
+    const isActive = () => active
+    void fetchProviders(isActive)
+    const onFocus = () => {
+      if (!noCredentialStoreRef.current) void fetchProviders(isActive)
+    }
     window.addEventListener('focus', onFocus)
     return () => { active = false; window.removeEventListener('focus', onFocus); keyRef.current = '' }
-  }, [])
+  }, [fetchProviders])
 
   function clearKey() {
     keyRef.current = ''
@@ -78,6 +120,7 @@ export function AiCredentials() {
     clearKey()
     setBusy(provider)
     setError('')
+    setErrorRemedy(null)
     setNotice('')
     try {
       const response = await api.put<{ outcome: 'accepted' | 'rejected' | 'inconclusive'; ok: boolean }>(
@@ -91,13 +134,13 @@ export function AiCredentials() {
         return
       }
       resetProviderCatalogCache()
-      await refreshProviders()
+      await fetchProviders()
       setEditing(null)
       setSelected('')
       setModel('')
       setNotice('API key verified and saved.')
-    } catch {
-      setError('Could not save API key')
+    } catch (err) {
+      setError(extractApiDetail(err) ?? 'Could not save API key')
     } finally {
       clearKey()
       setBusy(null)
@@ -109,15 +152,16 @@ export function AiCredentials() {
     clearKey()
     setBusy(provider)
     setError('')
+    setErrorRemedy(null)
     setNotice('')
     try {
       await api.delete(`/api/user/ai-credentials/${encodeURIComponent(provider)}`)
       resetProviderCatalogCache()
-      await refreshProviders()
+      await fetchProviders()
       if (editing === provider) setEditing(null)
       setSelected('')
-    } catch {
-      setError('Could not remove API key')
+    } catch (err) {
+      setError(extractApiDetail(err) ?? 'Could not remove API key')
     } finally {
       setBusy(null)
     }
@@ -130,7 +174,19 @@ export function AiCredentials() {
           <h2 className="font-display text-sm font-semibold text-text-primary">AI provider keys</h2>
           <p className="mt-1 text-xs text-text-tertiary">Your keys are stored on the server. Existing keys are never shown here.</p>
         </div>
-        {error && <p role="alert" className="text-xs text-signal-red">{error}</p>}
+        {error && (
+          <div
+            role="alert"
+            className={
+              errorRemedy
+                ? 'space-y-1 rounded-md border border-signal-amber/30 bg-signal-amber/10 px-3 py-2 text-xs'
+                : 'text-xs text-signal-red'
+            }
+          >
+            <p className={errorRemedy ? 'font-medium text-signal-amber' : undefined}>{error}</p>
+            {errorRemedy && <p className="text-text-secondary">{errorRemedy}</p>}
+          </div>
+        )}
         {notice && <p role="status" className="text-xs text-signal-green">{notice}</p>}
         {starvedKeys.map((id) => (
           <p key={id} role="alert" className="text-xs text-signal-amber">

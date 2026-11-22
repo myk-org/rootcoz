@@ -1,13 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { api } from '@/lib/api'
+import { api, ApiError } from '@/lib/api'
 import { AiCredentials } from './AiCredentials'
 import type { ProviderStatus } from '@/types'
 
 Element.prototype.scrollIntoView = vi.fn()
 
-vi.mock('@/lib/api', () => ({ api: { get: vi.fn(), put: vi.fn(), delete: vi.fn() } }))
+vi.mock('@/lib/api', async (importActual) => {
+  const actual = await importActual<typeof import('@/lib/api')>()
+  return {
+    ...actual,
+    api: { get: vi.fn(), put: vi.fn(), delete: vi.fn() },
+  }
+})
 const catalogMocks = vi.hoisted(() => ({
   // Reuse the real status shape so a new field cannot drift out of the mock.
   providerStatus: {} as Record<string, ProviderStatus>,
@@ -218,6 +224,55 @@ describe('AiCredentials', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not load AI credentials')
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+  })
+
+  it('surfaces the server detail and registered-account remedy for bootstrap admin 403 (#645)', async () => {
+    const serverDetail = 'AI credentials require a database user; bootstrap admin has no credential store.'
+    get.mockRejectedValueOnce(new ApiError(403, 'Forbidden', { detail: serverDetail }))
+
+    render(<AiCredentials />)
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(serverDetail)
+    expect(alert).toHaveTextContent(/sign in with a registered account/i)
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+
+    // Bootstrap admin has no DB row — refocusing the window does not spam repeated 403s.
+    window.dispatchEvent(new Event('focus'))
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(1))
+  })
+
+  it('surfaces non-bootstrap server detail without claiming bootstrap admin (#645)', async () => {
+    const serverDetail = 'Stored AI credentials could not be decrypted with the current key.'
+    get.mockRejectedValueOnce(new ApiError(409, 'Conflict', { detail: serverDetail }))
+
+    render(<AiCredentials />)
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(serverDetail)
+    expect(alert).not.toHaveTextContent(/registered account/i)
+  })
+
+  it('falls back to generic copy when an ApiError carries no detail (#645)', async () => {
+    get.mockRejectedValueOnce(new ApiError(500, 'Internal Server Error', null))
+
+    render(<AiCredentials />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load AI credentials')
+  })
+
+  it('surfaces server detail when a focus refresh fails and clears it on recovery (#645)', async () => {
+    get.mockResolvedValueOnce({ providers: [{ provider: 'other', configured: false, supports_user_keys: true }] })
+    render(<AiCredentials />)
+    expect(await screen.findByRole('combobox', { name: 'AI provider' })).toBeInTheDocument()
+
+    get.mockRejectedValueOnce(new ApiError(503, 'Service Unavailable', { detail: 'Sidecar temporarily unavailable' }))
+    window.dispatchEvent(new Event('focus'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Sidecar temporarily unavailable')
+
+    get.mockResolvedValueOnce({ providers: [{ provider: 'other', configured: false, supports_user_keys: true }] })
+    window.dispatchEvent(new Event('focus'))
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
   })
 })
 

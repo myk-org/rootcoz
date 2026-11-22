@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError } from '@/lib/api'
 import { ProfileForm } from '@/components/shared/ProfileForm'
 
 const apiMock = vi.hoisted(() => ({
@@ -10,7 +11,10 @@ const apiMock = vi.hoisted(() => ({
   delete: vi.fn(async () => ({})),
   testUserTokens: vi.fn(async () => ({ ok: true, message: 'ok' })),
 }))
-vi.mock('@/lib/api', () => ({ api: apiMock, isExpectedTokenSyncError: () => true }))
+vi.mock('@/lib/api', async (importActual) => {
+  const actual = await importActual<typeof import('@/lib/api')>()
+  return { ...actual, api: apiMock }
+})
 
 const role = vi.hoisted(() => ({ value: 'viewer' }))
 vi.mock('@/lib/auth', () => ({ useAuth: () => ({ username: 'jdoe', role: role.value, isAdmin: false }) }))
@@ -464,5 +468,55 @@ describe('ProfileForm saved-token connection test (#537)', () => {
     }
     // The endpoint reads the caller's row: the body carries nothing at all.
     expect(apiMock.testUserTokens.mock.calls).toEqual([['github'], ['jira']])
+  })
+})
+
+describe('ProfileForm server error detail surfacing (#645)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    apiMock.get.mockReset()
+    apiMock.post.mockReset()
+    role.value = 'reviewer'
+  })
+
+  it('surfaces server detail on a 404 from /api/user/tokens without console noise', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      apiMock.get.mockRejectedValueOnce(new ApiError(404, 'Not Found', { detail: 'User not found. Register first.' }))
+      renderForm()
+      expect(await screen.findByText('User not found. Register first.')).toBeInTheDocument()
+      expect(errorSpy).not.toHaveBeenCalled()
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('falls back to generic copy on a 404 without server detail', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      apiMock.get.mockRejectedValueOnce(new ApiError(404, 'Not Found', null))
+      renderForm()
+      expect(await screen.findByText(/could not read your saved tracker credentials/i)).toBeInTheDocument()
+      expect(errorSpy).not.toHaveBeenCalled()
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('surfaces server detail when rotate-key fails for bootstrap admin', async () => {
+    apiMock.get.mockResolvedValue({ github_token: '', jira_email: '', jira_token: '', jira_sa_token: '' })
+    apiMock.post.mockRejectedValueOnce(
+      new ApiError(400, 'Bad Request', {
+        detail: 'Bootstrap admin cannot rotate key via this endpoint. Use ADMIN_KEY env var.',
+      }),
+    )
+    renderForm()
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalledWith('/api/user/tokens'))
+
+    await userEvent.click(screen.getByRole('button', { name: /rotate api key/i }))
+
+    expect(
+      await screen.findByText('Bootstrap admin cannot rotate key via this endpoint. Use ADMIN_KEY env var.'),
+    ).toBeInTheDocument()
   })
 })
