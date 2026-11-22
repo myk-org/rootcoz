@@ -6,6 +6,7 @@ Builds job-scoped system prompts and manages AI CLI conversations.
 import base64
 import re
 import tempfile
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
@@ -2076,6 +2077,7 @@ async def _chat_with_ai_impl(
         call_kwargs["on_delta"] = on_delta
     if not session_id and restrict_tools:
         call_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
+    started = time.monotonic()
     # Free-form chat has no schema to check, so its rule is "a non-empty
     # answer": pi-config's prompt response carries no stop_reason, and dropping
     # a finished reply because the turn also recorded an error loses work the
@@ -2128,10 +2130,14 @@ async def _chat_with_ai_impl(
         ai_model=ai_model,
     )
 
+    elapsed_s = time.monotonic() - started
     if not result.success:
         logger.error(
-            "%s: AI call failed: %s",
+            "%s: AI call failed (provider=%s, model=%s, elapsed=%.1fs): %s",
             log_prefix,
+            ai_provider,
+            ai_model,
+            elapsed_s,
             single_line_diagnostic(format_ai_diagnostic(result)),
         )
         return False, result.text, None
@@ -2140,12 +2146,23 @@ async def _chat_with_ai_impl(
         # accepted without a normal stop reason, so it may be incomplete.
         warning = _sanitize_diagnostic(result.error, ()) or ""
         logger.warning(
-            "%s: AI turn completed with a warning: %s",
+            "%s: AI turn completed with a warning (provider=%s, model=%s, elapsed=%.1fs): %s",
             log_prefix,
+            ai_provider,
+            ai_model,
+            elapsed_s,
             warning,
         )
         if warning and on_warning is not None:
             on_warning(warning)
+    else:
+        logger.info(
+            "%s: AI turn completed (provider=%s, model=%s, elapsed=%.1fs)",
+            log_prefix,
+            ai_provider,
+            ai_model,
+            elapsed_s,
+        )
 
     return True, result.text, result.session_id
 

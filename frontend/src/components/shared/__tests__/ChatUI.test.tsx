@@ -1129,3 +1129,216 @@ it('does not clear while the initial Start request is in flight', async () => {
   expect(remove).not.toHaveBeenCalled()
   await act(async () => { finishInit({ ready: false, preparing: { phase: 'preparing', detail: '' } }) })
 })
+
+// --- Gateway 5xx / 504 recovery (#640) --------------------------------------
+
+it('treats a gateway 504 during an active turn as transient, keeps polling, and delivers the reply without reload', async () => {
+  vi.useFakeTimers()
+  const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
+  render(page())
+  const composer = await screen.findByPlaceholderText(/Ask a question/)
+  await waitFor(() => expect(composer).toBeEnabled())
+  fireEvent.change(composer, { target: { value: 'Is this failure ours?' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  expect(await screen.findByText(/^Thinking\.\.\./)).toBeInTheDocument()
+  expect(composer).toBeDisabled()
+
+  // Simulate reverse-proxy 504 on both an SSE-triggered sync and the next poll.
+  let getsDuringTurn = 0
+  const userRow = {
+    id: 2,
+    job_id: 'job',
+    role: 'user',
+    content: 'Is this failure ours?',
+    username: 'alice',
+    ai_provider: '',
+    ai_model: '',
+    status: 'completed',
+    created_at: '2026-01-01T00:00:00Z',
+  }
+  const doneRow = {
+    ...pendingRow('2026-01-01T00:00:00Z'),
+    content: 'Six of the 10 failures are infrastructure.',
+    status: 'completed',
+  }
+  get.mockImplementation(async (path: string) => {
+    if (path.startsWith('/api/ai-models')) return catalog
+    getsDuringTurn++
+    if (getsDuringTurn <= 2) throw new ApiError(504, 'Gateway Time-out', '<html>504</html>')
+    return { messages: [userRow, doneRow], total: 2, active_session: ACTIVE_SESSION, active_session_version: 'session-version' }
+  })
+
+  // SSE chat-changed hits 504 — must NOT show dead-end error or Retry history.
+  act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
+  expect(await screen.findByText(/reconnecting automatically/i)).toBeInTheDocument()
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(screen.queryByText(/API error 504/i)).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Retry history' })).not.toBeInTheDocument()
+  expect(screen.getByText(/^Thinking\.\.\./)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument()
+  expect(composer).toBeDisabled()
+  expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/HTTP 504.*openai\/gpt.*elapsed=/))
+
+  // First poll also hits 504, second poll succeeds with the completed reply.
+  await act(async () => { vi.advanceTimersByTime(3000) })
+  expect(screen.queryByText(/API error 504/i)).not.toBeInTheDocument()
+  expect(composer).toBeDisabled()
+
+  await act(async () => { vi.advanceTimersByTime(6000) })
+  expect(await screen.findByText('Six of the 10 failures are infrastructure.')).toBeInTheDocument()
+  expect(screen.getAllByText('Is this failure ours?')).toHaveLength(1)
+  expect(screen.queryByText(/reconnecting automatically/i)).not.toBeInTheDocument()
+  expect(composer).toBeEnabled()
+  expect(post.mock.calls.filter(([path]) => path === '/api/chat/job')).toHaveLength(1)
+  warnSpy.mockRestore()
+})
+
+it('recovers without duplicating when POST itself hits a gateway 504 after the server persisted the turn', async () => {
+  vi.useFakeTimers()
+  const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const earlier = {
+    id: 1,
+    job_id: 'job',
+    role: 'user',
+    content: 'earlier question',
+    username: 'alice',
+    ai_provider: '',
+    ai_model: '',
+    status: 'completed',
+    created_at: '2026-01-01T00:00:00Z',
+  }
+  setup({ messages: [earlier], total: 1, active_session: ACTIVE_SESSION })
+  post.mockImplementation(async (path: string) => {
+    if (path === '/api/chat/job') throw new ApiError(504, 'Gateway Time-out', '')
+    return {}
+  })
+  render(page())
+  const composer = await screen.findByPlaceholderText(/Ask a question/)
+  await waitFor(() => expect(composer).toBeEnabled())
+  fireEvent.change(composer, { target: { value: 'why did it fail?' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+  // During recovery, composer stays disabled and no raw 504 alert invites a duplicate send.
+  expect(await screen.findByText(/checking whether your message is already running/i)).toBeInTheDocument()
+  expect(screen.getByText(/^Reconnecting\.\.\./)).toBeInTheDocument()
+  expect(composer).toBeDisabled()
+  expect(composer).toHaveValue('')
+  expect(screen.queryByText(/API error 504/i)).not.toBeInTheDocument()
+
+  const newUser = { ...earlier, id: 2, content: 'why did it fail?' }
+  const pending = pendingRow('2026-01-01T00:00:05Z')
+  const completed = { ...pending, content: 'Infra flake on node-3.', status: 'completed' }
+  let polls = 0
+  get.mockImplementation(async (path: string) => {
+    if (path.startsWith('/api/ai-models')) return catalog
+    polls++
+    return {
+      messages: [earlier, newUser, polls === 1 ? pending : completed],
+      total: 3,
+      active_session: ACTIVE_SESSION,
+      active_session_version: 'session-version',
+    }
+  })
+
+  // First recovery poll finds the pending row persisted server-side.
+  await act(async () => { vi.advanceTimersByTime(500) })
+  expect(await screen.findByText(/^Thinking\.\.\./)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument()
+  expect(composer).toBeDisabled()
+
+  // Next poll delivers the completed answer — deduplicated, single POST.
+  await act(async () => { vi.advanceTimersByTime(3000) })
+  expect(await screen.findByText('Infra flake on node-3.')).toBeInTheDocument()
+  expect(screen.getAllByText('why did it fail?')).toHaveLength(1)
+  expect(composer).toBeEnabled()
+  expect(post.mock.calls.filter(([path]) => path === '/api/chat/job')).toHaveLength(1)
+  warnSpy.mockRestore()
+})
+
+it('restores input with actionable copy when POST hits a 504 and history confirms the server never received it', async () => {
+  vi.useFakeTimers()
+  const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
+  post.mockImplementation(async (path: string) => {
+    if (path === '/api/chat/job') throw new ApiError(504, 'Gateway Time-out', '')
+    return {}
+  })
+  render(page())
+  const composer = await screen.findByPlaceholderText(/Ask a question/)
+  await waitFor(() => expect(composer).toBeEnabled())
+  fireEvent.change(composer, { target: { value: 'lost question' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+  expect(await screen.findByText(/checking whether your message is already running/i)).toBeInTheDocument()
+  await act(async () => { vi.advanceTimersByTime(500) })
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/before your message reached the server/i)
+  expect(screen.getByRole('alert')).not.toHaveTextContent(/API error 504/i)
+  expect(composer).toHaveValue('lost question')
+  expect(composer).toBeEnabled()
+  warnSpy.mockRestore()
+})
+
+it('replaces raw 504 with actionable copy on initial history load failure', async () => {
+  const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  setup()
+  get.mockImplementation(async (path: string) => {
+    if (path.startsWith('/api/ai-models')) return catalog
+    throw new ApiError(504, 'Gateway Time-out', '<html>504</html>')
+  })
+  render(page())
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent(/gateway timeout/i)
+  expect(alert).not.toHaveTextContent(/API error 504/i)
+  expect(screen.getByRole('button', { name: 'Retry history' })).toBeEnabled()
+  warnSpy.mockRestore()
+})
+
+it('keeps polling past 5 minutes for a slow turn and delivers the reply when it completes', async () => {
+  vi.useFakeTimers()
+  setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
+  render(page())
+  const composer = await screen.findByPlaceholderText(/Ask a question/)
+  await waitFor(() => expect(composer).toBeEnabled())
+  fireEvent.change(composer, { target: { value: 'deep investigation' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  expect(await screen.findByText(/^Thinking\.\.\./)).toBeInTheDocument()
+
+  const userRow = {
+    id: 2,
+    job_id: 'job',
+    role: 'user',
+    content: 'deep investigation',
+    username: 'alice',
+    ai_provider: '',
+    ai_model: '',
+    status: 'completed',
+    created_at: '2026-01-01T00:00:00Z',
+  }
+  const pending = pendingRow('2026-01-01T00:00:00Z')
+  let completed = false
+  get.mockImplementation(async (path: string) => {
+    if (path.startsWith('/api/ai-models')) return catalog
+    return {
+      messages: [
+        userRow,
+        completed ? { ...pending, content: 'Finished after 6 minutes.', status: 'completed' } : pending,
+      ],
+      total: 2,
+      active_session: ACTIVE_SESSION,
+      active_session_version: 'session-version',
+    }
+  })
+
+  // Advance well past the old 5-minute timeout cap while still pending.
+  for (let i = 0; i < 120; i++) {
+    await act(async () => { vi.advanceTimersByTime(3000) })
+  }
+  expect(screen.getByText(/^Thinking\.\.\./)).toBeInTheDocument()
+
+  completed = true
+  await act(async () => { vi.advanceTimersByTime(3000) })
+  expect(await screen.findByText('Finished after 6 minutes.')).toBeInTheDocument()
+  expect(composer).toBeEnabled()
+})

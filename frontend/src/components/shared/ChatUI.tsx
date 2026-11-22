@@ -23,6 +23,55 @@ const EMPTY_REPO_URLS: RepoUrl[] = []
 /** Roles allowed to abort a turn — mirrors the server's `_require_reviewer`. */
 const ABORT_ROLES = ['reviewer', 'operator', 'admin']
 
+const POLL_INITIAL_DELAY_MS = 2000
+const POLL_RECOVERY_DELAY_MS = 500
+const POLL_INTERVAL_MS = 3000
+const POLL_MAX_BACKOFF_MS = 10000
+
+const GATEWAY_TURN_SYNC_NOTICE =
+  'Connection interrupted while waiting for the reply — reconnecting automatically. Your turn is still running on the server; no need to resend.'
+const GATEWAY_SEND_RECOVERY_NOTICE =
+  'Gateway timed out while sending — checking whether your message is already running. No need to resend.'
+const GATEWAY_SEND_LOST_ERROR =
+  'The gateway timed out before your message reached the server. Your text has been restored — try sending again.'
+const GATEWAY_HISTORY_ERROR =
+  'Could not reach the server to load chat history (gateway timeout). Click Retry history to try again.'
+const GATEWAY_ACTION_ERROR =
+  'The server gateway timed out while handling that request. Please try again.'
+
+/** True for reverse-proxy / gateway 5xx responses (e.g. 502, 503, 504). */
+function isTransientGatewayError(err: unknown): boolean {
+  return err instanceof ApiError && err.status >= 500 && err.status < 600
+}
+
+/** True for transient gateway 5xx or dropped-connection transport errors. */
+function isTransientTransportError(err: unknown): boolean {
+  return isTransientGatewayError(err) || !(err instanceof ApiError)
+}
+
+/** Log transport/gateway failures with provider, model, and elapsed time for diagnostics. */
+function logChatTransportError(
+  action: string,
+  err: unknown,
+  choice: SessionChoice | null,
+  sinceMs: number | null,
+) {
+  const detail = err instanceof ApiError
+    ? `HTTP ${err.status} ${err.statusText}`.trim()
+    : err instanceof Error ? err.message : 'unknown error'
+  const elapsed = sinceMs !== null ? `${Math.max(0, Math.round((Date.now() - sinceMs) / 1000))}s` : 'n/a'
+  const pair = choice ? `${choice.provider}/${choice.model}` : 'none'
+  console.warn(`[ChatUI] ${action} failed (${detail}, pair=${pair}, elapsed=${elapsed})`)
+}
+
+/** Replace raw "API error 504: Gateway Time-out" with actionable user-facing copy. */
+function formatChatError(err: unknown, fallback: string, gatewayCopy: string): string {
+  const detail = extractApiDetail(err)
+  if (detail) return detail
+  if (isTransientGatewayError(err)) return gatewayCopy
+  return err instanceof Error ? err.message : fallback
+}
+
 const INIT_STEPS = [
   'Initializing workspace and cloning repositories...',
   'Loading chat history...',
@@ -150,6 +199,8 @@ export function ChatUI({
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [error, setError] = useState('')
+  const [transientNotice, setTransientNotice] = useState('')
+  const [recoveringSend, setRecoveringSend] = useState(false)
   const [sessionStarted, setSessionStarted] = useState(false)
   const [sessionChoice, setSessionChoice] = useState<SessionChoice | null>(null)
   const [starting, setStarting] = useState(false)
@@ -185,6 +236,8 @@ export function ChatUI({
   const clearingRef = useRef(false)
   const preflightRef = useRef(false)
   const sendInFlightRef = useRef(false)
+  const recoveringSendRef = useRef(false)
+  const pendingSendRef = useRef<{ content: string; prevMaxId: number; startedAt: number } | null>(null)
   const [sending, setSending] = useState(false)
   const mountedRef = useRef(true)
   const startInFlightRef = useRef(false)
@@ -198,8 +251,18 @@ export function ChatUI({
     return () => { mountedRef.current = false }
   }, [])
 
-  const hasPending = messages.some(m => m.status === 'pending')
-  const sendBusy = sending || hasPending
+  const pendingAssistantMsg = useMemo(
+    () => messages.find(m => m.role === 'assistant' && m.status === 'pending') ?? null,
+    [messages],
+  )
+  const hasPending = pendingAssistantMsg !== null
+  const sendBusy = sending || recoveringSend || hasPending
+  const messagesRef = useRef<ChatMessage[]>(messages)
+  messagesRef.current = messages
+  const pendingAssistantRef = useRef<ChatMessage | null>(pendingAssistantMsg)
+  pendingAssistantRef.current = pendingAssistantMsg
+  const sessionChoiceRef = useRef<SessionChoice | null>(sessionChoice)
+  sessionChoiceRef.current = sessionChoice
 
   // Provisional answer text per assistant message id (fragments only, never persisted).
   const [streamTexts, setStreamTexts] = useState<Record<number, string>>({})
@@ -285,6 +348,8 @@ export function ChatUI({
   const sendBlockedReason = clearing ? 'Clearing chat session'
     : !sessionStarted
     ? 'Start Chat before sending'
+    : recoveringSend
+      ? 'Checking whether your previous message is already running'
     : sendBusy
       ? 'Wait for the current reply to finish'
       : !input.trim()
@@ -342,47 +407,111 @@ export function ChatUI({
     }
   }, [])
 
-  // Polling fallback: fetch messages until the specific assistant message resolves
-  const startPollForResponse = useCallback((assistantMsgId: number) => {
+  const pendingSinceMs = useCallback((): number | null => {
+    const pending = pendingAssistantRef.current
+    if (pending) return parseApiTimestamp(pending.created_at)?.getTime() ?? null
+    return pendingSendRef.current?.startedAt ?? null
+  }, [])
+
+  const startPollRef = useRef<(assistantMsgId: number | null, initialDelayMs?: number) => void>(() => {})
+
+  /** Single authoritative state updater for every successful history GET. */
+  const applyHistoryResponse = useCallback((
+    history: ChatHistory,
+    options: { updateSession: 'always' | 'if-available'; ensurePoll?: boolean },
+  ) => {
+    const msgs = history.messages
+    setMessages(msgs)
+    setPrepPhase(history.preparing ?? null)
+    settlePreparation(history)
+    setHistoryFailed(false)
+    setTransientNotice('')
+    if (options.updateSession === 'always') {
+      applySession(history.active_session, history.active_session_version)
+    } else if (history.active_session !== undefined && (history.active_session || !confirmedInitRef.current)) {
+      applySession(history.active_session, history.active_session_version)
+    }
+
+    // Reconcile a POST that hit a gateway 5xx: check whether the server persisted
+    // the turn before the gateway dropped the response.
+    if (recoveringSendRef.current && pendingSendRef.current) {
+      const { content, prevMaxId } = pendingSendRef.current
+      const persisted = msgs.some(m => m.id > prevMaxId)
+      pendingSendRef.current = null
+      recoveringSendRef.current = false
+      setRecoveringSend(false)
+      if (persisted) {
+        setError('')
+      } else {
+        setInput(curr => curr || content)
+        setError(GATEWAY_SEND_LOST_ERROR)
+      }
+    }
+
+    if (options.ensurePoll === false) return
+    const pending = msgs.find(m => m.role === 'assistant' && m.status === 'pending')
+    if (pending) {
+      if (!pollTimerRef.current) startPollRef.current(pending.id)
+    } else if (!recoveringSendRef.current) {
+      cancelPoll()
+    }
+  }, [applySession, cancelPoll, settlePreparation])
+
+  // Polling fallback: fetch messages until the pending turn resolves or send-recovery settles.
+  // Never gives up silently after an arbitrary wall-clock cap: slow turns can exceed 5 minutes,
+  // and unmount / New Session / completion / abort all cancel this timer explicitly.
+  const startPollForResponse = useCallback((
+    assistantMsgId: number | null,
+    initialDelayMs: number = POLL_INITIAL_DELAY_MS,
+  ) => {
     cancelPoll()
     const generation = pollGenerationRef.current
-    const maxTime = Date.now() + 5 * 60 * 1000 // 5 min safety timeout
+    let consecutiveFailures = 0
     console.debug('[ChatUI] Poll started — generation', generation, 'waiting for assistant msg', assistantMsgId)
 
     const poll = () => {
       if (pollGenerationRef.current !== generation) return
-      if (Date.now() > maxTime) {
-        console.warn('[ChatUI] Poll timed out after 5 minutes')
-        pollTimerRef.current = null
-        return
-      }
+      pollTimerRef.current = null
       fetchMessages()
         .then(({ history, generation: historyGeneration }) => {
           if (pollGenerationRef.current !== generation || !historyIsCurrent(historyGeneration)) return
+          consecutiveFailures = 0
+          setError(prev => (prev === GATEWAY_HISTORY_ERROR ? '' : prev))
+          applyHistoryResponse(history, { updateSession: 'if-available', ensurePoll: false })
           const msgs = history.messages
-          setMessages(msgs)
-          setPrepPhase(history.preparing ?? null)
-          // Check if the specific assistant message is no longer pending
-          const hasResponse = msgs.some(m =>
-            m.id === assistantMsgId && m.status !== 'pending'
-          )
-          if (hasResponse) {
+          const stillPending = assistantMsgId !== null
+            ? msgs.some(m => m.id === assistantMsgId && m.status === 'pending')
+            : msgs.some(m => m.role === 'assistant' && m.status === 'pending')
+          if (!stillPending && !recoveringSendRef.current) {
             console.debug('[ChatUI] Poll completed — assistant response received')
             pollTimerRef.current = null
           } else {
-            pollTimerRef.current = setTimeout(poll, 3000)
+            pollTimerRef.current = setTimeout(poll, POLL_INTERVAL_MS)
           }
         })
         .catch((err) => {
           if (pollGenerationRef.current !== generation || clearingRef.current || !mountedRef.current) return
-          console.warn('[ChatUI] Poll fetch failed, retrying:', err instanceof Error ? err.message : 'unknown error')
-          pollTimerRef.current = setTimeout(poll, 3000)
+          logChatTransportError('Chat poll', err, sessionChoiceRef.current, pendingSinceMs())
+          if (!isTransientTransportError(err)) {
+            pollTimerRef.current = null
+            setHistoryFailed(true)
+            setTransientNotice('')
+            setError(formatChatError(err, 'Failed to sync chat', GATEWAY_HISTORY_ERROR))
+            return
+          }
+          consecutiveFailures++
+          setTransientNotice(
+            recoveringSendRef.current ? GATEWAY_SEND_RECOVERY_NOTICE : GATEWAY_TURN_SYNC_NOTICE,
+          )
+          const delay = Math.min(POLL_INTERVAL_MS * consecutiveFailures, POLL_MAX_BACKOFF_MS)
+          pollTimerRef.current = setTimeout(poll, delay)
         })
     }
 
     // Start after short delay to give SSE a chance first
-    pollTimerRef.current = setTimeout(poll, 2000)
-  }, [fetchMessages, cancelPoll, historyIsCurrent])
+    pollTimerRef.current = setTimeout(poll, initialDelayMs)
+  }, [fetchMessages, cancelPoll, historyIsCurrent, applyHistoryResponse, pendingSinceMs])
+  startPollRef.current = startPollForResponse
 
   // History is readable without creating a workspace or AI session.
   useEffect(() => {
@@ -393,22 +522,21 @@ export function ChatUI({
     fetchMessages()
       .then(({ history: res }) => {
         if (ignore || !historyIsCurrent(generation)) return
-        const msgs = res.messages
+        applyHistoryResponse(res, { updateSession: 'if-available' })
+        console.info('[ChatUI] Chat history loaded, active session:', !!res.active_session)
+      })
+      .catch(err => {
         if (!ignore && historyIsCurrent(generation)) {
-          setMessages(msgs)
-          setPrepPhase(res.preparing ?? null)
-          settlePreparation(res)
-          const active = res.active_session
-          if (active || !confirmedInitRef.current) applySession(active, res.active_session_version)
-          console.info('[ChatUI] Chat history loaded, active session:', !!active)
+          logChatTransportError('Initial history load', err, sessionChoiceRef.current, null)
+          setHistoryFailed(true)
+          setError(formatChatError(err, 'Failed to load chat history', GATEWAY_HISTORY_ERROR))
         }
       })
-      .catch(err => { if (!ignore && historyIsCurrent(generation)) { setHistoryFailed(true); setError(err instanceof Error ? err.message : 'Failed to load chat history') } })
       // Not generation-gated: a send or a sync can invalidate this fetch, and the
       // spinner must still clear once the initial load has settled.
       .finally(() => { if (!ignore && mountedRef.current) setLoadingHistory(false) })
     return () => { ignore = true }
-  }, [fetchMessages, historyRetry, historyIsCurrent, applySession])
+  }, [fetchMessages, historyRetry, historyIsCurrent, applyHistoryResponse])
 
   const handleStart = async () => {
     if (startInFlightRef.current || confirmedInitRef.current || starting || clearing || loadingHistory || historyFailed || sessionStarted || !validPair) return
@@ -472,14 +600,14 @@ export function ChatUI({
         console.info('[ChatUI] Chat history loaded after start')
       } catch (err) {
         if (!mountedRef.current || clearingRef.current) return
+        logChatTransportError('Post-start history load', err, sessionChoiceRef.current, null)
         setHistoryFailed(true)
-        setError(err instanceof Error ? err.message : 'Failed to load chat history')
-        console.warn('[ChatUI] Chat history failed after start')
+        setError(formatChatError(err, 'Failed to load chat history', GATEWAY_HISTORY_ERROR))
       }
     } catch (err) {
       if (!mountedRef.current) return
-      setError(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to start chat'))
-      console.warn('[ChatUI] Chat start failed')
+      logChatTransportError('Chat start', err, sessionChoiceRef.current, null)
+      setError(formatChatError(err, 'Failed to start chat', GATEWAY_ACTION_ERROR))
     } finally {
       startInFlightRef.current = false
       // A handed-off preparation still owns the spinner: `settlePreparation` is
@@ -516,50 +644,60 @@ export function ChatUI({
     fetchMessagesRef.current()
       .then(({ history }) => {
         if (!historyIsCurrentRef.current(generation)) return
-        setMessages(history.messages)
-        setPrepPhase(history.preparing ?? null)
-        applySession(history.active_session, history.active_session_version)
-        settlePreparation(history)
+        setError(prev => (prev === GATEWAY_HISTORY_ERROR ? '' : prev))
+        applyHistoryResponse(history, { updateSession: 'always' })
         setLoadingHistory(false)
-        setHistoryFailed(false)
         console.info('[ChatUI] Chat synchronized, active session:', !!history.active_session)
       })
       .catch((err) => {
         if (!historyIsCurrentRef.current(generation)) return
-        console.warn('[ChatUI] Failed to sync chat:', err instanceof Error ? err.message : 'unknown error')
-        setHistoryFailed(true)
-        setError(err instanceof Error ? err.message : 'Failed to sync chat')
+        logChatTransportError('Chat sync', err, sessionChoiceRef.current, pendingSinceMs())
         setLoadingHistory(false)
+        // A gateway 5xx while a turn is in flight is a transient failure of the
+        // reporting path, not of the server-side turn: keep the pending state
+        // alive and keep polling so the reply appears without a manual reload.
+        const turnActive = pendingAssistantRef.current !== null || recoveringSendRef.current
+        if (turnActive && isTransientTransportError(err)) {
+          setTransientNotice(
+            recoveringSendRef.current ? GATEWAY_SEND_RECOVERY_NOTICE : GATEWAY_TURN_SYNC_NOTICE,
+          )
+          if (!pollTimerRef.current) {
+            startPollRef.current(pendingAssistantRef.current?.id ?? null, POLL_INTERVAL_MS)
+          }
+          return
+        }
+        setHistoryFailed(true)
+        setError(formatChatError(err, 'Failed to sync chat', GATEWAY_HISTORY_ERROR))
       })
-  }, [applySession])
+  }, [applyHistoryResponse, pendingSinceMs])
 
   const chatEvents = useMemo(() => ({
     'chat-changed': () => {
-      console.debug('[ChatUI] SSE chat-changed received, cancelling poll')
-      cancelPollRef.current()
+      console.debug('[ChatUI] SSE chat-changed received, syncing history')
       syncHistory()
     },
   }), [syncHistory])
 
   const chatSseOnReconnect = useCallback(() => {
-    console.debug('[ChatUI] SSE reconnected')
-    cancelPollRef.current()
+    console.debug('[ChatUI] SSE reconnected, syncing history')
     syncHistory()
   }, [syncHistory])
 
   useSSE(sseTopic, chatEvents, { onReconnect: chatSseOnReconnect })
 
-  // Auto-scroll — `sending` is in the deps because the transient Sending row is
-  // rendered from that flag, not from `messages`, so appending it fires nothing.
+  // Auto-scroll — `sending` and `recoveringSend` are in the deps because transient
+  // busy rows are rendered from those flags, not from `messages`.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, sending])
+  }, [messages, sending, recoveringSend])
 
   const handleSend = useCallback(async (e?: FormEvent) => {
     e?.preventDefault()
     const trimmed = input.trim()
     if (!trimmed || !sessionStarted || clearing || sendBusy || sendInFlightRef.current) return
     sendInFlightRef.current = true
+    const prevMaxId = messagesRef.current.reduce((max, m) => Math.max(max, m.id), 0)
+    const sendStartedAt = Date.now()
     // A history fetch started before this send carries a snapshot without the
     // optimistic row; invalidate it so its late arrival cannot drop the row and
     // re-enable the composer mid-turn.
@@ -567,6 +705,7 @@ export function ChatUI({
     setSending(true)
     console.info('[ChatUI] Sending message')
     setError('')
+    setTransientNotice('')
     setInput('')
 
     try {
@@ -617,9 +756,25 @@ export function ChatUI({
       startPollForResponse(res.assistant_message_id)
     } catch (err) {
       if (!mountedRef.current) return
-      setError(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to send message'))
+      logChatTransportError('Chat send', err, sessionChoiceRef.current, sendStartedAt)
+      if (isTransientGatewayError(err)) {
+        // The server may already have persisted the turn and pushed it over SSE
+        // before the gateway timed out: never encourage a duplicate send until
+        // history confirms whether the message landed.
+        if (messagesRef.current.some(m => m.id > prevMaxId)) {
+          const pending = pendingAssistantRef.current
+          if (pending && !pollTimerRef.current) startPollForResponse(pending.id)
+          return
+        }
+        pendingSendRef.current = { content: trimmed, prevMaxId, startedAt: sendStartedAt }
+        recoveringSendRef.current = true
+        setRecoveringSend(true)
+        setTransientNotice(GATEWAY_SEND_RECOVERY_NOTICE)
+        startPollForResponse(null, POLL_RECOVERY_DELAY_MS)
+        return
+      }
+      setError(formatChatError(err, 'Failed to send message', GATEWAY_ACTION_ERROR))
       setInput(trimmed)
-      console.warn('[ChatUI] Send failed')
     } finally {
       sendInFlightRef.current = false
       if (mountedRef.current) setSending(false)
@@ -680,6 +835,10 @@ export function ChatUI({
       historyGenerationRef.current++
       confirmedInitRef.current = false
       prepRunningRef.current = false
+      pendingSendRef.current = null
+      recoveringSendRef.current = false
+      setRecoveringSend(false)
+      setTransientNotice('')
       setStarting(false)
       cancelPoll()
       setSessionStarted(false)
@@ -693,8 +852,8 @@ export function ChatUI({
         setError('Chat session changed in another tab. History refreshed; review it before clearing again.')
         console.info('[ChatUI] Chat clear conflict, refreshing history')
       } else {
-        setError(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to clear chat'))
-        console.warn('[ChatUI] Chat clear failed')
+        logChatTransportError('Chat clear', err, sessionChoiceRef.current, null)
+        setError(formatChatError(err, 'Failed to clear chat', GATEWAY_ACTION_ERROR))
       }
     } finally {
       preflightRef.current = false
@@ -707,6 +866,8 @@ export function ChatUI({
   const handleAbort = useCallback(async () => {
     try {
       await api.post(`${apiBasePath}/abort`, {})
+      cancelPoll()
+      setTransientNotice('')
       setMessages(prev => prev.map(m =>
         m.status === 'pending'
           ? { ...m, status: 'failed' as const, content: 'Aborted by user.' }
@@ -718,9 +879,10 @@ export function ChatUI({
       // running: say why, keep the bubble ticking, and let the completion sync
       // restore the composer. Flipping locally would re-enable it for the few
       // seconds until the next sync put the pending row back.
-      setError(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to stop the reply'))
+      logChatTransportError('Chat abort', err, sessionChoiceRef.current, pendingSinceMs())
+      setError(formatChatError(err, 'Failed to stop the reply', GATEWAY_ACTION_ERROR))
     }
-  }, [apiBasePath])
+  }, [apiBasePath, cancelPoll, pendingSinceMs])
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -804,13 +966,13 @@ export function ChatUI({
 
         {/* State transitions only — never the ticking label, which would re-announce every second. */}
         <span className="sr-only" role="status">
-          {sending ? 'Sending message' : hasPending ? 'Waiting for the reply' : ''}
+          {sending ? 'Sending message' : recoveringSend ? 'Reconnecting to check your message' : hasPending ? 'Waiting for the reply' : ''}
         </span>
 
         {/* Messages area */}
         <div className="flex-1 flex flex-col overflow-y-auto px-6 py-4 space-y-4">
           {loadingHistory && <p className="text-sm text-text-tertiary">Loading chat history...</p>}
-          {!loadingHistory && messages.length === 0 && !sending && (
+          {!loadingHistory && messages.length === 0 && !sending && !recoveringSend && (
             <div className="flex flex-col items-center justify-center flex-1 text-text-tertiary">
               <Bot className="h-12 w-12 mb-3 opacity-30" />
               <p className="text-sm">{emptyMessage}</p>
@@ -906,10 +1068,26 @@ export function ChatUI({
             </div>
           ))}
           {/* Below the thread, right above the sentinel. Rendering here does not by
-              itself keep it visible: the auto-scroll effect keys on `sending` too. */}
+              itself keep it visible: the auto-scroll effect keys on `sending` and `recoveringSend` too. */}
           {sending && !hasPending && <ChatBusyRow label="Sending..." canStop={false} onStop={handleAbort} />}
+          {recoveringSend && !sending && !hasPending && (
+            <ChatBusyRow
+              label="Reconnecting..."
+              since={pendingSendRef.current ? new Date(pendingSendRef.current.startedAt) : null}
+              canStop={false}
+              onStop={handleAbort}
+            />
+          )}
           <div ref={messagesEndRef} />
         </div>
+
+        {/* Transient gateway notice — calm status while reconnecting on an active turn */}
+        {transientNotice && (
+          <div className="px-6 py-2 flex items-center gap-2 text-xs text-signal-amber" role="status">
+            <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+            <p>{transientNotice}</p>
+          </div>
+        )}
 
         {/* Error */}
         {error && (
