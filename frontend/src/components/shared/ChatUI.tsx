@@ -27,26 +27,39 @@ const POLL_INITIAL_DELAY_MS = 2000
 const POLL_RECOVERY_DELAY_MS = 500
 const POLL_INTERVAL_MS = 3000
 const POLL_MAX_BACKOFF_MS = 10000
+// Generous upper bound so slow multi-minute turns stay alive while an orphaned
+// pending row (e.g. after a server restart) never polls an open tab forever.
+const POLL_MAX_DURATION_MS = 30 * 60 * 1000
+// Require consecutive clean 200 snapshots with no lock-holding pending turn
+// before concluding a 5xx/dropped POST never reached the server.
+const SEND_RECOVERY_CLEAN_CHECKS = 2
 
 const GATEWAY_TURN_SYNC_NOTICE =
   'Connection interrupted while waiting for the reply — reconnecting automatically. Your turn is still running on the server; no need to resend.'
 const GATEWAY_SEND_RECOVERY_NOTICE =
-  'Gateway timed out while sending — checking whether your message is already running. No need to resend.'
+  'Connection interrupted while sending — checking whether your message is already running. No need to resend.'
 const GATEWAY_SEND_LOST_ERROR =
-  'The gateway timed out before your message reached the server. Your text has been restored — try sending again.'
+  'The connection timed out before your message reached the server. Your text has been restored — check the thread before sending again.'
 const GATEWAY_HISTORY_ERROR =
   'Could not reach the server to load chat history (gateway timeout). Click Retry history to try again.'
 const GATEWAY_ACTION_ERROR =
   'The server gateway timed out while handling that request. Please try again.'
+const POLL_TIMEOUT_ERROR =
+  'Still waiting for a reply after 30 minutes. Click Retry history to check again, or Stop to cancel this turn.'
 
-/** True for reverse-proxy / gateway 5xx responses (e.g. 502, 503, 504). */
+/** True for reverse-proxy / gateway 5xx responses (no FastAPI JSON `detail`). */
 function isTransientGatewayError(err: unknown): boolean {
-  return err instanceof ApiError && err.status >= 500 && err.status < 600
+  return err instanceof ApiError && err.status >= 500 && err.status < 600 && extractApiDetail(err) === null
 }
 
-/** True for transient gateway 5xx or dropped-connection transport errors. */
+/** True for transient gateway 5xx or dropped fetch connections (`TypeError` per Fetch spec). */
 function isTransientTransportError(err: unknown): boolean {
-  return isTransientGatewayError(err) || !(err instanceof ApiError)
+  return isTransientGatewayError(err) || err instanceof TypeError
+}
+
+/** True when history contains the exact user message submitted after `prevMaxId`. */
+function hasSubmittedUserMessage(messages: ChatMessage[], prevMaxId: number, content: string): boolean {
+  return messages.some(m => m.id > prevMaxId && m.role === 'user' && m.content.trim() === content)
 }
 
 /** Log transport/gateway failures with provider, model, and elapsed time for diagnostics. */
@@ -237,7 +250,7 @@ export function ChatUI({
   const preflightRef = useRef(false)
   const sendInFlightRef = useRef(false)
   const recoveringSendRef = useRef(false)
-  const pendingSendRef = useRef<{ content: string; prevMaxId: number; startedAt: number } | null>(null)
+  const pendingSendRef = useRef<{ content: string; prevMaxId: number; startedAt: number; cleanChecks: number } | null>(null)
   const [sending, setSending] = useState(false)
   const mountedRef = useRef(true)
   const startInFlightRef = useRef(false)
@@ -425,58 +438,88 @@ export function ChatUI({
     setPrepPhase(history.preparing ?? null)
     settlePreparation(history)
     setHistoryFailed(false)
-    setTransientNotice('')
     if (options.updateSession === 'always') {
       applySession(history.active_session, history.active_session_version)
     } else if (history.active_session !== undefined && (history.active_session || !confirmedInitRef.current)) {
       applySession(history.active_session, history.active_session_version)
     }
 
-    // Reconcile a POST that hit a gateway 5xx: check whether the server persisted
-    // the turn before the gateway dropped the response.
+    // Reconcile a POST that hit a gateway 5xx or dropped connection: match the
+    // exact submitted prompt (ignoring unrelated rows from another tab) and
+    // wait for consecutive clean snapshots with no lock-holding pending turn
+    // before concluding the server never received the POST.
+    let stillRecoveringSend = false
     if (recoveringSendRef.current && pendingSendRef.current) {
-      const { content, prevMaxId } = pendingSendRef.current
-      const persisted = msgs.some(m => m.id > prevMaxId)
-      pendingSendRef.current = null
-      recoveringSendRef.current = false
-      setRecoveringSend(false)
+      const pendingSend = pendingSendRef.current
+      const persisted = hasSubmittedUserMessage(msgs, pendingSend.prevMaxId, pendingSend.content)
       if (persisted) {
+        pendingSendRef.current = null
+        recoveringSendRef.current = false
+        setRecoveringSend(false)
+        setTransientNotice('')
         setError('')
       } else {
-        setInput(curr => curr || content)
-        setError(GATEWAY_SEND_LOST_ERROR)
+        const otherTurnHoldingLock = msgs.some(m => m.role === 'assistant' && m.status === 'pending')
+        if (!otherTurnHoldingLock) pendingSend.cleanChecks++
+        if (!otherTurnHoldingLock && pendingSend.cleanChecks >= SEND_RECOVERY_CLEAN_CHECKS) {
+          pendingSendRef.current = null
+          recoveringSendRef.current = false
+          setRecoveringSend(false)
+          setTransientNotice('')
+          setInput(curr => curr || pendingSend.content)
+          setError(GATEWAY_SEND_LOST_ERROR)
+        } else {
+          stillRecoveringSend = true
+          setTransientNotice(GATEWAY_SEND_RECOVERY_NOTICE)
+        }
       }
+    } else {
+      setTransientNotice('')
     }
 
-    if (options.ensurePoll === false) return
+    if (options.ensurePoll === false) {
+      if (stillRecoveringSend && !pollTimerRef.current) {
+        startPollRef.current(null, POLL_INTERVAL_MS)
+      }
+      return
+    }
     const pending = msgs.find(m => m.role === 'assistant' && m.status === 'pending')
-    if (pending) {
-      if (!pollTimerRef.current) startPollRef.current(pending.id)
-    } else if (!recoveringSendRef.current) {
+    if (pending || stillRecoveringSend) {
+      if (!pollTimerRef.current) startPollRef.current(pending?.id ?? null)
+    } else {
       cancelPoll()
     }
   }, [applySession, cancelPoll, settlePreparation])
 
-  // Polling fallback: fetch messages until the pending turn resolves or send-recovery settles.
-  // Never gives up silently after an arbitrary wall-clock cap: slow turns can exceed 5 minutes,
-  // and unmount / New Session / completion / abort all cancel this timer explicitly.
+  // Polling fallback: active when SSE has not yet confirmed delivery or a
+  // transport/gateway failure interrupted syncing. Bounded at 30 minutes so
+  // slow turns survive while orphaned post-restart pending rows cannot poll forever.
   const startPollForResponse = useCallback((
     assistantMsgId: number | null,
     initialDelayMs: number = POLL_INITIAL_DELAY_MS,
   ) => {
     cancelPoll()
     const generation = pollGenerationRef.current
+    const maxTime = Date.now() + POLL_MAX_DURATION_MS
     let consecutiveFailures = 0
     console.debug('[ChatUI] Poll started — generation', generation, 'waiting for assistant msg', assistantMsgId)
 
     const poll = () => {
       if (pollGenerationRef.current !== generation) return
+      if (Date.now() > maxTime) {
+        console.warn('[ChatUI] Poll timed out after 30 minutes')
+        pollTimerRef.current = null
+        setTransientNotice('')
+        setHistoryFailed(true)
+        setError(POLL_TIMEOUT_ERROR)
+        return
+      }
       pollTimerRef.current = null
       fetchMessages()
         .then(({ history, generation: historyGeneration }) => {
           if (pollGenerationRef.current !== generation || !historyIsCurrent(historyGeneration)) return
           consecutiveFailures = 0
-          setError(prev => (prev === GATEWAY_HISTORY_ERROR ? '' : prev))
+          setError(prev => (prev === GATEWAY_HISTORY_ERROR || prev === POLL_TIMEOUT_ERROR ? '' : prev))
           applyHistoryResponse(history, { updateSession: 'if-available', ensurePoll: false })
           const msgs = history.messages
           const stillPending = assistantMsgId !== null
@@ -644,8 +687,10 @@ export function ChatUI({
     fetchMessagesRef.current()
       .then(({ history }) => {
         if (!historyIsCurrentRef.current(generation)) return
-        setError(prev => (prev === GATEWAY_HISTORY_ERROR ? '' : prev))
-        applyHistoryResponse(history, { updateSession: 'always' })
+        setError(prev => (prev === GATEWAY_HISTORY_ERROR || prev === POLL_TIMEOUT_ERROR ? '' : prev))
+        // SSE delivered this sync cleanly — keep polling off unless send-recovery
+        // still needs another check.
+        applyHistoryResponse(history, { updateSession: 'always', ensurePoll: false })
         setLoadingHistory(false)
         console.info('[ChatUI] Chat synchronized, active session:', !!history.active_session)
       })
@@ -653,9 +698,10 @@ export function ChatUI({
         if (!historyIsCurrentRef.current(generation)) return
         logChatTransportError('Chat sync', err, sessionChoiceRef.current, pendingSinceMs())
         setLoadingHistory(false)
-        // A gateway 5xx while a turn is in flight is a transient failure of the
-        // reporting path, not of the server-side turn: keep the pending state
-        // alive and keep polling so the reply appears without a manual reload.
+        // A gateway 5xx or dropped connection while a turn is in flight is a
+        // transient failure of the reporting path, not of the server-side turn:
+        // keep the pending state alive and start fallback polling so the reply
+        // appears without a manual reload.
         const turnActive = pendingAssistantRef.current !== null || recoveringSendRef.current
         if (turnActive && isTransientTransportError(err)) {
           setTransientNotice(
@@ -673,13 +719,15 @@ export function ChatUI({
 
   const chatEvents = useMemo(() => ({
     'chat-changed': () => {
-      console.debug('[ChatUI] SSE chat-changed received, syncing history')
+      console.debug('[ChatUI] SSE chat-changed received, cancelling poll')
+      cancelPollRef.current()
       syncHistory()
     },
   }), [syncHistory])
 
   const chatSseOnReconnect = useCallback(() => {
-    console.debug('[ChatUI] SSE reconnected, syncing history')
+    console.debug('[ChatUI] SSE reconnected, cancelling poll')
+    cancelPollRef.current()
     syncHistory()
   }, [syncHistory])
 
@@ -757,16 +805,16 @@ export function ChatUI({
     } catch (err) {
       if (!mountedRef.current) return
       logChatTransportError('Chat send', err, sessionChoiceRef.current, sendStartedAt)
-      if (isTransientGatewayError(err)) {
+      if (isTransientTransportError(err)) {
         // The server may already have persisted the turn and pushed it over SSE
-        // before the gateway timed out: never encourage a duplicate send until
-        // history confirms whether the message landed.
-        if (messagesRef.current.some(m => m.id > prevMaxId)) {
+        // before the gateway timed out or dropped the connection: never encourage
+        // a duplicate send until history confirms whether this message landed.
+        if (hasSubmittedUserMessage(messagesRef.current, prevMaxId, trimmed)) {
           const pending = pendingAssistantRef.current
           if (pending && !pollTimerRef.current) startPollForResponse(pending.id)
           return
         }
-        pendingSendRef.current = { content: trimmed, prevMaxId, startedAt: sendStartedAt }
+        pendingSendRef.current = { content: trimmed, prevMaxId, startedAt: sendStartedAt, cleanChecks: 0 }
         recoveringSendRef.current = true
         setRecoveringSend(true)
         setTransientNotice(GATEWAY_SEND_RECOVERY_NOTICE)

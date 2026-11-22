@@ -1256,7 +1256,7 @@ it('recovers without duplicating when POST itself hits a gateway 504 after the s
   warnSpy.mockRestore()
 })
 
-it('restores input with actionable copy when POST hits a 504 and history confirms the server never received it', async () => {
+it('restores input with actionable copy when POST hits a 504 and consecutive history checks confirm the server never received it', async () => {
   vi.useFakeTimers()
   const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
   setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
@@ -1271,12 +1271,130 @@ it('restores input with actionable copy when POST hits a 504 and history confirm
   fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
 
   expect(await screen.findByText(/checking whether your message is already running/i)).toBeInTheDocument()
+  // First clean check (500ms) does not restore yet — a slow server write may still be landing.
   await act(async () => { vi.advanceTimersByTime(500) })
+  expect(composer).toBeDisabled()
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 
+  // Second clean check confirms the turn never persisted; draft is restored with actionable copy.
+  await act(async () => { vi.advanceTimersByTime(3000) })
   expect(await screen.findByRole('alert')).toHaveTextContent(/before your message reached the server/i)
   expect(screen.getByRole('alert')).not.toHaveTextContent(/API error 504/i)
   expect(composer).toHaveValue('lost question')
   expect(composer).toBeEnabled()
+  warnSpy.mockRestore()
+})
+
+it('surfaces application-level 503 detail on send instead of misclassifying it as a gateway timeout', async () => {
+  const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
+  post.mockImplementation(async (path: string) => {
+    if (path === '/api/chat/job') {
+      throw new ApiError(503, 'Service Unavailable', { detail: 'AI model catalog is temporarily unavailable' })
+    }
+    return {}
+  })
+  render(page())
+  const composer = await screen.findByPlaceholderText(/Ask a question/)
+  await waitFor(() => expect(composer).toBeEnabled())
+  fireEvent.change(composer, { target: { value: 'catalog check' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('AI model catalog is temporarily unavailable')
+  expect(screen.queryByText(/^Reconnecting\.\.\./)).not.toBeInTheDocument()
+  expect(composer).toHaveValue('catalog check')
+  expect(composer).toBeEnabled()
+  warnSpy.mockRestore()
+})
+
+it('enters send-recovery on a dropped network fetch and ignores unrelated rows from another tab', async () => {
+  vi.useFakeTimers()
+  const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
+  post.mockImplementation(async (path: string) => {
+    if (path === '/api/chat/job') throw new TypeError('Failed to fetch')
+    return {}
+  })
+  render(page())
+  const composer = await screen.findByPlaceholderText(/Ask a question/)
+  await waitFor(() => expect(composer).toBeEnabled())
+  fireEvent.change(composer, { target: { value: 'my exact prompt' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+  expect(await screen.findByText(/^Reconnecting\.\.\./)).toBeInTheDocument()
+  expect(composer).toBeDisabled()
+
+  // Another tab posts a different message — must NOT falsely mark our prompt as persisted.
+  const otherTabRow = {
+    id: 10,
+    job_id: 'job',
+    role: 'user',
+    content: 'different prompt from another tab',
+    username: 'alice',
+    ai_provider: '',
+    ai_model: '',
+    status: 'completed',
+    created_at: '2026-01-01T00:00:01Z',
+  }
+  get.mockImplementation(async (path: string) => path.startsWith('/api/ai-models')
+    ? catalog
+    : { messages: [otherTabRow], total: 1, active_session: ACTIVE_SESSION, active_session_version: 'session-version' })
+
+  await act(async () => { vi.advanceTimersByTime(500) })
+  expect(composer).toBeDisabled()
+  await act(async () => { vi.advanceTimersByTime(3000) })
+  expect(await screen.findByRole('alert')).toHaveTextContent(/before your message reached the server/i)
+  expect(composer).toHaveValue('my exact prompt')
+  expect(composer).toBeEnabled()
+  warnSpy.mockRestore()
+})
+
+it('cancels fallback polling once SSE chat-changed succeeds and bounds orphaned pending turns at 30 minutes', async () => {
+  vi.useFakeTimers()
+  const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
+  render(page())
+  const composer = await screen.findByPlaceholderText(/Ask a question/)
+  await waitFor(() => expect(composer).toBeEnabled())
+  fireEvent.change(composer, { target: { value: 'watch sse' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  expect(await screen.findByText(/^Thinking\.\.\./)).toBeInTheDocument()
+
+  const userRow = {
+    id: 2,
+    job_id: 'job',
+    role: 'user',
+    content: 'watch sse',
+    username: 'alice',
+    ai_provider: '',
+    ai_model: '',
+    status: 'completed',
+    created_at: '2026-01-01T00:00:00Z',
+  }
+  const pending = pendingRow('2026-01-01T00:00:00Z')
+  get.mockImplementation(async (path: string) => path.startsWith('/api/ai-models')
+    ? catalog
+    : { messages: [userRow, pending], total: 2, active_session: ACTIVE_SESSION, active_session_version: 'session-version' })
+
+  // Healthy SSE chat-changed cancels fallback polling — no steady-state poll beside SSE.
+  act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
+  await act(async () => { await Promise.resolve() })
+  const getsAfterSse = get.mock.calls.filter(([path]) => path === '/api/chat/job').length
+  await act(async () => { vi.advanceTimersByTime(15000) })
+  expect(get.mock.calls.filter(([path]) => path === '/api/chat/job')).toHaveLength(getsAfterSse)
+
+  // If SSE sync then hits 504, fallback polling starts and stops cleanly at 30m if orphaned.
+  get.mockImplementationOnce(async (path: string) => {
+    if (path.startsWith('/api/ai-models')) return catalog
+    throw new ApiError(504, 'Gateway Time-out', '')
+  })
+  act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
+  expect(await screen.findByText(/reconnecting automatically/i)).toBeInTheDocument()
+  // Advance past 30 minutes (1800s): polling stops and surfaces actionable retry/stop copy.
+  vi.setSystemTime(Date.now() + 31 * 60 * 1000)
+  await act(async () => { vi.advanceTimersByTime(3000) })
+  expect(await screen.findByRole('alert')).toHaveTextContent(/30 minutes/i)
+  expect(screen.getByRole('button', { name: 'Retry history' })).toBeEnabled()
   warnSpy.mockRestore()
 })
 
