@@ -20974,7 +20974,7 @@ async def register_user(request: Request) -> JSONResponse:
         )
 
     # Determine user status based on REQUIRE_APPROVAL setting
-    user_status = "pending" if settings.require_approval else "active"
+    user_status = auth_approval.initial_user_status(settings)
 
     try:
         _, raw_key = await storage.create_user(username, status=user_status)

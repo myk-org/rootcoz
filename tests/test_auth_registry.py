@@ -19,6 +19,7 @@ import pytest
 from starlette.requests import Request
 
 from rootcoz import storage
+from rootcoz.auth import approval as auth_approval
 from rootcoz.auth import registry
 from rootcoz.auth.api_key import ApiKeyStrategy
 from rootcoz.auth.base import AuthContext, AuthIdentity, matches_bootstrap_admin
@@ -372,3 +373,31 @@ async def test_a_disabled_account_is_refused_however_it_authenticated(
 
         assert response.status_code == 401
         assert response.json() == _GENERIC_401
+
+
+class TestInitialUserStatus:
+    """One rule decides the status a new account starts in (#656 review).
+
+    Registration, SSO account creation, proxy provisioning and the projected
+    status behind a proxy redirect all ask this, so the answer is pinned here
+    rather than four times over.
+    """
+
+    def _status_with(self, temp_db_path: Path, require_approval: str) -> str:
+        env = build_test_env(
+            REQUIRE_APPROVAL=require_approval,
+            SECURE_COOKIES="false",
+            DB_PATH=str(temp_db_path),
+        )
+        try:
+            with patch.dict(os.environ, env, clear=True):
+                clear_settings_cache()
+                return auth_approval.initial_user_status(get_settings())
+        finally:
+            clear_settings_cache()
+
+    def test_a_gated_deployment_starts_accounts_pending(self, temp_db_path):
+        assert self._status_with(temp_db_path, "true") == "pending"
+
+    def test_an_ungated_deployment_starts_accounts_active(self, temp_db_path):
+        assert self._status_with(temp_db_path, "false") == "active"

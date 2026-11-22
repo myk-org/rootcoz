@@ -10,12 +10,11 @@ What each piece owns:
 
 * :func:`blocked_user_status_response` — the approval states only
   (``pending`` / ``rejected``), answered by the middleware and the login route.
-* :func:`account_block_reason` — whether a users row may act on a live
-  credential: ``disabled`` stops every path, ``locked`` only the login page and
-  the proxy redirect. The login lockout *transition* (counting a failure,
-  deciding the lock) belongs to :func:`rootcoz.storage.settle_login_attempt`,
-  which cannot live here: ``storage`` is a dependency of this package, so
-  importing ``auth`` from it would be a cycle.
+* :func:`approval_gate_applies` — whether ``REQUIRE_APPROVAL`` holds a
+  non-administrator back at all: the condition half of every approval refusal.
+* :func:`initial_user_status` — the status a brand-new account starts in, so
+  registration, SSO account creation, proxy provisioning and the projected
+  status behind a proxy redirect cannot drift apart.
 """
 
 from __future__ import annotations
@@ -35,6 +34,24 @@ APPROVAL_STATUS_DETAILS: dict[str, str] = {
     "pending": "Your account is awaiting admin approval",
     "rejected": "Your account has been rejected",
 }
+
+
+def initial_user_status(settings: Settings) -> str:
+    """The status a newly created account starts in.
+
+    ``REQUIRE_APPROVAL`` is the deployment's admission gate: on, every new account
+    waits for an admin (``pending``); off, it may act at once (``active``). Every
+    creation path asks this — registration, an SSO account, a proxy-provisioned
+    account, and the *projected* status of a row a proxy redirect is about to
+    create — so the rule cannot drift between them.
+
+    Args:
+        settings: Application settings (the approval rule).
+
+    Returns:
+        ``pending`` while the deployment requires approval, else ``active``.
+    """
+    return "pending" if settings.require_approval else "active"
 
 
 def is_approval_blocked(user_status: str | None) -> bool:

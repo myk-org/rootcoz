@@ -11,6 +11,7 @@ from rootcoz import get_child_logger, storage
 from rootcoz.auth.approval import (
     account_block_reason,
     approval_gate_applies,
+    initial_user_status,
     is_approval_blocked,
 )
 from rootcoz.auth.base import (
@@ -214,7 +215,7 @@ class ProxyStrategy(AuthStrategy):
             # the trail.
             _record_refusal(request, username, refusal)
             return None
-        status = "pending" if settings.require_approval else "active"
+        status = initial_user_status(settings)
         try:
             # Keyless: the header is this account's credential, so provisioning
             # must not mint a secret nobody is ever shown. The same role rule,
@@ -292,7 +293,7 @@ async def _login_destination(username: str, ctx: AuthContext) -> str | None:
     if status is None:
         # No row: provisioning creates it, so what matters is the status it
         # would be created with.
-        status = "pending" if ctx.settings.require_approval else "active"
+        status = initial_user_status(ctx.settings)
     # The same three conditions the middleware's approval gate applies, so this
     # can never send a visitor to a page that gate would refuse.
     _, is_admin = role_and_admin(user, ctx.settings.default_user_role)

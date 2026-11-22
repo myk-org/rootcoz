@@ -419,7 +419,7 @@ async def create_new(
     """
     validate_new_username(username, settings)
     candidate = username.strip().lower()
-    status = "pending" if settings.require_approval else "active"
+    status = auth_approval.initial_user_status(settings)
     try:
         api_key = await storage.create_user_with_identity(
             candidate,
