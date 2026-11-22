@@ -304,7 +304,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
       target="_blank"
       rel="noopener noreferrer"
       className={cn(
-        'flex items-center justify-center text-xs text-text-tertiary font-mono opacity-70 hover:opacity-100 hover:text-text-link transition-all',
+        'flex items-center justify-center text-xs text-text-tertiary font-mono hover:text-text-link transition-colors',
         collapsed && 'gap-1',
       )}
     >
@@ -323,7 +323,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
         <span className="flex items-center justify-center font-mono text-xs text-text-tertiary">
           {versionLink}
           {shownLabel && (
-            <span data-testid="sidebar-build" className="opacity-70">
+            <span data-testid="sidebar-build">
               {suffix}
             </span>
           )}
