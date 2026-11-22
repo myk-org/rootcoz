@@ -1050,9 +1050,6 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
     return result
 
 
-# Inline favicon
-
-
 # --- SSE broadcast for navbar badges ---
 _active_count_listeners: set[asyncio.Event] = set()
 _mention_listeners: dict[str, set[asyncio.Event]] = {}
@@ -1611,11 +1608,6 @@ async def _safe_track_user(username: str) -> None:
     except Exception:
         logger.debug("Failed to track user activity for %s", username, exc_info=True)
 
-
-FAVICON_SVG = (
-    b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
-    b'<text y="0.9em" font-size="90">\xf0\x9f\x94\x8d</text></svg>'
-)
 
 _LOG_FILE = get_log_file()
 
@@ -18328,24 +18320,50 @@ async def get_latest_release(since: str | None = None) -> JSONResponse:
         return JSONResponse(content=_release_payload(result_releases, since))
 
 
-@app.get("/favicon.ico", include_in_schema=False)
-async def favicon() -> Response:
-    """Serve the application favicon as an SVG image."""
+def _resolve_frontend_public_file(filename: str) -> Path | None:
+    """Locate a static file in built frontend/dist/ with dev fallback to frontend/public/."""
+    candidate = _FRONTEND_DIR / filename
+    if candidate.is_file():
+        return candidate
+    fallback = _FRONTEND_DIR.parent / "public" / filename
+    if fallback.is_file():
+        return fallback
+    return None
+
+
+def _serve_favicon() -> Response:
+    """Serve the single-source SVG favicon from frontend dist/ or public/."""
+    favicon_file = _resolve_frontend_public_file("favicon.svg")
+    if favicon_file is None:
+        logger.warning(
+            "Favicon asset not found in %s or public fallback", _FRONTEND_DIR
+        )
+        raise HTTPException(status_code=404, detail="Favicon not found")
+    logger.debug("Serving favicon from %s", favicon_file)
     return Response(
-        content=FAVICON_SVG,
+        content=favicon_file.read_bytes(),
         media_type="image/svg+xml",
         headers={"Cache-Control": "public, max-age=86400"},
     )
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> Response:
+    """Serve the application favicon as an SVG image."""
+    return _serve_favicon()
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon_svg() -> Response:
+    """Serve the application SVG favicon."""
+    return _serve_favicon()
+
+
 @app.get("/sw.js", include_in_schema=False)
 async def service_worker() -> Response:
     """Serve the service worker for push notifications."""
-    sw_file = _FRONTEND_DIR / "sw.js"
-    if not sw_file.is_file():
-        # Fallback to public/ during development
-        sw_file = _FRONTEND_DIR.parent / "public" / "sw.js"
-    if not sw_file.is_file():
+    sw_file = _resolve_frontend_public_file("sw.js")
+    if sw_file is None:
         raise HTTPException(status_code=404, detail="Service worker not found")
     return Response(
         content=sw_file.read_text(encoding="utf-8"),

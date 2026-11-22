@@ -3481,26 +3481,102 @@ class TestDashboardSubmittersEndpoint:
 
 
 class TestFaviconEndpoint:
-    """Tests for the GET /favicon.ico endpoint."""
+    """Tests for the GET /favicon.svg and GET /favicon.ico endpoints."""
 
-    def test_favicon_returns_svg(self, test_client) -> None:
-        """Test that GET /favicon.ico returns 200 with image/svg+xml content type."""
-        response = test_client.get("/favicon.ico")
+    _UNAUTH_HEADERS: ClassVar[dict[str, str]] = {"Authorization": ""}
+    _FRONTEND_PUBLIC: ClassVar[Path] = (
+        Path(__file__).resolve().parent.parent / "frontend" / "public"
+    )
+
+    @pytest.mark.parametrize("path", ["/favicon.svg", "/favicon.ico"])
+    def test_favicon_unauthenticated_returns_svg_with_cache_header(
+        self, test_client, path: str
+    ) -> None:
+        """Both /favicon.svg and /favicon.ico return 200 unauthenticated with SVG and Cache-Control."""
+        response = test_client.get(path, headers=self._UNAUTH_HEADERS)
         assert response.status_code == 200
         assert response.headers["content-type"] == "image/svg+xml"
-
-    def test_favicon_contains_svg_content(self, test_client) -> None:
-        """Test that the favicon response body contains a valid SVG tag."""
-        response = test_client.get("/favicon.ico")
-        assert response.status_code == 200
+        cache_control = response.headers.get("cache-control", "")
+        assert cache_control
+        assert "max-age" in cache_control
         assert "<svg" in response.text
 
-    def test_favicon_has_cache_control(self, test_client) -> None:
-        """Test that the favicon response has a Cache-Control header with max-age."""
-        response = test_client.get("/favicon.ico")
-        assert response.status_code == 200
-        cache_control = response.headers.get("cache-control", "")
-        assert "max-age" in cache_control
+    def test_favicon_routes_serve_identical_single_source_bytes(
+        self, test_client
+    ) -> None:
+        """/favicon.svg and /favicon.ico return byte-identical content from frontend/public/favicon.svg."""
+        expected = (self._FRONTEND_PUBLIC / "favicon.svg").read_bytes()
+        svg_resp = test_client.get("/favicon.svg", headers=self._UNAUTH_HEADERS)
+        ico_resp = test_client.get("/favicon.ico", headers=self._UNAUTH_HEADERS)
+        assert svg_resp.status_code == 200
+        assert ico_resp.status_code == 200
+        assert svg_resp.content == ico_resp.content == expected
+
+    def test_favicon_prefers_dist_over_public_fallback(
+        self, test_client, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Both favicon routes serve frontend/dist/favicon.svg when built dist/ exists."""
+        dist = tmp_path / "dist"
+        public = tmp_path / "public"
+        dist.mkdir()
+        public.mkdir()
+        dist_svg = b'<svg xmlns="http://www.w3.org/2000/svg"><text>dist</text></svg>'
+        public_svg = (
+            b'<svg xmlns="http://www.w3.org/2000/svg"><text>public</text></svg>'
+        )
+        (dist / "favicon.svg").write_bytes(dist_svg)
+        (public / "favicon.svg").write_bytes(public_svg)
+        monkeypatch.setattr("rootcoz.main._FRONTEND_DIR", dist)
+
+        for path in ("/favicon.svg", "/favicon.ico"):
+            response = test_client.get(path, headers=self._UNAUTH_HEADERS)
+            assert response.status_code == 200
+            assert response.headers["content-type"] == "image/svg+xml"
+            assert response.content == dist_svg
+
+    def test_favicon_falls_back_to_public_in_dev(
+        self, test_client, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Both favicon routes fall back to frontend/public/favicon.svg when dist/ lacks it."""
+        dist = tmp_path / "dist"
+        public = tmp_path / "public"
+        public.mkdir()
+        public_svg = b'<svg xmlns="http://www.w3.org/2000/svg"><text>dev</text></svg>'
+        (public / "favicon.svg").write_bytes(public_svg)
+        monkeypatch.setattr("rootcoz.main._FRONTEND_DIR", dist)
+
+        for path in ("/favicon.svg", "/favicon.ico"):
+            response = test_client.get(path, headers=self._UNAUTH_HEADERS)
+            assert response.status_code == 200
+            assert response.headers["content-type"] == "image/svg+xml"
+            assert response.content == public_svg
+
+    def test_favicon_returns_404_when_asset_missing(
+        self, test_client, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Both favicon routes return 404 when neither dist/ nor public/ has favicon.svg."""
+        monkeypatch.setattr("rootcoz.main._FRONTEND_DIR", tmp_path / "dist")
+        for path in ("/favicon.svg", "/favicon.ico"):
+            response = test_client.get(path, headers=self._UNAUTH_HEADERS)
+            assert response.status_code == 404
+
+    def test_public_assets_single_favicon_and_no_unused_icons(self) -> None:
+        """frontend/public/favicon.svg exists (copied to dist by Vite) and unused icons.svg is removed."""
+        assert (self._FRONTEND_PUBLIC / "favicon.svg").is_file()
+        assert not (self._FRONTEND_PUBLIC / "icons.svg").exists()
+
+    def test_service_worker_icon_resolves_cleanly(self, test_client) -> None:
+        """frontend/public/sw.js references /favicon.svg and that route resolves cleanly."""
+        sw_content = (self._FRONTEND_PUBLIC / "sw.js").read_text(encoding="utf-8")
+        assert "'/favicon.svg'" in sw_content
+
+        sw_resp = test_client.get("/sw.js", headers=self._UNAUTH_HEADERS)
+        assert sw_resp.status_code == 200
+        assert "'/favicon.svg'" in sw_resp.text
+
+        icon_resp = test_client.get("/favicon.svg", headers=self._UNAUTH_HEADERS)
+        assert icon_resp.status_code == 200
+        assert icon_resp.headers["content-type"] == "image/svg+xml"
 
 
 class TestCommentEndpoints:
