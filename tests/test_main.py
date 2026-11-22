@@ -3551,6 +3551,28 @@ class TestFaviconEndpoint:
             assert response.headers["content-type"] == "image/svg+xml"
             assert response.content == public_svg
 
+    def test_favicon_caches_asset_bytes_across_requests(
+        self, test_client, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Repeated favicon requests serve cached bytes without re-reading disk."""
+        dist = tmp_path / "dist"
+        dist.mkdir()
+        svg_bytes = b'<svg xmlns="http://www.w3.org/2000/svg"><text>cached</text></svg>'
+        svg_path = dist / "favicon.svg"
+        svg_path.write_bytes(svg_bytes)
+        monkeypatch.setattr("rootcoz.main._FRONTEND_DIR", dist)
+        monkeypatch.setattr("rootcoz.main._favicon_cache", None)
+
+        first = test_client.get("/favicon.svg", headers=self._UNAUTH_HEADERS)
+        assert first.status_code == 200
+        assert first.content == svg_bytes
+
+        # Remove the file on disk; subsequent requests must still be served from cache
+        svg_path.unlink()
+        second = test_client.get("/favicon.ico", headers=self._UNAUTH_HEADERS)
+        assert second.status_code == 200
+        assert second.content == svg_bytes
+
     def test_favicon_returns_404_when_asset_missing(
         self, test_client, tmp_path: Path, monkeypatch
     ) -> None:

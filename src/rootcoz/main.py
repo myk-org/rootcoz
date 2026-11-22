@@ -18331,17 +18331,26 @@ def _resolve_frontend_public_file(filename: str) -> Path | None:
     return None
 
 
+_favicon_cache: tuple[Path, bytes] | None = None
+
+
 def _serve_favicon() -> Response:
     """Serve the single-source SVG favicon from frontend dist/ or public/."""
-    favicon_file = _resolve_frontend_public_file("favicon.svg")
-    if favicon_file is None:
-        logger.warning(
-            "Favicon asset not found in %s or public fallback", _FRONTEND_DIR
-        )
-        raise HTTPException(status_code=404, detail="Favicon not found")
-    logger.debug("Serving favicon from %s", favicon_file)
+    global _favicon_cache
+    if _favicon_cache is not None and _favicon_cache[0] == _FRONTEND_DIR:
+        content = _favicon_cache[1]
+    else:
+        favicon_file = _resolve_frontend_public_file("favicon.svg")
+        if favicon_file is None:
+            logger.warning(
+                "Favicon asset not found in %s or public fallback", _FRONTEND_DIR
+            )
+            raise HTTPException(status_code=404, detail="Favicon not found")
+        logger.debug("Serving favicon from %s", favicon_file)
+        content = favicon_file.read_bytes()
+        _favicon_cache = (_FRONTEND_DIR, content)
     return Response(
-        content=favicon_file.read_bytes(),
+        content=content,
         media_type="image/svg+xml",
         headers={"Cache-Control": "public, max-age=86400"},
     )
