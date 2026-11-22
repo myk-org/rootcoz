@@ -32,7 +32,7 @@ async def _expire_device_code(device_code: str) -> None:
     async with storage._connect_db() as db:
         await db.execute(
             "UPDATE sso_device_codes SET expires_at = ? WHERE device_code_hash = ?",
-            (past, storage._hash_token(device_code)),
+            (past, storage._hash_session_token(device_code)),
         )
         await db.commit()
 
@@ -637,7 +637,7 @@ async def test_only_the_hashed_ticket_is_stored(setup_test_db: Path) -> None:
             row = dict(await cursor.fetchone())
 
     assert ticket not in " ".join(str(value) for value in row.values())
-    assert row["ticket_hash"] == storage._hash_token(ticket)
+    assert row["ticket_hash"] == storage._hash_session_token(ticket)
 
 
 async def test_an_expired_ticket_cannot_be_used(setup_test_db: Path) -> None:
@@ -681,10 +681,10 @@ async def test_the_ticket_binding_is_stored_and_is_not_derivable(
         stored = await storage.sso_ticket_binding_hash(ticket)
         unknown = await storage.sso_ticket_binding_hash("not-a-ticket")
 
-    assert stored == storage._hash_token("browser-secret")
+    assert stored == storage._hash_session_token("browser-secret")
     # Anyone holding the ticket can hash it; that must not be what the row holds.
-    assert stored != storage._hash_token(ticket)
-    assert stored != storage._hash_token("another-browser")
+    assert stored != storage._hash_session_token(ticket)
+    assert stored != storage._hash_session_token("another-browser")
     assert unknown is None
 
 
@@ -809,7 +809,7 @@ async def test_only_the_hashed_device_code_is_stored(setup_test_db: Path) -> Non
 
     stored = " ".join(str(value) for value in row.values())
     assert code["device_code"] not in stored
-    assert row["device_code_hash"] == storage._hash_token(code["device_code"])
+    assert row["device_code_hash"] == storage._hash_session_token(code["device_code"])
     assert "session_token_hash" not in row
 
 
@@ -1233,7 +1233,7 @@ async def test_a_contended_poll_stamps_the_moment_it_decides(
                 cursor = await db.execute(
                     "SELECT last_polled_at FROM sso_device_codes"
                     " WHERE device_code_hash = ?",
-                    (storage._hash_token(code["device_code"]),),
+                    (storage._hash_session_token(code["device_code"]),),
                 )
                 stamped = (await cursor.fetchone())["last_polled_at"]
             # The stored instant is the one the decision used: after the wait.

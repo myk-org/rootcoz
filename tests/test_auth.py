@@ -916,7 +916,7 @@ class TestSessionRenewalStorage:
         async def run():
             # Create a session with a short TTL so we can see the difference
             token = await storage.create_session("admin", is_admin=True, ttl_hours=1)
-            token_hash = storage._hash_token(token)
+            token_hash = storage._hash_session_token(token)
 
             # Read original expiry
             async with aiosqlite.connect(temp_db_path) as db:
@@ -1001,7 +1001,7 @@ class TestSessionRenewalMiddleware:
         assert session_cookie
 
         # Shorten expiry so <50% TTL remains, triggering renewal
-        token_hash = storage._hash_token(session_cookie)
+        token_hash = storage._hash_session_token(session_cookie)
 
         async def shorten_expiry():
             from datetime import datetime, timedelta
@@ -1064,7 +1064,7 @@ class TestSessionRenewalMiddleware:
             },
         )
         session_cookie = login_resp.cookies.get("rootcoz_session")
-        token_hash = storage._hash_token(session_cookie)
+        token_hash = storage._hash_session_token(session_cookie)
 
         # Read initial expiry
         async def get_expiry():
@@ -1123,7 +1123,7 @@ class TestSessionRenewalMiddleware:
             },
         )
         session_cookie = login_resp.cookies.get("rootcoz_session")
-        token_hash = storage._hash_token(session_cookie)
+        token_hash = storage._hash_session_token(session_cookie)
 
         # Manually expire the session in the DB
         async def expire_session():
@@ -2346,7 +2346,7 @@ class TestAiSessionScoping:
                     )
                     """
                 )
-                legacy_hash = storage._hash_token("legacy-token-value")
+                legacy_hash = storage._hash_session_token("legacy-token-value")
                 await db.execute(
                     "INSERT INTO sessions (token, username, is_admin, expires_at)"
                     " VALUES (?, ?, ?, datetime('now', '+1 hour'))",

@@ -653,8 +653,8 @@ def is_creatable_username(username: str) -> bool:
     return True
 
 
-def _hash_token(token: str) -> str:
-    """Hash an opaque bearer secret (session token, SSO device code) for storage."""
+def _hash_session_token(token: str) -> str:
+    """Hash a session token for storage."""
     return hashlib.sha256(token.encode()).hexdigest()
 
 
@@ -10113,7 +10113,7 @@ async def _insert_session_in_tx(
         " auth_provider)"
         " VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
-            _hash_token(token),
+            _hash_session_token(token),
             username,
             1 if is_admin else 0,
             expires_at.strftime(SQL_TIMESTAMP_FORMAT),
@@ -10171,7 +10171,7 @@ async def create_session(
 
 async def get_session(token: str) -> dict[str, Any] | None:
     """Look up a session. Returns None if expired or not found."""
-    token_hash = _hash_token(token)
+    token_hash = _hash_session_token(token)
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT username, is_admin, role, is_ai_session, created_at, expires_at,"
@@ -10195,7 +10195,7 @@ async def renew_session(token: str) -> bool:
 
     Returns True if the session was found and renewed, False otherwise.
     """
-    token_hash = _hash_token(token)
+    token_hash = _hash_session_token(token)
     new_expires = datetime.now(UTC) + timedelta(hours=current_session_ttl_hours())
     expires_str = new_expires.strftime(SQL_TIMESTAMP_FORMAT)
     async with _connect_db() as db:
@@ -10233,7 +10233,7 @@ async def get_session_identity(token: str) -> dict[str, Any] | None:
     async with _connect_db() as db:
         cursor = await db.execute(
             f"SELECT {_SESSION_IDENTITY_COLUMNS} FROM sessions WHERE token = ?",
-            (_hash_token(token),),
+            (_hash_session_token(token),),
         )
         row = await cursor.fetchone()
     if row is None:
@@ -10248,7 +10248,7 @@ async def get_session_identity(token: str) -> dict[str, Any] | None:
 
 async def delete_session(token: str) -> None:
     """Delete a session (logout)."""
-    token_hash = _hash_token(token)
+    token_hash = _hash_session_token(token)
     async with _connect_db() as db:
         await db.execute("DELETE FROM sessions WHERE token = ?", (token_hash,))
         await db.commit()
@@ -10565,7 +10565,7 @@ async def _consume_ticket_in_tx(db: Any, ticket: str | None) -> None:
         return
     cursor = await db.execute(
         f"DELETE FROM sso_link_tickets WHERE ticket_hash = ? AND {_LIVE_ROW}",
-        (_hash_token(ticket),),
+        (_hash_session_token(ticket),),
     )
     if cursor.rowcount == 0:
         msg = "ticket is expired or was already used"
@@ -10821,7 +10821,7 @@ async def create_device_code(
     if provider is not None:
         _validate_sso_provider(provider)
     device_code = secrets.token_urlsafe(32)
-    device_hash = _hash_token(device_code)
+    device_hash = _hash_session_token(device_code)
     expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
     expires_str = expires_at.strftime(SQL_TIMESTAMP_FORMAT)
     created_at = _now_str()
@@ -10958,7 +10958,7 @@ async def get_device_code(device_code: str) -> dict[str, Any] | None:
         unknown or expired.
     """
     return await _select_device_code(
-        f"device_code_hash = ? AND {_LIVE_ROW}", (_hash_token(device_code),)
+        f"device_code_hash = ? AND {_LIVE_ROW}", (_hash_session_token(device_code),)
     )
 
 
@@ -11081,7 +11081,7 @@ async def record_device_code_poll(device_code: str) -> bool:
         point), False when it came too soon after the previous one or the code
         is unknown/expired.
     """
-    device_hash = _hash_token(device_code)
+    device_hash = _hash_session_token(device_code)
 
     async def _attempt() -> bool:
         async with _connect_db() as db:
@@ -11169,7 +11169,7 @@ async def redeem_device_code(device_code: str) -> dict[str, Any] | None:
         claimed). ``approved_provider`` is who approved the code — ``None`` for a
         username-and-key approval — and becomes the session's issuer.
     """
-    device_hash = _hash_token(device_code)
+    device_hash = _hash_session_token(device_code)
 
     async def _attempt() -> dict[str, Any] | None:
         async with _connect_db() as db:
@@ -11220,7 +11220,7 @@ async def release_device_code(device_code: str) -> bool:
     Returns:
         True when a claim was released, False when there was nothing to release.
     """
-    device_hash = _hash_token(device_code)
+    device_hash = _hash_session_token(device_code)
 
     async def _attempt() -> bool:
         async with _connect_db() as db:
@@ -11322,7 +11322,7 @@ async def exchange_device_code_for_session(
     """
     if ttl_hours is None:
         ttl_hours = current_session_ttl_hours()
-    device_hash = _hash_token(device_code)
+    device_hash = _hash_session_token(device_code)
     normalized = _normalize_username(username)
 
     async def _attempt() -> dict[str, Any] | None:
@@ -11432,7 +11432,7 @@ async def create_sso_ticket(
                 " next_path, expires_at, created_at, binding_hash)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    _hash_token(ticket),
+                    _hash_session_token(ticket),
                     provider,
                     subject,
                     email,
@@ -11440,7 +11440,7 @@ async def create_sso_ticket(
                     next_path,
                     expires_str,
                     created_at,
-                    _hash_token(binding),
+                    _hash_session_token(binding),
                 ),
             )
             await db.commit()
@@ -11469,7 +11469,7 @@ async def sso_ticket_binding_hash(ticket: str) -> str | None:
         cursor = await db.execute(
             "SELECT binding_hash FROM sso_link_tickets"
             f" WHERE ticket_hash = ? AND {_LIVE_ROW}",
-            (_hash_token(ticket),),
+            (_hash_session_token(ticket),),
         )
         row = await cursor.fetchone()
     return row["binding_hash"] if row else None
@@ -11509,7 +11509,7 @@ async def peek_sso_ticket(ticket: str) -> dict[str, Any] | None:
     async with _connect_db() as db:
         cursor = await db.execute(
             f"{_TICKET_SELECT} WHERE ticket_hash = ? AND {_LIVE_ROW}",
-            (_hash_token(ticket),),
+            (_hash_session_token(ticket),),
         )
         row = await cursor.fetchone()
     return _ticket_view(row) if row else None
@@ -11525,7 +11525,7 @@ async def consume_sso_ticket(ticket: str) -> dict[str, Any] | None:
         The same view :func:`peek_sso_ticket` returns, or ``None`` when the
         ticket is unknown, expired, or already used.
     """
-    ticket_hash = _hash_token(ticket)
+    ticket_hash = _hash_session_token(ticket)
 
     async def _attempt() -> dict[str, Any] | None:
         async with _connect_db() as db:
