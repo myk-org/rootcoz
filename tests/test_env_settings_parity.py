@@ -1469,6 +1469,28 @@ def test_retention_budget_env_values_the_sidecar_accepted_do_not_block_boot(
 # Server keeps exactly two settings.
 _EXPECTED_CATEGORIES: dict[str, set[str]] = {
     "Server": {"public_base_url", "auto_push_exporters"},
+    # SSO is a derived tab: the provider registry names the fields it reads
+    # (`settings_fields`) and which are secret (`sensitive_settings`), and
+    # tests/test_sso_settings_metadata.py is the contract for that derivation.
+    # Pinned here like every other tab, so a provider that forgets a setting
+    # still shows up as a layout change rather than sliding in unnoticed.
+    "SSO": {
+        "sso_allowed_domains",
+        "sso_device_code_ttl_seconds",
+        "sso_device_poll_interval_seconds",
+        "sso_github_client_id",
+        "sso_github_client_secret",
+        "sso_google_client_id",
+        "sso_google_client_secret",
+        "sso_openshift_api_url",
+        "sso_openshift_client_id",
+        "sso_openshift_client_secret",
+        "sso_openshift_issuer",
+        "sso_redhat_client_id",
+        "sso_redhat_client_secret",
+        "sso_redhat_issuer",
+        "sso_state_ttl_seconds",
+    },
     "Jenkins": {
         "jenkins_url",
         "jenkins_user",
@@ -1646,7 +1668,7 @@ _JIRA_ALWAYS_VISIBLE = {
 
 
 def test_settings_categories_match_the_agreed_tabs():
-    """Every one of the 120 settings sits in its agreed tab (#585, #622)."""
+    """Every one of the 135 settings sits in its agreed tab (#585, #622)."""
     actual = {cat: set(fields) for cat, fields in main._SETTINGS_CATEGORIES.items()}
     assert actual == _EXPECTED_CATEGORIES
     # Tab order is the page order — pinned so a reorder is a visible change.
@@ -1661,7 +1683,7 @@ def test_settings_categories_match_the_agreed_tabs():
     placed = [key for fields in _EXPECTED_CATEGORIES.values() for key in fields]
     assert len(placed) == len(set(placed)), "a setting sits in two tabs"
     assert set(placed) == set(Settings.model_fields)
-    assert len(placed) == 121
+    assert len(placed) == 136
 
 
 def test_every_setting_has_a_description():
