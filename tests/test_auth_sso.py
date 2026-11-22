@@ -1149,6 +1149,21 @@ async def test_a_red_hat_login_runs_end_to_end_against_its_realm(
     oidc_module._reset_discovery_cache()
 
 
+def test_a_non_ascii_state_cookie_is_refused_as_state_invalid() -> None:
+    """A malformed cookie is a refusal, never an exception out of the flow.
+
+    The check is explicit rather than left to the ASCII encode: a cookie is
+    decoded from the header, so a non-ASCII value is bad input, and the refusal
+    has to be StateError (state_invalid downstream) whatever Python raises.
+    """
+    from rootcoz.auth.sso.state import StateError, _unpack
+
+    for value in ("héllo", "中文", "abc\u00ff"):
+        with pytest.raises(StateError) as excinfo:
+            _unpack(value)
+        assert "unreadable" in str(excinfo.value)
+
+
 async def test_a_signed_out_visitor_keeps_the_device_approval_destination(
     temp_db_path: Path,
 ) -> None:

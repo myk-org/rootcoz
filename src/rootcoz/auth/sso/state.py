@@ -164,6 +164,12 @@ def _unpack(value: str) -> str:
     Raises:
         StateError: When the value is not a packed token.
     """
+    # Checked rather than left to the encode below: a cookie is a str decoded from
+    # the header, so a non-ASCII value is malformed input, and saying so here keeps
+    # the contract legible instead of relying on BaseException ancestry
+    # (UnicodeEncodeError happens to subclass ValueError).
+    if not value.isascii():
+        raise StateError("state cookie unreadable")
     padded = value + "=" * (-len(value) % 4)
     try:
         return base64.urlsafe_b64decode(padded.encode("ascii")).decode("ascii")
