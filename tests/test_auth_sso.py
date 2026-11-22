@@ -1053,6 +1053,53 @@ async def test_an_unlinked_identity_gets_a_suggestion_not_an_account(
             assert (await cursor.fetchone())["n"] == 0
 
 
+async def test_an_orphaned_identity_is_healed_so_it_cannot_block_relinking(
+    temp_db_path: Path,
+) -> None:
+    """An identity whose account is gone must not hold its unique slot forever.
+
+    ``get_user_identity`` inner-joins ``users``, so the orphan is invisible to the
+    resolver — but the row still owns ``(provider, subject)``, and the create/link
+    path would then refuse the very person whose identity it is.
+    """
+    for _client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user_with_identity(
+            "alice",
+            provider="google",
+            subject="sub-1",
+            email="alice@example.com",
+            status="active",
+            role="reviewer",
+            created_via="google",
+        )
+        # A row that outlived its account: the user goes, the identity stays (a
+        # crashed delete, or one from before delete_user cleaned identities up).
+        async with storage._connect_db() as db:
+            await db.execute("DELETE FROM users WHERE username = 'alice'")
+            await db.commit()
+
+        choice = await auth_identity.resolve("google", _claims(), get_settings())
+
+        assert isinstance(choice, auth_identity.LoginChoice)
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) AS n FROM user_identities"
+                " WHERE provider = 'google' AND subject = 'sub-1'"
+            )
+            assert (await cursor.fetchone())["n"] == 0
+
+        # The slot is free again: the owner can claim the identity.
+        await storage.create_user_with_identity(
+            "alice",
+            provider="google",
+            subject="sub-1",
+            email="alice@example.com",
+            status="active",
+            role="reviewer",
+            created_via="google",
+        )
+
+
 async def test_a_reserved_name_is_never_suggested(temp_db_path: Path) -> None:
     """The screen never proposes a name storage would refuse."""
     for _client in make_app_client(temp_db_path, _SSO_ENV):

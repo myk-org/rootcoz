@@ -249,6 +249,14 @@ async def resolve(
     """
     check_domain(claims, settings)
     linked = await storage.get_user_identity(provider, claims.subject)
+    if linked is None:
+        # The lookup inner-joins ``users``, so an identity whose account is gone
+        # is invisible here — yet the row still holds the ``(provider, subject)``
+        # unique slot, and the create/link below would fail with
+        # ``identity_conflict`` for the very person who owns that identity. Heal
+        # it first; the delete only matches an orphan, so a live link is never
+        # touched and this is a no-op for a first-time visitor.
+        await storage.delete_orphan_identity(provider, claims.subject)
     if linked is not None:
         user = await storage.get_user_by_username(linked["username"])
         if user is not None:
