@@ -1053,6 +1053,102 @@ async def test_an_unlinked_identity_gets_a_suggestion_not_an_account(
             assert (await cursor.fetchone())["n"] == 0
 
 
+#: A Keycloak deployment: the realm *is* the issuer, and everything — discovery,
+#: token, keys — hangs off it.
+_REDHAT_REALM = "https://sso.redhat.com/auth/realms/redhat-external"
+
+_REDHAT_ENV = {
+    "SSO_REDHAT_ISSUER": _REDHAT_REALM,
+    "SSO_REDHAT_CLIENT_ID": "redhat-client",
+    "SSO_REDHAT_CLIENT_SECRET": "redhat-secret",  # pragma: allowlist secret
+    "PUBLIC_BASE_URL": "https://rootcoz.example",
+}
+
+
+async def test_a_red_hat_login_runs_end_to_end_against_its_realm(
+    temp_db_path: Path,
+) -> None:
+    """Red Hat's whole configuration is the realm issuer, so pin the flow.
+
+    It was covered only by its name and its issuer, which means a regression in
+    its discovery path — Keycloak serves it *under* the realm — would reach a
+    cluster before any test noticed.
+    """
+    import httpx
+    from joserfc import jwt as jose_jwt
+    from joserfc.jwk import KeySet, RSAKey
+
+    from rootcoz.auth.sso import oidc as oidc_module
+
+    oidc_module._reset_discovery_cache()
+    key = RSAKey.generate_key(2048, parameters={"kid": "k1"})
+    now = int(time.time())
+    id_token = jose_jwt.encode(
+        {"alg": "RS256", "kid": "k1"},
+        {
+            "iss": _REDHAT_REALM,
+            "aud": "redhat-client",
+            "sub": "rh-1",
+            "email": "alice@redhat.com",
+            "preferred_username": "alice",
+            "nonce": "n-1",
+            "exp": now + 300,
+            "iat": now,
+        },
+        key,
+    )
+    jwks = KeySet.import_key_set({"keys": [key.as_dict(private=False)]}).as_dict(
+        private=False
+    )
+    document = {
+        "issuer": _REDHAT_REALM,
+        "authorization_endpoint": f"{_REDHAT_REALM}/protocol/openid-connect/auth",
+        "token_endpoint": f"{_REDHAT_REALM}/protocol/openid-connect/token",
+        "jwks_uri": f"{_REDHAT_REALM}/protocol/openid-connect/certs",
+    }
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path = request.url.path
+        if path.endswith("/.well-known/openid-configuration"):
+            return httpx.Response(200, json=document)
+        if path.endswith("/protocol/openid-connect/token"):
+            return httpx.Response(200, json={"id_token": id_token})
+        if path.endswith("/protocol/openid-connect/certs"):
+            return httpx.Response(200, json=jwks)
+        return httpx.Response(404, json={})
+
+    transport = httpx.MockTransport(handler)
+
+    for _client in make_app_client(temp_db_path, _REDHAT_ENV):
+        with _github_client(transport):
+            claims = await get_provider("redhat", get_settings()).exchange(
+                code="c",
+                code_verifier="v",
+                redirect_uri="https://rootcoz.example/api/auth/sso/redhat/callback",
+                nonce="n-1",
+            )
+
+        assert claims.subject == "rh-1"
+        assert claims.email == "alice@redhat.com"
+        choice = await auth_identity.resolve("redhat", claims, get_settings())
+        assert isinstance(choice, auth_identity.LoginChoice)
+
+    # Keycloak's shape, not Google's: discovery lives under the realm.
+    discovered = next(
+        r for r in seen if r.url.path.endswith("/.well-known/openid-configuration")
+    )
+    assert discovered.url.path == (
+        "/auth/realms/redhat-external/.well-known/openid-configuration"
+    )
+    token_request = next(
+        r for r in seen if r.url.path.endswith("/protocol/openid-connect/token")
+    )
+    assert token_request.url.host == "sso.redhat.com"
+    oidc_module._reset_discovery_cache()
+
+
 async def test_a_signed_out_visitor_keeps_the_device_approval_destination(
     temp_db_path: Path,
 ) -> None:
