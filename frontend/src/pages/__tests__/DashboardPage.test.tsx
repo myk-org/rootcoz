@@ -756,6 +756,7 @@ describe('DashboardPage clear filters and inline clear (#652)', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Clear search' }))
 
     expect(input).toHaveValue('')
+    expect(input).toHaveFocus()
     expect(screen.queryByRole('button', { name: 'Clear search' })).toBeNull()
     expect(screen.getByTestId('location-probe').textContent).toBe('/?team=storage')
     await waitFor(() => {
@@ -788,6 +789,28 @@ describe('DashboardPage clear filters and inline clear (#652)', () => {
       expect(last?.get('date_to')).toBeNull()
     })
     expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull()
+  })
+
+  it('shows Clear filters for test-name-only state and clears test name and mode', async () => {
+    mockApi(5)
+    renderPage('/?test_name=test_login&test_name_mode=exact')
+    await waitFor(() => expect(requests[0]?.get('test_name')).toBe('test_login'))
+    expect(requests[0]?.get('test_name_mode')).toBe('exact')
+
+    const clearAllBtn = screen.getByRole('button', { name: 'Clear filters' })
+    expect(clearAllBtn).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Clear test name' })).toBeInTheDocument()
+
+    await userEvent.click(clearAllBtn)
+
+    expect(screen.getByTestId('location-probe').textContent).toBe('/')
+    await waitFor(() => {
+      const last = requests.at(-1)
+      expect(last?.get('test_name')).toBeNull()
+      expect(last?.get('test_name_mode')).toBeNull()
+    })
+    expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Clear test name' })).toBeNull()
   })
 
   it('clears search, dates, and test name together on Clear filters', async () => {

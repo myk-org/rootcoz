@@ -241,11 +241,12 @@ describe('TestNameFilter', () => {
     expect(apiGet.mock.calls[2][0]).toBe('/api/dashboard/test-names?q=&limit=20')
   })
 
-  it('clearing a committed name via the inline trigger button does not open the menu', async () => {
+  it('clearing a committed name via the inline trigger button does not open the menu and returns focus', async () => {
     const { props } = renderFilter({ name: 'test_checkout' })
 
     await userEvent.click(screen.getByRole('button', { name: 'Clear test name' }))
     expect(props.onChange).toHaveBeenCalledWith('', 'contains')
     expect(screen.queryByRole('listbox')).toBeNull()
+    expect(screen.getByRole('combobox', { name: 'Select Test name' })).toHaveFocus()
   })
 })

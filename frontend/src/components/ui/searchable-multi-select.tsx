@@ -265,6 +265,7 @@ export function SearchableMultiSelect({
                 onClick={event => {
                   event.stopPropagation()
                   onChange([])
+                  triggerRef.current?.focus()
                 }}
               />
             )}
