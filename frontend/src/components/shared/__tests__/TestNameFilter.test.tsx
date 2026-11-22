@@ -220,4 +220,33 @@ describe('TestNameFilter', () => {
     await userEvent.click(await screen.findByText('Add "checkout"'))
     expect(props.onChange).toHaveBeenCalledWith('checkout', 'exact')
   })
+
+  it('offers an inline clear while typing in the search field and keeps focus', async () => {
+    renderFilter()
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(1))
+
+    await typeQuery('checkout')
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2))
+
+    const searchBox = screen.getByRole('combobox', { name: 'Search Test name' })
+    expect(searchBox).toHaveValue('checkout')
+
+    const clearQueryBtn = screen.getByRole('button', { name: 'Clear Test name search' })
+    await userEvent.click(clearQueryBtn)
+
+    expect(searchBox).toHaveValue('')
+    expect(searchBox).toHaveFocus()
+    expect(screen.queryByRole('button', { name: 'Clear Test name search' })).toBeNull()
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(3))
+    expect(apiGet.mock.calls[2][0]).toBe('/api/dashboard/test-names?q=&limit=20')
+  })
+
+  it('clearing a committed name via the inline trigger button does not open the menu and returns focus', async () => {
+    const { props } = renderFilter({ name: 'test_checkout' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Clear test name' }))
+    expect(props.onChange).toHaveBeenCalledWith('', 'contains')
+    expect(screen.queryByRole('listbox')).toBeNull()
+    expect(screen.getByRole('combobox', { name: 'Select Test name' })).toHaveFocus()
+  })
 })

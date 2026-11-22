@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { X } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
 import { SearchableMultiSelect, type SearchableMultiSelectOption } from '@/components/ui/searchable-multi-select'
 import { api } from '@/lib/api'
@@ -112,23 +111,13 @@ export function TestNameFilter({ name, mode, onChange }: TestNameFilterProps) {
         // The other modes want the fragment the user typed, not the full name
         // that happens to rank first: free entry leads the list.
         customFirst
+        clearable
+        clearLabel="Clear test name"
         onQueryChange={load}
         onChange={(values) => commit(values[0] ?? '')}
         placeholder="Filter by failing test name"
         className="w-full sm:w-64"
       />
-      {name && (
-        // One dimension, one value: the shared control shows the pick, and this
-        // is how it comes off without clearing every other filter.
-        <button
-          type="button"
-          aria-label="Clear test name"
-          onClick={() => commit('')}
-          className="shrink-0 rounded text-text-tertiary transition-colors hover:text-signal-red"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      )}
       <Select
         value={shownMode}
         onValueChange={(v) => {

@@ -46,8 +46,11 @@ import {
   applyJobFiltersToParams,
   DEFAULT_TEST_NAME_MODE,
   EMPTY_JOB_FILTERS,
+  hasActiveJobFilters,
+  JOB_FILTER_READ_ALIASES,
   jobFiltersFromParams,
   TEST_NAME_WRITE_KEYS,
+  type JobFilterValues,
   type TestNameMode,
 } from '@/lib/jobFilters'
 import { MetadataLabelChips } from '@/components/shared/MetadataFilterBar'
@@ -383,28 +386,53 @@ export function DashboardPage() {
       return next
     }, { replace: true })
   }, [setSearchParams])
-  const clearMetadataFilters = useCallback(() => {
+  const clearSearch = useCallback(() => {
+    cancelPendingSearchDebounce()
+    setSearch('')
+    setDebouncedSearch('')
+    setPage(1)
     setSearchParams((prev) => {
+      if (!prev.has('search')) return prev
       const next = new URLSearchParams(prev)
-      next.delete('team')
-      next.delete('tier')
-      next.delete('version')
-      next.delete('label')
-      next.delete('exclude_label')
-      next.delete('status')
-      next.delete('review_status')
-      next.delete('analysis_state')
-      next.delete('submitted_by')
-      next.delete('test_name')
-      next.delete('test_name_mode')
+      next.delete('search')
       return next
     }, { replace: true })
-  }, [setSearchParams])
-  const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0 || submittedBy.length > 0 || selectedStatuses.size > 0 || reviewStatus !== 'all' || analysisState !== 'all' || testName.length > 0)
+  }, [cancelPendingSearchDebounce, setSearchParams])
+
+  const clearAllFilters = useCallback(() => {
+    cancelPendingSearchDebounce()
+    setSearch('')
+    setDebouncedSearch('')
+    setPage(1)
+    setSearchParams(
+      (prev) => applyJobFiltersToParams(prev, EMPTY_JOB_FILTERS, FILTER_PRESET_KEYS.dashboard),
+      { replace: true },
+    )
+  }, [cancelPendingSearchDebounce, setSearchParams])
+
+  const activeFilterValues = useMemo<JobFilterValues>(() => ({
+    ...EMPTY_JOB_FILTERS,
+    search: search || debouncedSearch,
+    team: [...metaTeams],
+    tier: [...metaTiers],
+    version: [...metaVersions],
+    label: metaLabels,
+    exclude_label: metaExcludeLabels,
+    status: [...selectedStatuses],
+    review_status: reviewStatus,
+    analysis_state: analysisState,
+    submitted_by: submittedBy,
+    date_from: dateFrom,
+    date_to: dateTo,
+    test_name: testName,
+    test_name_mode: testNameMode,
+  }), [search, debouncedSearch, metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels, selectedStatuses, reviewStatus, analysisState, submittedBy, dateFrom, dateTo, testName, testNameMode])
+  const hasActiveFilters = useMemo(() => hasActiveJobFilters(activeFilterValues), [activeFilterValues])
   const { options: metadataOptions } = useMetadataOptions()
   const setDateRange = useCallback((from: string, to: string) => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
+      for (const alias of JOB_FILTER_READ_ALIASES) next.delete(alias)
       if (from) next.set('date_from', from)
       else next.delete('date_from')
       if (to) next.set('date_to', to)
@@ -690,7 +718,7 @@ export function DashboardPage() {
               { replace: true },
             )
           }}
-          search={{ value: search, onChange: setSearch, placeholder: 'Filter jobs...' }}
+          search={{ value: search, onChange: setSearch, onClear: clearSearch, placeholder: 'Filter jobs...' }}
           submitters={{
             values: submittedBy,
             options: submitters,
@@ -717,7 +745,7 @@ export function DashboardPage() {
           reviewStatus={{ value: reviewStatus, onChange: setReviewStatus }}
           analysisState={{ value: analysisState, onChange: setAnalysisState }}
           dateRange={{ from: dateFrom, to: dateTo, onChange: setDateRange }}
-          clearAll={{ hasFilters: hasMetadataFilters, onClear: clearMetadataFilters }}
+          clearAll={{ hasFilters: hasActiveFilters, onClear: clearAllFilters }}
           testName={{ name: testName, mode: testNameMode, onChange: setTestName }}
         />
 
@@ -841,7 +869,7 @@ export function DashboardPage() {
         ) : (viewMode === 'flat' ? pageJobs.length === 0 : sorted.length === 0) && (!error || jobs.length > 0) ? (
           <div className="flex flex-col items-center justify-center rounded-lg border border-border-muted bg-surface-card py-16 text-center animate-fade-in">
             <p className="text-text-secondary">
-              {search || selectedStatuses.size > 0 || reviewStatus !== 'all' || analysisState !== 'all' || dateFrom || dateTo || hasMetadataFilters
+              {hasActiveFilters
                 ? 'No jobs match your filters.'
                 : 'No analysis runs yet.'}
             </p>

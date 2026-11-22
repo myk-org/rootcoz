@@ -2,6 +2,7 @@ import * as React from "react"
 import { Check, ChevronDown, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { CONTROL_CLASS } from "@/lib/controlStyles"
+import { InlineClearButton } from "@/components/ui/inline-clear-button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 
@@ -37,6 +38,10 @@ interface SearchableMultiSelectProps {
    * text instead of the top suggestion: the literal filter wants the fragment.
    */
   customFirst?: boolean
+  /** Single mode only: render an inline clear (×) inside the trigger when a value is picked. */
+  clearable?: boolean
+  /** Accessible label for the single-mode inline clear button. */
+  clearLabel?: string
   disabled?: boolean
   placeholder?: string
   /** Trigger width override (long labels); the default fits a short value. */
@@ -100,6 +105,8 @@ export function SearchableMultiSelect({
   allowCustom = false,
   onQueryChange,
   customFirst = false,
+  clearable = false,
+  clearLabel,
   disabled = false,
   placeholder,
   className,
@@ -205,7 +212,7 @@ export function SearchableMultiSelect({
             if (!disabled) setOpenState(!open)
           }}
           onKeyDown={event => {
-            if (disabled) return
+            if (disabled || event.target !== event.currentTarget) return
             if (event.key === "Enter" || event.key === " ") {
               event.preventDefault()
               setOpenState(!open)
@@ -251,9 +258,21 @@ export function SearchableMultiSelect({
               ))
             )}
           </span>
-          <ChevronDown
-            className={cn("h-3.5 w-3.5 shrink-0 opacity-30 transition-transform", open && "rotate-180")}
-          />
+          <span className="flex shrink-0 items-center gap-1">
+            {!multiple && clearable && selectedText && !disabled && (
+              <InlineClearButton
+                label={clearLabel ?? `Clear ${label}`}
+                onClick={event => {
+                  event.stopPropagation()
+                  onChange([])
+                  triggerRef.current?.focus()
+                }}
+              />
+            )}
+            <ChevronDown
+              className={cn("h-3.5 w-3.5 shrink-0 opacity-30 transition-transform", open && "rotate-180")}
+            />
+          </span>
         </div>
       </PopoverAnchor>
       <PopoverContent
@@ -266,24 +285,39 @@ export function SearchableMultiSelect({
           inputRef.current?.focus()
         }}
       >
-        <Input
-          ref={inputRef}
-          value={query}
-          onChange={event => {
-            setQuery(event.target.value)
-            setHighlight(0)
-            onQueryChange?.(event.target.value)
-          }}
-          onKeyDown={handleKeyDown}
-          placeholder="Type to filter…"
-          aria-label={`Search ${label}`}
-          aria-controls={listboxId}
-          aria-activedescendant={active >= 0 ? `${listboxId}-row-${active}` : undefined}
-          role="combobox"
-          aria-expanded
-          autoComplete="off"
-          className="mb-1 h-9 font-mono text-sm"
-        />
+        <div className="relative mb-1">
+          <Input
+            ref={inputRef}
+            value={query}
+            onChange={event => {
+              setQuery(event.target.value)
+              setHighlight(0)
+              onQueryChange?.(event.target.value)
+            }}
+            onKeyDown={handleKeyDown}
+            placeholder="Type to filter…"
+            aria-label={`Search ${label}`}
+            aria-controls={listboxId}
+            aria-activedescendant={active >= 0 ? `${listboxId}-row-${active}` : undefined}
+            role="combobox"
+            aria-expanded
+            autoComplete="off"
+            className={cn("h-9 font-mono text-sm", query && "pr-8")}
+          />
+          {query && (
+            <InlineClearButton
+              label={`Clear ${label} search`}
+              onMouseDown={event => event.preventDefault()}
+              onClick={() => {
+                setQuery("")
+                setHighlight(0)
+                onQueryChange?.("")
+                inputRef.current?.focus()
+              }}
+              className="absolute right-2 top-1/2 -translate-y-1/2"
+            />
+          )}
+        </div>
         <ul
           id={listboxId}
           role="listbox"

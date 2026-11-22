@@ -1,7 +1,7 @@
 import { AnalysisStateFilterControl } from '@/components/shared/AnalysisStateFilter'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { FilterPresetsMenu } from '@/components/shared/FilterPresetsMenu'
-import { MetadataClearButton, MetadataDropdowns } from '@/components/shared/MetadataFilterBar'
+import { ClearFiltersButton, MetadataDropdowns } from '@/components/shared/MetadataFilterBar'
 import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
 import { ReviewStatusFilter } from '@/components/shared/ReviewStatusFilter'
 import { SearchInput } from '@/components/shared/SearchInput'
@@ -21,7 +21,7 @@ export interface JobFilterBarProps {
   /** The URL the presets menu reads the current filters from. */
   searchParams: URLSearchParams
   onApplyPreset: (filters: FilterValues) => void
-  search: { value: string; onChange: (value: string) => void; placeholder: string }
+  search: { value: string; onChange: (value: string) => void; onClear?: () => void; placeholder: string }
   submitters: {
     values: string[]
     options: string[]
@@ -78,6 +78,7 @@ export function JobFilterBar({
       <SearchInput
         value={search.value}
         onChange={search.onChange}
+        onClear={search.onClear}
         placeholder={search.placeholder}
         className="w-full sm:w-64"
       />
@@ -105,7 +106,7 @@ export function JobFilterBar({
       <ReviewStatusFilter value={reviewStatus.value} onChange={reviewStatus.onChange} />
       <AnalysisStateFilterControl value={analysisState.value} onChange={analysisState.onChange} />
       <DateRangePresetFilter from={dateRange.from} to={dateRange.to} onChange={dateRange.onChange} />
-      <MetadataClearButton hasFilters={clearAll.hasFilters} onClearAll={clearAll.onClear} />
+      <ClearFiltersButton hasFilters={clearAll.hasFilters} onClearAll={clearAll.onClear} />
     </div>
   )
 }
