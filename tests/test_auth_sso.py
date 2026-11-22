@@ -34,6 +34,7 @@ from rootcoz.auth.sso.redhat import RedHatSSOProvider
 from rootcoz.config import clear_settings_cache, get_settings, normalize_domain_list
 from rootcoz.encryption import encrypt_value
 from tests.conftest import admin_login, build_test_env, make_app_client
+from tests.test_auth import _assert_spa_page
 
 _SSO_ENV = {
     "SSO_GOOGLE_CLIENT_ID": "test-client-id",
@@ -5416,7 +5417,8 @@ async def test_a_name_with_no_account_outside_the_allow_list_stays_refused(
             follow_redirects=False,
         )
 
-        assert response.status_code == 200
+        # Served by the SPA shell, which a fresh CI tree has not built yet.
+        _assert_spa_page(response)
         assert await storage.get_user_by_username("stranger") is None
 
     refusals = [
@@ -5458,7 +5460,7 @@ async def test_an_existing_disabled_account_gets_no_working_sign_in(
 
         login = client.get("/login", headers=headers, follow_redirects=False)
 
-        assert login.status_code == 200
+        _assert_spa_page(login)
         assert client.get("/api/auth/me", headers=headers).status_code == 401
 
 
