@@ -35,6 +35,7 @@ import { ReportPortalButton } from './report/ReportPortalButton'
 import { DatadogButton } from './report/DatadogButton'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { OriginJobBanner, ReanalyzedForwardBanner } from '@/components/shared/ReanalysisBanner'
+import { formatProviderLabel } from '@/lib/aiProviders'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { useAuth } from '@/lib/auth'
 
@@ -416,8 +417,10 @@ function ReportContent() {
   const reviewedCount = reviewedKeyCount(allTestKeys, state.reviews)
 
   /** Format the AI provider/model label for display. */
-  const formatAiLabel = (provider: string | undefined, model: string | undefined): string =>
-    provider ? (model ? `${provider} / ${model}` : provider) : ''
+  const formatAiLabel = (provider: string | undefined, model: string | undefined): string => {
+    const label = provider ? formatProviderLabel(provider) : ''
+    return label ? (model ? `${label} / ${model}` : label) : ''
+  }
 
   // Expand/collapse all for top-level failure cards
   const getFailureKeys = useCallback(
@@ -797,7 +800,7 @@ function ReportContent() {
         {state.completedAt && <p>Completed: {formatTimestamp(state.completedAt)}</p>}
         {result.ai_provider && (
           <p>
-            AI: {result.ai_provider}
+            AI: {formatProviderLabel(result.ai_provider)}
             {result.ai_model ? ` (${result.ai_model})` : ''}
           </p>
         )}

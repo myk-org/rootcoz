@@ -3,6 +3,7 @@ import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { useSSE } from '@/lib/useSSE'
 import { Button } from '@/components/ui/button'
 import { AnalysisModelNotice, AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
+import { formatProviderLabel } from '@/lib/aiProviders'
 import { isAnalysisAiAvailable } from '@/lib/analysisAi'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
@@ -172,7 +173,7 @@ export function ChatUI({
   // entry elsewhere in the app falls back to the analysed pair instead.
   const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultProvider, defaultModel, { respectCleared: false })
   const { canUseServerProviders, canUseFreeProviders, role } = useAuth()
-  const { providers, providerStatus } = useProviderCatalog()
+  const { providers, providerStatus, originalIds } = useProviderCatalog()
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
   const [copiedAll, setCopiedAll] = useState(false)
@@ -738,7 +739,7 @@ export function ChatUI({
           <div className="flex items-center gap-3">
             {sessionStarted ? (
               <span className="text-xs text-text-secondary">{sessionChoice
-                ? `${sessionChoice.provider} / ${sessionChoice.model}${sessionChoice.credentialSource === 'server' ? ' · Server' : ' · User'}`
+                ? `${formatProviderLabel(sessionChoice.provider, originalIds)} / ${sessionChoice.model}${sessionChoice.credentialSource === 'server' ? ' · Server' : ' · User'}`
                 : 'Existing session · selection pinned by server'}</span>
             ) : <div className="flex flex-col items-end gap-1">
               <div className="flex items-center gap-3">
@@ -876,7 +877,7 @@ export function ChatUI({
                   <div className="flex items-center gap-2 text-[10px] text-text-tertiary">
                     {msg.role === 'user' && msg.username && <span>{msg.username}</span>}
                     {msg.role === 'assistant' && msg.ai_provider && (
-                      <span>{msg.ai_provider}{msg.ai_model ? ` / ${msg.ai_model}` : ''}</span>
+                      <span>{formatProviderLabel(msg.ai_provider, originalIds)}{msg.ai_model ? ` / ${msg.ai_model}` : ''}</span>
                     )}
                     {msg.status === 'failed' && <span className="text-signal-red">Failed</span>}
                     <span>{new Date(msg.created_at).toLocaleString()}</span>

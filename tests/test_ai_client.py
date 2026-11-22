@@ -55,6 +55,22 @@ def test_normalize_provider(raw: str, canonical: str) -> None:
     assert normalize_provider(raw) == canonical
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("google-vertex-claude", "claude"),
+        ("GOOGLE-VERTEX-CLAUDE", "claude"),
+        ("google-vertex", "gemini"),
+        ("google", "gemini"),
+        ("openai", "openai"),
+        ("anthropic", "anthropic"),
+        ("MyGateway", "MyGateway"),
+    ],
+)
+def test_public_provider_name(raw: str, expected: str) -> None:
+    assert ai_client.public_provider_name(raw) == expected
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "removed_provider",

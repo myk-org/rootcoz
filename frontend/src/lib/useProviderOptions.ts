@@ -191,13 +191,13 @@ export function useProviderCatalog(): {
 export function useProviderOptions(
   currentValues: string | string[] | undefined = undefined,
 ): AiProviderOption[] {
-  const { providerKeys } = useProviderCatalog()
+  const { providerKeys, originalIds } = useProviderCatalog()
   const currentKey = Array.isArray(currentValues)
     ? currentValues.join('\0')
     : (currentValues ?? '')
 
   return useMemo(() => {
     const current = currentKey ? currentKey.split('\0') : []
-    return buildProviderOptions(providerKeys, current)
-  }, [providerKeys, currentKey])
+    return buildProviderOptions(providerKeys, current, originalIds)
+  }, [providerKeys, currentKey, originalIds])
 }

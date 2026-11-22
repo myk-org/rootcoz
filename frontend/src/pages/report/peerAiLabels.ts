@@ -1,8 +1,9 @@
+import { formatProviderLabel } from '@/lib/aiProviders'
 import type { PeerDebate } from '@/types'
 
 /** Friendly `provider/model` label for one debate AI config. */
 function aiConfigLabel(cfg: { ai_provider: string; ai_model: string }): string {
-  return `${cfg.ai_provider}/${cfg.ai_model}`
+  return `${formatProviderLabel(cfg.ai_provider)}/${cfg.ai_model}`
 }
 
 /** Unique peer AI labels for header badges — excludes the main AI.

@@ -4,7 +4,7 @@ import { CredentialSourceLabel, ServerAccessHint, ServerAccessTooltip, Unverifie
 import { useId } from 'react'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { useAuth } from '@/lib/auth'
-import { buildProviderOptions, normalizeProvider } from '@/lib/aiProviders'
+import { buildProviderOptions, formatProviderLabel, normalizeProvider } from '@/lib/aiProviders'
 import { allowsUnverified, usableModels, visibleModels, analysisProviderIds, credentialLabel } from '@/lib/analysisAi'
 
 /** Radix SelectItem rejects an empty value, so the server default needs a sentinel. */
@@ -18,10 +18,10 @@ export function AnalysisProviderSelect({ value, onChange, forceServer, label = '
   /** Offer "Server default" ('' — no override). Only where an empty pair is legal. */
   allowDefault?: boolean
 }) {
-  const { providers, providerStatus } = useProviderCatalog()
+  const { providers, providerStatus, originalIds } = useProviderCatalog()
   const { canUseServerProviders, canUseFreeProviders } = useAuth()
   const hintId = useId()
-  const options = buildProviderOptions(analysisProviderIds(providers, providerStatus, forceServer))
+  const options = buildProviderOptions(analysisProviderIds(providers, providerStatus, forceServer), [], originalIds)
   const current = normalizeProvider(value)
   const available = options.some((option) => option.value === current)
   const selectedLabel = credentialLabel(usableModels(providers, current, forceServer, providerStatus), allowsUnverified(providerStatus, current, forceServer), forceServer)
@@ -34,7 +34,7 @@ export function AnalysisProviderSelect({ value, onChange, forceServer, label = '
       {hasDeniedServer && <ServerAccessHint id={hintId} />}
       <ServerAccessTooltip show={available && !canUseServerProviders && !canUseFreeProviders && selectedLabel.includes('Server')}>
         <SelectTrigger aria-label={label} aria-describedby={hasDeniedServer ? hintId : undefined}>
-          <SelectValue placeholder={current ? `${current} (unavailable)` : 'Select provider...'} />
+          <SelectValue placeholder={current ? `${formatProviderLabel(current, originalIds)} (unavailable)` : 'Select provider...'} />
         </SelectTrigger>
       </ServerAccessTooltip>
       <SelectContent>

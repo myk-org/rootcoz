@@ -98,7 +98,7 @@ it('loads history without POST init and starts only with a valid catalog pair', 
   await user.click(screen.getByRole('button', { name: 'Start Chat' }))
   await waitFor(() => expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'openai', ai_model: 'gpt' }))
   expect(screen.queryByRole('combobox', { name: 'AI Provider' })).not.toBeInTheDocument()
-  expect(screen.getByText('openai / gpt · User')).toBeInTheDocument()
+  expect(screen.getByText('OpenAI / gpt · User')).toBeInTheDocument()
   await user.type(screen.getByPlaceholderText(/Ask a question/), 'hello')
   await user.click(screen.getByRole('button', { name: 'Send message' }))
   expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'hello', ai_provider: 'openai', ai_model: 'gpt' })
@@ -197,7 +197,7 @@ it('retries history after confirmed init without reinitializing or deleting the 
   await waitFor(() => expect(historyGets).toBe(3))
   expect(screen.getAllByText('previous question')).toHaveLength(1)
   expect(screen.queryByRole('button', { name: 'Start Chat' })).not.toBeInTheDocument()
-  expect(screen.getByText('openai / gpt · User')).toBeInTheDocument()
+  expect(screen.getByText('OpenAI / gpt · User')).toBeInTheDocument()
   await user.type(screen.getByPlaceholderText(/Ask a question/), 'followup')
   await user.click(screen.getByRole('button', { name: 'Send message' }))
   expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'followup', ai_provider: 'openai', ai_model: 'gpt' })
@@ -231,7 +231,7 @@ it('does not POST init when no usable catalog pair exists', async () => {
   await waitFor(() => expect(get).toHaveBeenCalledWith('/api/ai-models'))
   expect(screen.getByRole('button', { name: 'Start Chat' })).toBeDisabled()
   await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
-  await user.click(screen.getByRole('option', { name: /Openai · User/i }))
+  await user.click(screen.getByRole('option', { name: /OpenAI · User/ }))
   expect(screen.getByRole('button', { name: 'Start Chat' })).toBeDisabled()
   expect(post).not.toHaveBeenCalledWith('/api/chat/job/init', expect.anything())
 })
@@ -244,7 +244,7 @@ it('shows existing history before starting and clears explicitly without reiniti
   expect(post).not.toHaveBeenCalledWith('/api/chat/job/init', expect.anything())
   expect(screen.getByPlaceholderText(/Ask a question/)).toBeEnabled()
   expect(screen.queryByRole('button', { name: 'Start Chat' })).not.toBeInTheDocument()
-  expect(screen.getByText('openai / gpt · User')).toBeInTheDocument()
+  expect(screen.getByText('OpenAI / gpt · User')).toBeInTheDocument()
   await user.type(screen.getByPlaceholderText(/Ask a question/), 'followup')
   await user.click(screen.getByRole('button', { name: 'Send message' }))
   expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'followup', ai_provider: 'openai', ai_model: 'gpt' })
@@ -387,7 +387,7 @@ it('pins an externally started session from SSE history', async () => {
   await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
   get.mockImplementation((path: string) => Promise.resolve(path.startsWith('/api/ai-models') ? catalog : { messages: [], total: 0, active_session: { ai_provider: 'claude', ai_model: 'sonnet', credential_source: 'server' } }))
   act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
-  await waitFor(() => expect(screen.getByText('claude / sonnet · Server')).toBeInTheDocument())
+  await waitFor(() => expect(screen.getByText('Claude / sonnet · Server')).toBeInTheDocument())
   await userEvent.setup().type(screen.getByPlaceholderText(/Ask a question/), 'hello{enter}')
   expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'hello', ai_provider: 'claude', ai_model: 'sonnet' })
 })
@@ -414,7 +414,7 @@ it('does not delete a replacement with different metadata when New Session sees 
   get.mockImplementation((path: string) => Promise.resolve(path.startsWith('/api/ai-models') ? catalog : { messages: [], total: 0, active_session: { ai_provider: 'claude', ai_model: 'sonnet', credential_source: 'server' } }))
   await userEvent.setup().click(screen.getByRole('button', { name: 'New Session' }))
   expect(remove).not.toHaveBeenCalled()
-  expect(await screen.findByText('claude / sonnet · Server')).toBeInTheDocument()
+  expect(await screen.findByText('Claude / sonnet · Server')).toBeInTheDocument()
 })
 
 it.each(['/api/chat/job', '/api/admin/chat'])('rejects a same-choice replacement between preflight and DELETE on %s and resyncs without clearing', async path => {
@@ -438,7 +438,7 @@ it.each(['/api/chat/job', '/api/admin/chat'])('rejects a same-choice replacement
   await waitFor(() => expect(remove).toHaveBeenCalledWith(path, undefined, { headers: { 'If-Match': 'old-version' } }))
   expect(await screen.findByText('replacement question')).toBeInTheDocument()
   expect(screen.getByRole('alert')).toHaveTextContent('Chat session changed')
-  expect(screen.getByText('openai / gpt · User')).toBeInTheDocument()
+  expect(screen.getByText('OpenAI / gpt · User')).toBeInTheDocument()
   expect(screen.getByPlaceholderText(/Ask a question/)).toBeEnabled()
   expect(screen.queryByRole('button', { name: 'Start Chat' })).not.toBeInTheDocument()
   expect(post).not.toHaveBeenCalledWith(`${path}/init`, expect.anything())
@@ -466,7 +466,7 @@ it('does not delete when an SSE update overtakes the New Session preflight', asy
   act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
   await act(async () => { resolvePreflight({ messages: [], total: 0, active_session: { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'user' } }) })
   expect(remove).not.toHaveBeenCalled()
-  expect(await screen.findByText('claude / sonnet · Server')).toBeInTheDocument()
+  expect(await screen.findByText('Claude / sonnet · Server')).toBeInTheDocument()
 })
 
 it('preserves history on failed DELETE despite a stale SSE GET', async () => {
@@ -565,7 +565,7 @@ it('does not delete a same-metadata replacement started in another tab before pr
   await userEvent.setup().click(screen.getByRole('button', { name: 'New Session' }))
   expect(remove).not.toHaveBeenCalled()
   expect(await screen.findByText('replacement question')).toBeInTheDocument()
-  expect(screen.getByText('openai / gpt · User')).toBeInTheDocument()
+  expect(screen.getByText('OpenAI / gpt · User')).toBeInTheDocument()
 })
 
 it('shows the server-reported workspace preparation phase while init runs', async () => {
@@ -1128,4 +1128,29 @@ it('does not clear while the initial Start request is in flight', async () => {
   await user.click(screen.getByRole('button', { name: 'New Session' }))
   expect(remove).not.toHaveBeenCalled()
   await act(async () => { finishInit({ ready: false, preparing: { phase: 'preparing', detail: '' } }) })
+})
+
+it('uses the same public provider label in picker, active session header, and assistant messages', async () => {
+  setup()
+  const customCatalog = {
+    providers: {
+      'google-vertex-claude': [{ id: 'claude-sonnet-4-6', name: 'Sonnet 4.6', provider: 'google-vertex-claude', credential_sources: ['server'] }],
+      MyGateway: [{ id: 'gw/model-1', name: 'Model 1', provider: 'MyGateway', credential_sources: ['server'] }],
+    },
+    provider_status: {},
+  }
+  get.mockImplementation((path: string) => Promise.resolve(
+    path.startsWith('/api/ai-models')
+      ? customCatalog
+      : {
+          messages: [{ id: 1, job_id: 'job', role: 'assistant', content: 'hi', username: '', ai_provider: 'google-vertex-claude', ai_model: 'claude-sonnet-4-6', status: 'completed', created_at: '2026-01-01T00:00:00Z' }],
+          total: 1,
+          active_session: { ai_provider: 'MyGateway', ai_model: 'gw/model-1', credential_source: 'server' },
+          active_session_version: 'v1',
+        },
+  ))
+  render(page('google-vertex-claude', 'claude-sonnet-4-6'))
+  expect(await screen.findByText('MyGateway / gw/model-1 · Server')).toBeInTheDocument()
+  expect(screen.getByText('Claude / claude-sonnet-4-6')).toBeInTheDocument()
+  expect(screen.queryByText(/google-vertex-claude|Mygateway/)).not.toBeInTheDocument()
 })

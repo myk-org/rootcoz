@@ -26,6 +26,7 @@ import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { CheckCircle2, ExternalLink } from 'lucide-react'
+import { formatProviderLabel } from '@/lib/aiProviders'
 import { completeAiPairOverride } from '@/lib/analysisAi'
 import { useAiSelection } from '@/lib/useAiSelection'
 import type {
@@ -344,7 +345,7 @@ export function FeedbackDialog({ open, onOpenChange, capabilities }: FeedbackDia
             )}
             <div className="rounded-md border border-border-muted bg-surface-elevated px-3 py-2 text-xs text-text-secondary">
               {previewAi.generated
-                ? `Generated using AI with ${previewAi.provider}/${previewAi.model}`
+                ? `Generated using AI with ${formatProviderLabel(previewAi.provider)}/${previewAi.model}`
                 : 'No AI model generated this issue — the fallback template was used.'}
             </div>
             <div className="space-y-2">

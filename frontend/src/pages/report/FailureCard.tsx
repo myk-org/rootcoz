@@ -32,6 +32,7 @@ import { ReAnalyzeDialog } from './ReAnalyzeDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { UuidCopyButton } from '@/components/shared/UuidCopyButton'
+import { formatProviderLabel } from '@/lib/aiProviders'
 import { useAuth } from '@/lib/auth'
 import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw, Link2, X } from 'lucide-react'
 
@@ -42,7 +43,7 @@ function PreviousAnalysisEntry({ prev, index, repoUrls }: {
 }) {
   const superseded = prev._superseded_by
   const supersededLabel = superseded
-    ? ` — re-analyzed with ${superseded.ai_provider}/${superseded.ai_model}${superseded.timestamp ? ` (${formatRelativeTime(superseded.timestamp)})` : ''}`
+    ? ` — re-analyzed with ${formatProviderLabel(superseded.ai_provider)}/${superseded.ai_model}${superseded.timestamp ? ` (${formatRelativeTime(superseded.timestamp)})` : ''}`
     : ''
 
   return (
@@ -378,7 +379,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   </span>
                 </TooltipTrigger>
                 <TooltipContent>
-                  Re-analyzing using {rep.reanalyzed_with?.ai_provider ?? 'unknown'}{rep.reanalyzed_with?.ai_model ? ` / ${rep.reanalyzed_with.ai_model}` : ''}...
+                  Re-analyzing using {rep.reanalyzed_with?.ai_provider ? formatProviderLabel(rep.reanalyzed_with.ai_provider) : 'unknown'}{rep.reanalyzed_with?.ai_model ? ` / ${rep.reanalyzed_with.ai_model}` : ''}...
                 </TooltipContent>
               </Tooltip>
             )}
@@ -403,7 +404,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               <Tooltip>
                 <TooltipTrigger asChild>
                   <span className="rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary cursor-default">
-                    {rep.reanalyzed_with.ai_provider}{rep.reanalyzed_with.ai_model ? ` / ${rep.reanalyzed_with.ai_model}` : ''}
+                    {formatProviderLabel(rep.reanalyzed_with.ai_provider)}{rep.reanalyzed_with.ai_model ? ` / ${rep.reanalyzed_with.ai_model}` : ''}
                   </span>
                 </TooltipTrigger>
                 <TooltipContent>Re-analyzed with different AI</TooltipContent>

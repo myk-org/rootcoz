@@ -149,7 +149,7 @@ describe('FeedbackDialog', () => {
     render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
     await user.type(screen.getByLabelText('Description'), 'x')
     await user.click(screen.getByRole('button', { name: /preview/i }))
-    expect(await screen.findByText('Generated using AI with claude/sonnet')).toBeInTheDocument()
+    expect(await screen.findByText('Generated using AI with Claude/sonnet')).toBeInTheDocument()
   })
 
   it('says no AI model generated the issue when feedback fell back', async () => {

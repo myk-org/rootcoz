@@ -53,7 +53,7 @@ async function headerParts(jobName: string) {
   showReport(jobName)
   const heading = await screen.findByRole('heading', { level: 1 })
   const identityRow = heading.parentElement as HTMLElement
-  const modelChip = screen.getByText('gemini / pro')
+  const modelChip = screen.getByText('Gemini / pro')
   const tokenBadge = screen.getByText(/100 in \/ 50 out/)
   const summaryRow = tokenBadge.parentElement as HTMLElement
   return { heading, identityRow, modelChip, tokenBadge, summaryRow }
@@ -101,6 +101,6 @@ describe('report header layout', () => {
   it('renders the model label exactly once in the report header', async () => {
     showReport('example')
     await screen.findByRole('heading', { level: 1 })
-    expect(screen.getAllByText('gemini / pro')).toHaveLength(1)
+    expect(screen.getAllByText('Gemini / pro')).toHaveLength(1)
   })
 })
