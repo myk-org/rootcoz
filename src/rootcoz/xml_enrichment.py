@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -7,12 +8,95 @@ from xml.etree import ElementTree as ET
 from xml.etree.ElementTree import Element
 
 import httpx
+from defusedxml import DefusedXmlException
 from defusedxml.ElementTree import fromstring as safe_fromstring
+from defusedxml.ElementTree import iterparse as safe_iterparse
 
 from rootcoz import get_child_logger
-from rootcoz.models import BaseTestEntry, FailedTest, FailureAnalysis
+from rootcoz.models import (
+    BaseTestEntry,
+    FailedTest,
+    FailureAnalysis,
+    validate_file_job_name,
+)
 
 logger = get_child_logger(__name__)
+
+
+def _local_tag(tag: str) -> str:
+    """Strip an optional ``{namespace}`` prefix from an XML element tag."""
+    if "}" in tag:
+        return tag.rsplit("}", 1)[1]
+    return tag
+
+
+def extract_suite_name_from_xml(raw_xml: str) -> str | None:
+    """Extract and validate a JUnit suite name from raw XML.
+
+    Preference order:
+      1. Root ``<testsuite name="...">``
+      2. First ``<testsuite name="...">`` inside ``<testsuites>`` (or wrapper)
+      3. Root ``<testsuites name="...">`` when no ``<testsuite>`` carries a
+         valid name
+
+    Uses ``defusedxml.ElementTree.iterparse`` so large XML files stop on the
+    opening suite element without building a full DOM. Invalid or hostile suite
+    names are rejected via :func:`~rootcoz.models.validate_file_job_name` and
+    malformed XML returns ``None`` so callers fall back cleanly.
+    """
+    if not raw_xml or not raw_xml.strip():
+        return None
+
+    fallback_name: str | None = None
+    is_root = True
+    try:
+        for event, elem in safe_iterparse(
+            io.StringIO(raw_xml), events=("start", "end")
+        ):
+            if event == "start":
+                tag = _local_tag(elem.tag)
+                raw_name = (elem.get("name") or "").strip()
+                if tag == "testsuite":
+                    if raw_name:
+                        try:
+                            validated = validate_file_job_name(raw_name)
+                        except ValueError as exc:
+                            logger.warning(
+                                "Ignoring invalid JUnit testsuite name from XML (%s)",
+                                exc,
+                            )
+                        else:
+                            logger.debug(
+                                "Extracted JUnit suite name %r from <testsuite>",
+                                validated,
+                            )
+                            return validated
+                    if is_root:
+                        return None
+                elif is_root and tag == "testsuites" and raw_name:
+                    fallback_name = raw_name
+                is_root = False
+            else:
+                elem.clear()
+    except (ET.ParseError, DefusedXmlException, ValueError) as exc:
+        logger.debug(
+            "Could not parse XML to extract suite name (%s)",
+            type(exc).__name__,
+        )
+        return None
+
+    if fallback_name:
+        try:
+            validated = validate_file_job_name(fallback_name)
+        except ValueError as exc:
+            logger.warning(
+                "Ignoring invalid JUnit testsuites name from XML (%s)",
+                exc,
+            )
+            return None
+        logger.debug("Extracted JUnit suite name %r from <testsuites>", validated)
+        return validated
+    return None
 
 
 @dataclass

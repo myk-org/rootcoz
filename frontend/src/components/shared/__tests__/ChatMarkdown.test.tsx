@@ -62,4 +62,41 @@ describe('ChatMarkdown', () => {
     const span = screen.getByText('evil')
     expect(span.tagName).toBe('SPAN')
   })
+
+  it('does not render artifact download buttons when allowArtifactLinks is false', () => {
+    render(
+      <ChatMarkdown
+        content="See [Download Report](/api/admin-chat/artifacts/abc-123)"
+        allowArtifactLinks={false}
+      />,
+    )
+    const link = screen.getByRole('link', { name: 'Download Report' })
+    expect(link.hasAttribute('download')).toBe(false)
+    expect(link.getAttribute('target')).toBe('_blank')
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer')
+  })
+
+  it('does not execute or render raw embedded HTML elements', () => {
+    const { container } = render(
+      <ChatMarkdown content={'Safe text <script>alert(1)</script><img src="x" onerror="alert(1)" />'} />,
+    )
+    expect(container.querySelector('script')).toBeNull()
+    expect(container.querySelector('img')).toBeNull()
+    expect(screen.getByText(/Safe text/)).toBeDefined()
+  })
+
+  it('turns Markdown images into safe external links when allowImages is false', () => {
+    const { container } = render(
+      <ChatMarkdown
+        content="![Release banner](https://example.com/pixel.png) and ![Bad](javascript:alert(1))"
+        allowImages={false}
+      />,
+    )
+    expect(container.querySelector('img')).toBeNull()
+    const link = screen.getByRole('link', { name: 'Release banner' })
+    expect(link.getAttribute('href')).toBe('https://example.com/pixel.png')
+    expect(link.getAttribute('target')).toBe('_blank')
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer')
+    expect(screen.getByText('Bad').tagName).toBe('SPAN')
+  })
 })

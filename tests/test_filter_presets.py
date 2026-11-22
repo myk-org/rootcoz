@@ -204,6 +204,50 @@ class TestFilterPresetsCRUD:
         assert resp.status_code == 422, resp.text
         assert "test_name_mode" in resp.text
 
+    def test_dashboard_search_key_round_trips(self, client):
+        """``search`` is accepted on dashboard presets and round-trips intact (#634)."""
+        cookies = _register(client, "alice")
+        filters = {"search": "kubevirt", "team": ["MTV"]}
+        resp = _create(client, cookies, name="Kubevirt MTV", filters=filters)
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["filters"] == filters
+
+        listed = client.get(
+            "/api/user/filter-presets?page=dashboard", cookies=cookies
+        ).json()
+        assert len(listed) == 1
+        assert listed[0]["filters"] == filters
+
+    def test_reports_search_key_round_trips(self, client):
+        """``search`` is accepted on reports presets and round-trips intact (#634)."""
+        cookies = _register(client, "alice")
+        filters = {"search": "kubevirt"}
+        resp = _create(
+            client, cookies, name="Kubevirt reports", page="reports", filters=filters
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["filters"] == filters
+
+        listed = client.get(
+            "/api/user/filter-presets?page=reports", cookies=cookies
+        ).json()
+        assert len(listed) == 1
+        assert listed[0]["filters"] == filters
+
+    def test_non_string_search_rejected_422(self, client):
+        """``search`` must be a scalar string; lists are rejected with 422 (#634)."""
+        cookies = _register(client, "alice")
+        for page in ("dashboard", "reports"):
+            resp = _create(
+                client,
+                cookies,
+                name=f"Bad search {page}",
+                page=page,
+                filters={"search": ["a", "b"]},
+            )
+            assert resp.status_code == 422, resp.text
+            assert "search" in resp.json()["detail"]
+
     def test_dashboard_submitter_key_accepted(self, client):
         """submitted_by is a dashboard filter, so both save paths accept it (#390)."""
         cookies = _register(client, "alice")

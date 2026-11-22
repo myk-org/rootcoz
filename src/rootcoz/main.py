@@ -34,7 +34,7 @@ from collections.abc import (
     Sequence,
 )
 from compression import zstd
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager
 
 # `field` is also a loop variable in three request-param helpers below, so the
 # dataclasses helper is imported under a name of its own.
@@ -344,6 +344,7 @@ from rootcoz.sources import (
 )
 from rootcoz.sources import chat_workspace as source_chat_workspace
 from rootcoz.sources.base import (
+    GENERIC_FALLBACK_DISPLAY_NAMES,
     INGEST_COMPLETE_SUMMARY,
     CISourceResult,
     resolve_display_build_id,
@@ -6925,6 +6926,7 @@ async def _enqueue_ci_source_analysis(
     is_admin: bool = False,
     ingest_only: bool = False,
     existing_job_id: str = "",
+    is_generic_fallback: bool | None = None,
 ) -> dict[str, Any]:
     """Build params, persist initial state, spawn task, and return response.
 
@@ -6974,17 +6976,12 @@ async def _enqueue_ci_source_analysis(
     job_id_var.set(job_id)
 
     # Append short job_id suffix to generic fallback names for uniqueness
-    _GENERIC_FALLBACK_NAMES = {
-        "file-analysis",
-        "raw-analysis",
-        "prow-analysis",
-        "jenkins-analysis",
-        "prow-re-analysis",
-        "file-re-analysis",
-        "raw-re-analysis",
-        "jenkins-re-analysis",
-    }
-    if display_name in _GENERIC_FALLBACK_NAMES and not body.name:
+    should_suffix = (
+        is_generic_fallback
+        if is_generic_fallback is not None
+        else (display_name in GENERIC_FALLBACK_DISPLAY_NAMES and not body.name)
+    )
+    if should_suffix:
         display_name = f"{display_name}-{job_id[:8]}"
 
     # Build and persist initial state
@@ -8400,19 +8397,19 @@ async def _process_ci_source_analysis(
             analysis_slots.release(job_id)
 
 
-def _resolve_request_display_name(body: UnifiedAnalyzeRequest) -> str:
-    """Resolve dashboard display name from the request or the source plugin."""
+async def _resolve_request_display_name(
+    body: UnifiedAnalyzeRequest,
+) -> tuple[str, bool]:
+    """Resolve ``(display_name, is_generic_fallback)`` off the event loop."""
     display_name: str = body.name or ""
     if display_name:
-        return display_name
+        return display_name, False
     from rootcoz.sources.registry import SOURCE_REGISTRY
 
     source_cls = SOURCE_REGISTRY.get(body.type)
-    return (
-        source_cls.default_display_name(body)
-        if source_cls is not None
-        else f"{body.type}-analysis"
-    )
+    if source_cls is None:
+        return f"{body.type}-analysis", True
+    return await asyncio.to_thread(source_cls.resolve_display_name, body)
 
 
 def _resolve_submitted_job_name(body: UnifiedAnalyzeRequest, display_name: str) -> str:
@@ -8458,7 +8455,7 @@ async def analyze(
         finally:
             ai_username.reset(token)
 
-        display_name = _resolve_request_display_name(body)
+        display_name, is_generic_fallback = await _resolve_request_display_name(body)
         job_name = _resolve_submitted_job_name(body, display_name)
 
         async def _enqueue() -> dict[str, Any]:
@@ -8472,6 +8469,7 @@ async def analyze(
                 username=request.state.username,
                 message_prefix="Analysis",
                 is_admin=bool(request.state.is_admin),
+                is_generic_fallback=is_generic_fallback,
             )
 
         return provider, model, job_name, display_name, _enqueue
@@ -8501,7 +8499,7 @@ async def submit(
         # Preliminary checks stay inside the audited scope (see ``analyze``).
         _require_operator(request)
         _check_allow_list(request)
-        display_name = _resolve_request_display_name(body)
+        display_name, is_generic_fallback = await _resolve_request_display_name(body)
         job_name = _resolve_submitted_job_name(body, display_name)
         merged = _merge_settings(body, settings)
 
@@ -8517,6 +8515,7 @@ async def submit(
                 message_prefix="Submit",
                 is_admin=bool(request.state.is_admin),
                 ingest_only=True,
+                is_generic_fallback=is_generic_fallback,
             )
 
         return "", "", job_name, display_name, _enqueue
@@ -8750,12 +8749,18 @@ async def analyze_submitted_job(
     await _resolve_ai_config_allow_defer(unified_body, get_settings(), request)
     merged = _merge_settings(unified_body, get_settings())
     resolved_peers = await _validate_peer_configs(unified_body, merged)
-    display_name = (
+    existing_name = (
         unified_body.name
         or result_data.get("display_name")
         or result_data.get("job_name")
-        or source_cls.default_display_name(unified_body)
     )
+    if existing_name:
+        display_name = existing_name
+        is_generic_fallback = False
+    else:
+        display_name, is_generic_fallback = await asyncio.to_thread(
+            source_cls.resolve_display_name, unified_body
+        )
     claim = await claim_submitted_job_for_analyze(job_id)
     if claim is None:
         raise HTTPException(
@@ -8788,6 +8793,7 @@ async def analyze_submitted_job(
             message_prefix="Analysis",
             is_admin=bool(request.state.is_admin),
             existing_job_id=job_id,
+            is_generic_fallback=is_generic_fallback,
         )
     except Exception:
         await release_submitted_job_analyze_claim(
@@ -8924,7 +8930,13 @@ async def re_analyze(
     resolved_peers = await _validate_peer_configs(unified_body, merged)
 
     # Resolve display name — prefer original name, then plugin fallback
-    display_name = unified_body.name or source_cls.default_display_name(unified_body)
+    if unified_body.name:
+        display_name = unified_body.name
+        is_generic_fallback = False
+    else:
+        display_name, is_generic_fallback = await asyncio.to_thread(
+            source_cls.resolve_display_name, unified_body
+        )
 
     rerun = {
         "request": request,
@@ -8947,6 +8959,7 @@ async def re_analyze(
             reanalyzed_from_job_id=job_id,
             reanalyzed_from_job_name=origin_job_display_name,
             is_admin=bool(request.state.is_admin),
+            is_generic_fallback=is_generic_fallback,
         )
     except Exception:
         await _audit_analysis_rerun(**rerun, outcome="failure")
@@ -19349,6 +19362,7 @@ async def delete_user_ai_credential(provider: str, request: Request) -> JSONResp
 # URL query param names each page's presets may carry (validated on save).
 _FILTER_PRESET_KEYS: dict[str, set[str]] = {
     "dashboard": {
+        "search",
         "team",
         "tier",
         "version",
@@ -19364,6 +19378,7 @@ _FILTER_PRESET_KEYS: dict[str, set[str]] = {
         "test_name_mode",
     },
     "reports": {
+        "search",
         "team",
         "tier",
         "version",
@@ -19392,6 +19407,12 @@ def _validate_filter_preset_filters(page: str, filters: dict[str, Any]) -> None:
         raise HTTPException(
             status_code=422,
             detail=f"Unknown filter key(s) for {page}: " + ", ".join(sorted(unknown)),
+        )
+    search = filters.get("search")
+    if search is not None and not isinstance(search, str):
+        raise HTTPException(
+            status_code=422,
+            detail="Filter 'search' must be a string",
         )
     test_name_mode = filters.get("test_name_mode")
     if test_name_mode is not None and test_name_mode not in storage.TEST_NAME_MODES:
@@ -26309,6 +26330,40 @@ async def _require_chat_clear_version(
         )
 
 
+async def _read_chat_history_payload(
+    job_id: str, username: str, *, limit: int, offset: int
+) -> dict[str, Any]:
+    """Read chat history from one SQLite WAL snapshot without blocking on chat locks.
+
+    Active turns and workspace preparations hold ``_hold_chat_lock`` across
+    multi-minute AI calls and git clones. Acquiring that lock here blocked
+    ``GET /api/chat/{job_id}`` and ``GET /api/admin/chat`` until reverse proxies
+    returned 504 Gateway Time-out. ``get_chat_history_snapshot`` pins a single
+    WAL read transaction so messages, total, active_session, and version stay
+    consistent while reads return immediately.
+    """
+    messages, total, session = await storage.get_chat_history_snapshot(
+        job_id, limit=limit, offset=offset, username=username
+    )
+    # Filter out hidden init messages (empty content + completed status, used for session_id storage)
+    # Keep pending messages even if empty (they show "Thinking..." in the UI)
+    messages = [
+        {k: v for k, v in m.items() if k != "session_id"}
+        for m in messages
+        if m.get("content") or m.get("status") in ("pending", "failed")
+    ]
+    active = await _available_chat_session(job_id, username, session=session)
+    version = _chat_session_version(
+        job_id, username, session["session_id"] if session else None
+    )
+    return {
+        "messages": messages,
+        "total": total,
+        "active_session": active,
+        "active_session_version": version,
+    }
+
+
 @app.get("/api/chat/{job_id}", operation_id="getChatHistory")
 async def get_chat_history(
     job_id: str,
@@ -26323,39 +26378,12 @@ async def get_chat_history(
         raise HTTPException(status_code=404, detail="Job not found")
 
     username = getattr(request.state, "username", "")
-    key = f"{job_id}:{username}"
-    preparing = _chat_prep_phases.get(key)
-    # /init holds the per-user chat lock for the whole workspace preparation.
-    # Blocking on it here would hide the very phase we report, so reads skip it
-    # while preparation is in flight — the snapshot below keeps them consistent
-    # instead, since a Start writes its session marker and welcome there.
-    lock: AbstractAsyncContextManager[Any] = (
-        nullcontext() if preparing else _hold_chat_lock(key)
+    preparing = _chat_prep_phases.get(f"{job_id}:{username}")
+    payload = await _read_chat_history_payload(
+        job_id, username, limit=limit, offset=offset
     )
-    async with lock:
-        messages, total, session = await storage.get_chat_history_snapshot(
-            job_id, limit=limit, offset=offset, username=username
-        )
-        # Filter out hidden init messages (empty content + completed status, used for session_id storage)
-        # Keep pending messages even if empty (they show "Thinking..." in the UI)
-        messages = [
-            {k: v for k, v in m.items() if k != "session_id"}
-            for m in messages
-            if m.get("content") or m.get("status") in ("pending", "failed")
-        ]
-        active = await _available_chat_session(job_id, username, session=session)
-        version = _chat_session_version(
-            job_id, username, session["session_id"] if session else None
-        )
-    return strip_sensitive_from_response(
-        {
-            "messages": messages,
-            "total": total,
-            "active_session": active,
-            "active_session_version": version,
-            "preparing": preparing,
-        }
-    )
+    payload["preparing"] = preparing
+    return strip_sensitive_from_response(payload)
 
 
 def _schedule_chat_index(
@@ -27759,6 +27787,7 @@ async def _process_chat_message(
                         return
 
                     turn_warnings: list[str] = []
+                    turn_started = _time.monotonic()
                     success, response_text, new_session_id = await chat_with_ai(
                         job_id=job_id,
                         job_name=result_data.get("job_name", "unknown"),
@@ -27781,6 +27810,7 @@ async def _process_chat_message(
                         ),
                         on_warning=turn_warnings.append,
                     )
+                    turn_elapsed = _time.monotonic() - turn_started
 
                     if abort_signal.is_set():
                         abort_signal.clear()
@@ -27803,7 +27833,12 @@ async def _process_chat_message(
 
                     if not success:
                         logger.error(
-                            "Chat AI call failed for job %s: %s", job_id, response_text
+                            "Chat AI call failed for job %s (provider=%s, model=%s, elapsed=%.1fs): %s",
+                            job_id,
+                            ai_provider,
+                            ai_model,
+                            turn_elapsed,
+                            response_text,
                         )
                         user_error = format_chat_ai_user_error(
                             response_text,
@@ -27883,10 +27918,13 @@ async def _process_chat_message(
                         )
                         return
                     logger.info(
-                        "Chat: message %d processed for job %s (session=%s)",
+                        "Chat: message %d processed for job %s (session=%s, provider=%s, model=%s, elapsed=%.1fs)",
                         assistant_msg_id,
                         job_id,
                         new_session_id,
+                        ai_provider,
+                        ai_model,
+                        turn_elapsed,
                     )
                     await _store_chat_turn_warning(job_id, username, turn_warnings)
                     # The answer is stored and pushed; the graph is built from
@@ -28349,26 +28387,10 @@ async def get_admin_chat_history(
     """Get admin chat history."""
     _require_admin(request)
     username = getattr(request.state, "username", "")
-    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
-        messages = await storage.get_chat_messages(
-            ADMIN_CHAT_JOB_ID, limit=limit, offset=offset, username=username
-        )
-        messages = [
-            {k: v for k, v in m.items() if k != "session_id"}
-            for m in messages
-            if m.get("content") or m.get("status") in ("pending", "failed")
-        ]
-        total = await storage.count_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
-        active = await _available_chat_session(ADMIN_CHAT_JOB_ID, username)
-        version = await _current_chat_session_version(ADMIN_CHAT_JOB_ID, username)
-    return strip_sensitive_from_response(
-        {
-            "messages": messages,
-            "total": total,
-            "active_session": active,
-            "active_session_version": version,
-        }
+    payload = await _read_chat_history_payload(
+        ADMIN_CHAT_JOB_ID, username, limit=limit, offset=offset
     )
+    return strip_sensitive_from_response(payload)
 
 
 @app.post("/api/admin/chat/init", operation_id="initAdminChat")
@@ -28741,6 +28763,7 @@ async def _process_admin_chat_message(
                 return
 
             turn_warnings: list[str] = []
+            turn_started = _time.monotonic()
             success, response_text, new_session_id = await admin_chat_with_ai(
                 message=message,
                 history=history,
@@ -28756,6 +28779,7 @@ async def _process_admin_chat_message(
                 ),
                 on_warning=turn_warnings.append,
             )
+            turn_elapsed = _time.monotonic() - turn_started
 
             if abort_signal.is_set():
                 abort_signal.clear()
@@ -28772,7 +28796,13 @@ async def _process_admin_chat_message(
                 return
 
             if not success:
-                logger.error("Admin chat AI call failed: %s", response_text)
+                logger.error(
+                    "Admin chat AI call failed (provider=%s, model=%s, elapsed=%.1fs): %s",
+                    ai_provider,
+                    ai_model,
+                    turn_elapsed,
+                    response_text,
+                )
                 user_error = format_chat_ai_user_error(
                     response_text,
                     is_admin=True,
@@ -28860,9 +28890,12 @@ async def _process_admin_chat_message(
                 )
                 return
             logger.info(
-                "Admin chat: message %d processed (session=%s)",
+                "Admin chat: message %d processed (session=%s, provider=%s, model=%s, elapsed=%.1fs)",
                 assistant_msg_id,
                 new_session_id,
+                ai_provider,
+                ai_model,
+                turn_elapsed,
             )
             await _store_chat_turn_warning(ADMIN_CHAT_JOB_ID, username, turn_warnings)
             notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)

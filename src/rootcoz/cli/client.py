@@ -1144,6 +1144,7 @@ class RootCozClient:
         raw_xml: str,
         *,
         name: str = "",
+        job_name: str = "",
         tags: list[str] | None = None,
         labels: list[str] | None = None,
         endpoint: str = "/analyze",
@@ -1154,6 +1155,7 @@ class RootCozClient:
         Args:
             raw_xml: JUnit XML content as a string.
             name: Display name for this analysis on the dashboard.
+            job_name: Optional explicit job name (overrides JUnit ``<testsuite name>``).
             tags: Optional list of tags for categorization.
             labels: Optional job-side labels to merge into
                 ``job_metadata.labels``.
@@ -1168,6 +1170,8 @@ class RootCozClient:
         body["raw_xml"] = raw_xml
         if name:
             body["name"] = name
+        if job_name:
+            body["job_name"] = job_name
         if tags:
             body["tags"] = tags
         if labels:
@@ -1184,13 +1188,20 @@ class RootCozClient:
         raw_xml: str,
         *,
         name: str = "",
+        job_name: str = "",
         tags: list[str] | None = None,
         labels: list[str] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Queue JUnit XML ingest without AI. POST /submit with type=file"""
         return self.analyze_file(
-            raw_xml, name=name, tags=tags, labels=labels, endpoint="/submit", **kwargs
+            raw_xml,
+            name=name,
+            job_name=job_name,
+            tags=tags,
+            labels=labels,
+            endpoint="/submit",
+            **kwargs,
         )
 
     def re_analyze(self, job_id: str) -> dict[str, Any]:

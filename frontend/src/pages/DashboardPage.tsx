@@ -40,7 +40,7 @@ import { useTableSort } from '@/lib/useTableSort'
 import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, MinusCircle } from 'lucide-react'
 import { JobAttribution } from '@/components/shared/JobAttribution'
 import { useAuth } from '@/lib/auth'
-import { FILTER_PRESET_KEYS } from '@/lib/filterPresets'
+import { FILTER_PRESET_KEYS, PRESET_APPLIED_EVENT, type FilterPresetPage } from '@/lib/filterPresets'
 import {
   applyFiltersToParams,
   applyJobFiltersToParams,
@@ -156,20 +156,76 @@ export function DashboardPage() {
   const [jobs, setJobs] = useState<DashboardJobWithMetadata[]>([])
   const [totalJobs, setTotalJobs] = useState(0)
   const [loading, setLoading] = useState(true)
-  const [search, setSearch] = useState('')
-  const [debouncedSearch, setDebouncedSearch] = useState('')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const urlSearch = searchParams.get('search') ?? ''
+  const [search, setSearch] = useState(urlSearch)
+  const [debouncedSearch, setDebouncedSearch] = useState(urlSearch)
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [prevUrlSearch, setPrevUrlSearch] = useState(urlSearch)
+  const [presetApplySeq, setPresetApplySeq] = useState(0)
+  const [prevPresetApplySeq, setPrevPresetApplySeq] = useState(0)
 
-  // Debounce search input (300ms) to avoid excessive backend requests
+  const cancelPendingSearchDebounce = useCallback(() => {
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current)
+      searchDebounceRef.current = null
+    }
+  }, [])
+
+  // Sync external URL `search` changes (preset apply, sidebar navigation, back/forward)
+  // during render so `fetchJobs` never fires a stale request with the previous search
+  // when a navigation changes both `search` and another filter in the same commit.
+  if (urlSearch !== prevUrlSearch || presetApplySeq !== prevPresetApplySeq) {
+    setPrevUrlSearch(urlSearch)
+    setPrevPresetApplySeq(presetApplySeq)
+    setSearch(urlSearch)
+    setDebouncedSearch(urlSearch)
+  }
+
+  // Follow sidebar preset clicks even when the preset's `search` matches the current URL
+  // (e.g. both empty while un-debounced text is pending in the input).
   useEffect(() => {
-    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current)
-    searchDebounceRef.current = setTimeout(() => setDebouncedSearch(search), 300)
-    return () => { if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current) }
-  }, [search])
+    const onPresetApplied = (event: Event) => {
+      const applied = (event as CustomEvent<{ id: number; page: FilterPresetPage }>).detail
+      if (applied?.page !== 'dashboard') return
+      cancelPendingSearchDebounce()
+      setPresetApplySeq((n) => n + 1)
+    }
+    window.addEventListener(PRESET_APPLIED_EVENT, onPresetApplied)
+    return () => window.removeEventListener(PRESET_APPLIED_EVENT, onPresetApplied)
+  }, [cancelPendingSearchDebounce])
+
+  // Debounce search input (300ms) and commit both fetch state and URL (`replace: true`) together
+  useEffect(() => {
+    cancelPendingSearchDebounce()
+    if (search === debouncedSearch) return
+    searchDebounceRef.current = setTimeout(() => {
+      searchDebounceRef.current = null
+      setDebouncedSearch(search)
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev)
+        if (search) next.set('search', search)
+        else next.delete('search')
+        return next
+      }, { replace: true })
+    }, 300)
+    return cancelPendingSearchDebounce
+  }, [search, debouncedSearch, setSearchParams, cancelPendingSearchDebounce])
+
+  // Overlay the immediate displayed `search` onto the URL params passed to FilterPresetsMenu
+  // so modified-state, Save, and Update reflect newly typed text during the 300ms debounce
+  // without causing premature URL navigations or API fetches.
+  const presetSearchParams = useMemo(() => {
+    if (search === urlSearch) return searchParams
+    const next = new URLSearchParams(searchParams)
+    if (search) next.set('search', search)
+    else next.delete('search')
+    return next
+  }, [searchParams, search, urlSearch])
+
   const { sortKey, sortDir, handleSort } = useTableSort('dash', 'created_at', 'desc', ['created_at'])
   const [page, setPage] = useState(1)
   const [perPage, setPerPage] = useState(20)
-  const [searchParams, setSearchParams] = useSearchParams()
 
   const statusParam = searchParams.getAll('status').sort().join(',')
   const selectedStatuses = useMemo(() => {
@@ -625,13 +681,15 @@ export function DashboardPage() {
         {/* Filters — one shared bar, so both pages carry the same row (#546 A) */}
         <JobFilterBar
           page="dashboard"
-          searchParams={searchParams}
-          onApplyPreset={(filters) =>
+          searchParams={presetSearchParams}
+          onApplyPreset={(filters) => {
+            cancelPendingSearchDebounce()
+            setPresetApplySeq((n) => n + 1)
             setSearchParams(
               (prev) => applyFiltersToParams(prev, filters, FILTER_PRESET_KEYS.dashboard),
               { replace: true },
             )
-          }
+          }}
           search={{ value: search, onChange: setSearch, placeholder: 'Filter jobs...' }}
           submitters={{
             values: submittedBy,
