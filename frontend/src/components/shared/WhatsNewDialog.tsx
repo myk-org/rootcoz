@@ -173,6 +173,7 @@ export function WhatsNewDialog() {
                 <ChatMarkdown
                   content={group.body}
                   allowArtifactLinks={false}
+                  allowImages={false}
                   className="prose-h1:text-base prose-h2:text-sm prose-h3:text-sm"
                 />
               )}

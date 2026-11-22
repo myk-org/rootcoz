@@ -84,4 +84,19 @@ describe('ChatMarkdown', () => {
     expect(container.querySelector('img')).toBeNull()
     expect(screen.getByText(/Safe text/)).toBeDefined()
   })
+
+  it('turns Markdown images into safe external links when allowImages is false', () => {
+    const { container } = render(
+      <ChatMarkdown
+        content="![Release banner](https://example.com/pixel.png) and ![Bad](javascript:alert(1))"
+        allowImages={false}
+      />,
+    )
+    expect(container.querySelector('img')).toBeNull()
+    const link = screen.getByRole('link', { name: 'Release banner' })
+    expect(link.getAttribute('href')).toBe('https://example.com/pixel.png')
+    expect(link.getAttribute('target')).toBe('_blank')
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer')
+    expect(screen.getByText('Bad').tagName).toBe('SPAN')
+  })
 })

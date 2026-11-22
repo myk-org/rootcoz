@@ -82,7 +82,12 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       if (!isExpectedTokenSyncError(err)) {
         console.error('Failed to hydrate tokens from server:', err)
       }
-      setTokensError(extractApiDetail(err) ?? 'Could not read your saved tracker credentials.')
+      const detail = extractApiDetail(err)
+      setTokensError(
+        detail
+          ? `Could not read your saved tracker credentials: ${detail}`
+          : 'Could not read your saved tracker credentials.',
+      )
     }
   }, [])
 

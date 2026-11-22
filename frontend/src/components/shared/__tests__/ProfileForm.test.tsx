@@ -479,12 +479,14 @@ describe('ProfileForm server error detail surfacing (#645)', () => {
     role.value = 'reviewer'
   })
 
-  it('surfaces server detail on a 404 from /api/user/tokens without console noise', async () => {
+  it('surfaces server detail alongside context on a 404 from /api/user/tokens without console noise', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       apiMock.get.mockRejectedValueOnce(new ApiError(404, 'Not Found', { detail: 'User not found. Register first.' }))
       renderForm()
-      expect(await screen.findByText('User not found. Register first.')).toBeInTheDocument()
+      expect(
+        await screen.findByText('Could not read your saved tracker credentials: User not found. Register first.'),
+      ).toBeInTheDocument()
       expect(errorSpy).not.toHaveBeenCalled()
     } finally {
       errorSpy.mockRestore()

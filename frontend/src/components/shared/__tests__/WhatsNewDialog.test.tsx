@@ -454,6 +454,7 @@ describe('WhatsNewDialog', () => {
       '',
       '- **Shared dashboard and report filters.** Both pages share one filter bar.',
       '- **Visible analysis queue.** `max_concurrent_analyses` defaults to 10 in `pending` state. See [the docs](https://example.com/release-notes).',
+      '- External image: ![Screenshot](https://tracker.example/pixel.png)',
       '- Unsafe link: [click me](javascript:alert(1))',
       '- Raw HTML: <img src="x" onerror="alert(1)" /><script>window.__xss = true</script>',
     ].join('\n')
@@ -503,7 +504,13 @@ describe('WhatsNewDialog', () => {
       expect(unsafeLink.tagName).toBe('SPAN')
       expect(dialog.querySelector('a[href^="javascript:"]')).toBeNull()
 
-      // Raw embedded HTML is never rendered as executable DOM nodes
+      // Markdown images do not silently fetch third-party URLs; they render as safe links
+      const imageLink = screen.getByRole('link', { name: 'Screenshot' })
+      expect(imageLink).toHaveAttribute('href', 'https://tracker.example/pixel.png')
+      expect(imageLink).toHaveAttribute('target', '_blank')
+      expect(imageLink).toHaveAttribute('rel', 'noopener noreferrer')
+
+      // Raw embedded HTML and Markdown images never produce <img> or <script> DOM nodes
       expect(dialog.querySelector('img')).toBeNull()
       expect(dialog.querySelector('script')).toBeNull()
       expect((window as unknown as Record<string, unknown>).__xss).toBeUndefined()

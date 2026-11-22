@@ -8,12 +8,14 @@ interface ChatMarkdownProps {
   content: string
   /** Allow /api/admin-chat/artifacts/ links to render as download buttons (default: true). */
   allowArtifactLinks?: boolean
+  /** Render Markdown images as <img> tags; false turns them into safe external links to prevent silent third-party requests (default: true). */
+  allowImages?: boolean
   className?: string
 }
 
 const ARTIFACT_URL_PATTERN = '/api/admin-chat/artifacts/'
 
-export function ChatMarkdown({ content, allowArtifactLinks = true, className }: ChatMarkdownProps) {
+export function ChatMarkdown({ content, allowArtifactLinks = true, allowImages = true, className }: ChatMarkdownProps) {
   return (
     <div className={cn(
       'prose prose-sm max-w-none break-words',
@@ -52,6 +54,19 @@ export function ChatMarkdown({ content, allowArtifactLinks = true, className }: 
                 {children}
               </a>
             )
+          },
+          img: ({ src, alt }) => {
+            if (!src || !isSafeHref(src)) {
+              return <span>{alt}</span>
+            }
+            if (!allowImages) {
+              return (
+                <a href={src} target="_blank" rel="noopener noreferrer">
+                  {alt || src}
+                </a>
+              )
+            }
+            return <img src={src} alt={alt ?? ''} />
           },
         }}
       >

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useContext, useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError, extractApiDetail } from '@/lib/api'
+import { AuthContext } from '@/lib/auth'
 import { resetProviderCatalogCache, useProviderCatalog } from '@/lib/useProviderOptions'
 import { normalizeProvider } from '@/lib/aiProviders'
 import { Button } from '@/components/ui/button'
@@ -37,6 +38,7 @@ function describeLoadError(err: unknown): {
 }
 
 export function AiCredentials() {
+  const username = useContext(AuthContext)?.username ?? ''
   const [providers, setProviders] = useState<Provider[] | null>(null)
   const [selected, setSelected] = useState('')
   const [key, setKey] = useState('')
@@ -47,41 +49,48 @@ export function AiCredentials() {
   const noCredentialStoreRef = useRef(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
-  const [error, setError] = useState('')
-  const [errorRemedy, setErrorRemedy] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<{ message: string; remedy: string | null } | null>(null)
+  const [mutationError, setMutationError] = useState('')
   const [notice, setNotice] = useState('')
 
   // Eligibility flags mirror a server setting that can change while the
   // page is open (AMBIENT_AUTH_PROVIDERS needs no restart), so the list is
   // refetched on focus and after every mutation instead of patched locally.
+  // Keep loadError separate from mutationError so a focus reload never clears
+  // a rejected-key or save/remove error message.
   const fetchProviders = useCallback((isActive: () => boolean = () => true) => {
     return api.get<{ providers: Provider[] }>('/api/user/ai-credentials')
       .then((result) => {
         if (!isActive()) return
         noCredentialStoreRef.current = false
         setProviders(result.providers)
-        setError('')
-        setErrorRemedy(null)
+        setLoadError(null)
       })
       .catch((err: unknown) => {
         if (!isActive()) return
         const { message, remedy, noCredentialStore } = describeLoadError(err)
         noCredentialStoreRef.current = noCredentialStore
-        setError(message)
-        setErrorRemedy(remedy)
+        setLoadError({ message, remedy })
       })
   }, [])
 
   useEffect(() => {
     let active = true
     const isActive = () => active
+    // Reset per-account state when the authenticated identity changes (e.g.
+    // account switched in another tab while Settings stayed mounted).
+    noCredentialStoreRef.current = false
+    setProviders(null)
+    setLoadError(null)
+    setMutationError('')
+    setNotice('')
     void fetchProviders(isActive)
     const onFocus = () => {
       if (!noCredentialStoreRef.current) void fetchProviders(isActive)
     }
     window.addEventListener('focus', onFocus)
     return () => { active = false; window.removeEventListener('focus', onFocus); keyRef.current = '' }
-  }, [fetchProviders])
+  }, [fetchProviders, username])
 
   function clearKey() {
     keyRef.current = ''
@@ -119,8 +128,7 @@ export function AiCredentials() {
     if (!provider || !value.trim() || !model.trim() || busy) return
     clearKey()
     setBusy(provider)
-    setError('')
-    setErrorRemedy(null)
+    setMutationError('')
     setNotice('')
     try {
       const response = await api.put<{ outcome: 'accepted' | 'rejected' | 'inconclusive'; ok: boolean }>(
@@ -128,7 +136,7 @@ export function AiCredentials() {
       )
       console.info('AI credential verification:', provider, response.outcome)
       if (response.outcome !== 'accepted' || !response.ok) {
-        setError(response.outcome === 'rejected'
+        setMutationError(response.outcome === 'rejected'
           ? 'Check the key and selected model; existing credential unchanged.'
           : 'Try again when the provider is available; existing credential unchanged.')
         return
@@ -140,7 +148,7 @@ export function AiCredentials() {
       setModel('')
       setNotice('API key verified and saved.')
     } catch (err) {
-      setError(extractApiDetail(err) ?? 'Could not save API key')
+      setMutationError(extractApiDetail(err) ?? 'Could not save API key')
     } finally {
       clearKey()
       setBusy(null)
@@ -151,8 +159,7 @@ export function AiCredentials() {
     if (busy) return
     clearKey()
     setBusy(provider)
-    setError('')
-    setErrorRemedy(null)
+    setMutationError('')
     setNotice('')
     try {
       await api.delete(`/api/user/ai-credentials/${encodeURIComponent(provider)}`)
@@ -161,7 +168,7 @@ export function AiCredentials() {
       if (editing === provider) setEditing(null)
       setSelected('')
     } catch (err) {
-      setError(extractApiDetail(err) ?? 'Could not remove API key')
+      setMutationError(extractApiDetail(err) ?? 'Could not remove API key')
     } finally {
       setBusy(null)
     }
@@ -174,19 +181,20 @@ export function AiCredentials() {
           <h2 className="font-display text-sm font-semibold text-text-primary">AI provider keys</h2>
           <p className="mt-1 text-xs text-text-tertiary">Your keys are stored on the server. Existing keys are never shown here.</p>
         </div>
-        {error && (
+        {loadError && (
           <div
             role="alert"
             className={
-              errorRemedy
+              loadError.remedy
                 ? 'space-y-1 rounded-md border border-signal-amber/30 bg-signal-amber/10 px-3 py-2 text-xs'
                 : 'text-xs text-signal-red'
             }
           >
-            <p className={errorRemedy ? 'font-medium text-signal-amber' : undefined}>{error}</p>
-            {errorRemedy && <p className="text-text-secondary">{errorRemedy}</p>}
+            <p className={loadError.remedy ? 'font-medium text-signal-amber' : undefined}>{loadError.message}</p>
+            {loadError.remedy && <p className="text-text-secondary">{loadError.remedy}</p>}
           </div>
         )}
+        {mutationError && <p role="alert" className="text-xs text-signal-red">{mutationError}</p>}
         {notice && <p role="status" className="text-xs text-signal-green">{notice}</p>}
         {starvedKeys.map((id) => (
           <p key={id} role="alert" className="text-xs text-signal-amber">
@@ -202,7 +210,7 @@ export function AiCredentials() {
                 <li key={id} className="flex flex-wrap items-center gap-2 py-3">
                   <span className="mr-auto font-mono text-sm text-text-primary break-all">{id}</span>
                   <span className="text-xs text-text-tertiary">{canReplace ? 'Configured' : 'Configured — user keys no longer accepted'}</span>
-                  {canReplace && <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { clearKey(); setSelected(''); setModel(''); setEditing(id); setError('') }} aria-label={`Replace ${id} key`}>Replace</Button>}
+                  {canReplace && <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { clearKey(); setSelected(''); setModel(''); setEditing(id); setMutationError('') }} aria-label={`Replace ${id} key`}>Replace</Button>}
                   <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => remove(id)} aria-label={`Remove ${id} key`}>Remove key</Button>
                 </li>
               ))}
@@ -213,17 +221,17 @@ export function AiCredentials() {
               {editing ? (
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-sm text-text-primary">Replace {editing} key</span>
-                  <Button type="button" variant="outline" size="sm" disabled={busy !== null} onClick={() => { clearKey(); setModel(''); setEditing(null); setError('') }}>Cancel</Button>
+                  <Button type="button" variant="outline" size="sm" disabled={busy !== null} onClick={() => { clearKey(); setModel(''); setEditing(null); setMutationError('') }}>Cancel</Button>
                 </div>
               ) : (
                 <div className="space-y-1.5">
                   <span className="block text-xs text-text-tertiary">AI provider</span>
-                  <ModelCombobox value={selected} onChange={(value) => { clearKey(); setModel(''); setError(''); setSelected(value) }} options={addable.map((item) => ({ id: item.provider, name: item.configured ? 'configured' : item.provider }))} placeholder="Find a provider" ariaLabel="AI provider" disabled={busy !== null} />
+                  <ModelCombobox value={selected} onChange={(value) => { clearKey(); setModel(''); setMutationError(''); setSelected(value) }} options={addable.map((item) => ({ id: item.provider, name: item.configured ? 'configured' : item.provider }))} placeholder="Find a provider" ariaLabel="AI provider" disabled={busy !== null} />
                 </div>
               )}
               <div className="space-y-1.5">
                 <span className="block text-xs text-text-tertiary">Model to verify against</span>
-                <ModelCombobox value={model} onChange={(value) => { setModel(value); setError('') }} options={catalog[normalizeProvider(provider ?? '')] ?? []} placeholder="Select or enter model ID" ariaLabel="Verification model" disabled={busy !== null || !provider} />
+                <ModelCombobox value={model} onChange={(value) => { setModel(value); setMutationError('') }} options={catalog[normalizeProvider(provider ?? '')] ?? []} placeholder="Select or enter model ID" ariaLabel="Verification model" disabled={busy !== null || !provider} />
                 <p className="text-xs text-text-tertiary">If the model isn't listed, enter its ID manually.</p>
               </div>
               <div className="flex gap-2">
