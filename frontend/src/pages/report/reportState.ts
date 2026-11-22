@@ -1,8 +1,10 @@
-import { createContext, useContext, type Dispatch } from 'react'
+import { createContext, useContext, useMemo, type Dispatch } from 'react'
 import { reviewKey } from '@/lib/reviewKey'
+import { collectProviderIds, extractOriginalProviderIds } from '@/lib/aiProviders'
+import { useProviderLabels } from '@/lib/useProviderLabels'
 import type { SelectedGroup } from './failureUpdates'
 import { reconcileSelection, scopeKey } from './failureUpdates'
-import type { AnalysisResult, Capabilities, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel, TrackedInEntry } from '@/types'
+import type { AnalysisResult, Capabilities, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel, TrackedInEntry, PreviousAnalysis } from '@/types'
 
 export interface ReportState {
   result: AnalysisResult | null
@@ -309,3 +311,68 @@ export const RefreshEnrichmentsCtx = createContext<(jobId: string) => void>(() =
 export const useReportState = () => useContext(StateCtx)
 export const useReportDispatch = () => useContext(DispatchCtx)
 export const useRefreshEnrichments = () => useContext(RefreshEnrichmentsCtx)
+
+function collectFailureProviderIds(failures: readonly FailureAnalysis[] | undefined, out: string[]): void {
+  for (const f of failures ?? []) {
+    if (f.reanalyzed_with?.ai_provider) out.push(f.reanalyzed_with.ai_provider)
+    const prevSingle = f.previous_analysis as PreviousAnalysis | null | undefined
+    if (prevSingle?._superseded_by?.ai_provider) out.push(prevSingle._superseded_by.ai_provider)
+    for (const prev of f.previous_analyses ?? []) {
+      if (prev._superseded_by?.ai_provider) out.push(prev._superseded_by.ai_provider)
+    }
+    if (f.peer_debate) {
+      for (const cfg of f.peer_debate.ai_configs ?? []) {
+        if (cfg.ai_provider) out.push(cfg.ai_provider)
+      }
+      for (const round of f.peer_debate.rounds ?? []) {
+        if (round.ai_provider) out.push(round.ai_provider)
+      }
+    }
+  }
+}
+
+function collectChildProviderIds(children: readonly ChildJobAnalysis[] | undefined, out: string[]): void {
+  for (const child of children ?? []) {
+    collectFailureProviderIds(child.failures, out)
+    collectChildProviderIds(child.failed_children, out)
+  }
+}
+
+/**
+ * Collect every provider ID referenced anywhere in an analysis report (top-level
+ * AI, peer configs, failure re-analysis / superseded history, peer debates, and
+ * nested child jobs) so every report surface shares one disambiguation context.
+ */
+export function collectReportProviderIds(
+  result: AnalysisResult | null | undefined,
+  extraFailures?: readonly FailureAnalysis[],
+): string[] {
+  const out: string[] = []
+  if (result) {
+    if (result.ai_provider) out.push(result.ai_provider)
+    if (result.request_params?.ai_provider) out.push(result.request_params.ai_provider)
+    for (const cfg of result.request_params?.peer_ai_configs ?? []) {
+      if (cfg.ai_provider) out.push(cfg.ai_provider)
+    }
+    collectFailureProviderIds(result.failures, out)
+    collectChildProviderIds(result.child_job_analyses, out)
+  }
+  collectFailureProviderIds(extraFailures, out)
+  return collectProviderIds(out)
+}
+
+/**
+ * Report-wide provider casing and collision-aware labels derived from the
+ * report context's catalog (`aiModels`) plus every provider ID in the report.
+ */
+export function useReportProviderLabels(extraFailures?: readonly FailureAnalysis[]) {
+  const { aiModels, result } = useReportState()
+  const originalProviderIds = useMemo(() => extractOriginalProviderIds(aiModels), [aiModels])
+  const catalogProviderIds = useMemo(() => Object.keys(aiModels), [aiModels])
+  const reportProviderIds = useMemo(
+    () => collectReportProviderIds(result, extraFailures),
+    [result, extraFailures],
+  )
+  const providerLabels = useProviderLabels(catalogProviderIds, reportProviderIds, originalProviderIds)
+  return { originalProviderIds, catalogProviderIds, providerLabels }
+}

@@ -3,7 +3,9 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
+import { AnalysisProviderSelect } from '@/components/shared/AnalysisAiPicker'
 import { ReAnalyzeDialog } from '@/pages/report/ReAnalyzeDialog'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
 import { writeLastAiPair } from '@/lib/lastAiPair'
 import type { AnalysisResult, AiModelsResponse } from '@/types'
@@ -61,7 +63,7 @@ describe('analysis credential-scoped pickers', () => {
     const provider = screen.getByRole('combobox', { name: 'AI Provider' })
     await user.click(provider)
     expect(await screen.findByRole('option', { name: 'Claude · Server' })).toBeInTheDocument()
-    expect(screen.getByRole('option', { name: 'Openai · User' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'OpenAI · User' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Gemini · User + Server' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Anthropic · User + Server' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: /empty/i })).not.toBeInTheDocument()
@@ -97,7 +99,7 @@ describe('analysis credential-scoped pickers', () => {
     await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
     await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
     expect(await screen.findByRole('option', { name: 'Mistral · User' })).toBeInTheDocument()
-    await user.click(screen.getByRole('option', { name: 'Openrouter · User' }))
+    await user.click(screen.getByRole('option', { name: 'OpenRouter · User' }))
     const model = screen.getByRole('combobox', { name: 'AI Model' })
     expect(model).not.toHaveAttribute('readonly')
     await user.click(model)
@@ -139,7 +141,7 @@ describe('analysis credential-scoped pickers', () => {
     expect(screen.getByRole('button', { name: 'Re-Analyze' })).toBeDisabled()
     await user.click(provider)
     expect(screen.queryByRole('option', { name: /missing/i })).not.toBeInTheDocument()
-    await user.click(screen.getByRole('option', { name: 'Openai · User' }))
+    await user.click(screen.getByRole('option', { name: 'OpenAI · User' }))
     await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
     const model = within(document.body).getByRole('option', { name: /gpt.*User/i })
     await user.click(model)
@@ -413,5 +415,56 @@ describe('new analysis stored default (#591)', () => {
     await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'claude', ai_model: 'sonnet' })))
     // Nothing is written back: the stored default stays the admin's to change.
     expect(post.mock.calls.map(([path]) => path)).toEqual(['/analyze'])
+  })
+
+  it('maps internal sidecar ids to public labels and preserves custom provider casing in pickers', async () => {
+    const sidecarCatalog: AiModelsResponse = {
+      providers: {
+        'google-vertex-claude': [{ id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', provider: 'google-vertex-claude', credential_sources: ['server'] }],
+        'google-vertex': [{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google-vertex', credential_sources: ['server'] }],
+        openai: [{ id: 'gpt-5', name: 'GPT-5', provider: 'openai', credential_sources: ['user'] }],
+        MyGateway: [{ id: 'gw/model-1', name: 'Model 1', provider: 'MyGateway', credential_sources: ['server'] }],
+      },
+      provider_status: {},
+    }
+    get.mockImplementation(async (path: string) => path.startsWith('/api/ai-models') ? sidecarCatalog : { ...defaults, ai_provider: 'google-vertex-claude', ai_model: 'claude-sonnet-4-6' })
+    const user = userEvent.setup()
+    render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
+    await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
+    const provider = screen.getByRole('combobox', { name: 'AI Provider' })
+    expect(provider).toHaveTextContent('Claude · Server')
+    await user.click(provider)
+    expect(screen.getByRole('option', { name: 'Claude · Server' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Gemini · Server' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'MyGateway · Server' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'OpenAI · User' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /Google Vertex|Openai|Mygateway/ })).not.toBeInTheDocument()
+  })
+
+  it('preserves transport disambiguation across forceServer filtering and unavailable placeholders', async () => {
+    const dualGeminiCatalog: AiModelsResponse = {
+      providers: {
+        google: [{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google', credential_sources: ['user'] }],
+        'google-vertex': [{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google-vertex', credential_sources: ['server'] }],
+      },
+      provider_status: {},
+    }
+    get.mockImplementation(async () => dualGeminiCatalog)
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(
+      <TooltipProvider>
+        <AnalysisProviderSelect value="google" onChange={onChange} forceServer={true} />
+      </TooltipProvider>,
+    )
+    const trigger = await screen.findByRole('combobox', { name: 'AI Provider' })
+    // google is filtered out by forceServer=true, so the placeholder must stay
+    // collision-aware ("Gemini (API) (unavailable)"), not ambiguous "Gemini (unavailable)".
+    await waitFor(() => expect(trigger).toHaveTextContent('Gemini (API) (unavailable)'))
+    await user.click(trigger)
+    // The selectable server option must also keep its full-catalog qualifier so
+    // it agrees with ChatUI/Report headers and stays stable across forceServer toggles.
+    expect(await screen.findByRole('option', { name: 'Gemini (Vertex) · Server' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Gemini · Server' })).not.toBeInTheDocument()
   })
 })

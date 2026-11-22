@@ -26,6 +26,8 @@ import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { CheckCircle2, ExternalLink } from 'lucide-react'
+import { formatProviderModelLabel } from '@/lib/aiProviders'
+import { useCatalogProviderLabels } from '@/lib/useProviderLabels'
 import { completeAiPairOverride } from '@/lib/analysisAi'
 import { useAiSelection } from '@/lib/useAiSelection'
 import type {
@@ -69,6 +71,7 @@ export function FeedbackDialog({ open, onOpenChange, capabilities }: FeedbackDia
   const [previewLabels, setPreviewLabels] = useState<string[]>([])
   // Server-RESOLVED pair for attribution — never the values this dialog sent.
   const [previewAi, setPreviewAi] = useState({ provider: '', model: '', generated: false })
+  const { originalIds: originalProviderIds, providerLabels } = useCatalogProviderLabels([previewAi.provider])
   // The account row is the only credential source, so ask it when the dialog opens
   // — the same row the server reads when it files the issue.
   const tokenPresence = useUserTokenPresence(open)
@@ -344,7 +347,7 @@ export function FeedbackDialog({ open, onOpenChange, capabilities }: FeedbackDia
             )}
             <div className="rounded-md border border-border-muted bg-surface-elevated px-3 py-2 text-xs text-text-secondary">
               {previewAi.generated
-                ? `Generated using AI with ${previewAi.provider}/${previewAi.model}`
+                ? `Generated using AI with ${formatProviderModelLabel(previewAi.provider, previewAi.model, originalProviderIds, '/', providerLabels)}`
                 : 'No AI model generated this issue — the fallback template was used.'}
             </div>
             <div className="space-y-2">

@@ -8,7 +8,7 @@ import { buildRepoUrls, type RepoUrl } from '@/lib/autoLink'
 import { groupFailures } from '@/lib/grouping'
 import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
 import type { ResultResponse, CommentsAndReviews, AiModelsResponse } from '@/types'
-import { useReportState, useReportDispatch, useRefreshEnrichments } from '@/pages/report/reportState'
+import { useReportState, useReportDispatch, useRefreshEnrichments, useReportProviderLabels } from '@/pages/report/reportState'
 import { reviewKey } from '@/lib/reviewKey'
 import { ReportProvider } from './report/ReportContext'
 import { FailureCard } from './report/FailureCard'
@@ -35,6 +35,7 @@ import { ReportPortalButton } from './report/ReportPortalButton'
 import { DatadogButton } from './report/DatadogButton'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { OriginJobBanner, ReanalyzedForwardBanner } from '@/components/shared/ReanalysisBanner'
+import { formatProviderLabel, formatProviderModelLabel } from '@/lib/aiProviders'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { useAuth } from '@/lib/auth'
 
@@ -424,9 +425,7 @@ function ReportContent() {
     .map(([repo, clone]) => ({ name: repo, reason: clone.reason }))
   const reviewedCount = reviewedKeyCount(allTestKeys, state.reviews)
 
-  /** Format the AI provider/model label for display. */
-  const formatAiLabel = (provider: string | undefined, model: string | undefined): string =>
-    provider ? (model ? `${provider} / ${model}` : provider) : ''
+  const { originalProviderIds, catalogProviderIds, providerLabels } = useReportProviderLabels()
 
   // Expand/collapse all for top-level failure cards
   const getFailureKeys = useCallback(
@@ -524,7 +523,7 @@ function ReportContent() {
         <div className="mt-2 flex flex-wrap items-center gap-3">
           {result.ai_provider && (
             <Badge variant="outline" className="whitespace-nowrap text-[10px]">
-              {formatAiLabel(result.ai_provider, result.ai_model)}
+              {formatProviderModelLabel(result.ai_provider, result.ai_model, originalProviderIds, ' / ', providerLabels)}
             </Badge>
           )}
           {result.token_usage ? (
@@ -736,6 +735,9 @@ function ReportContent() {
         failures={result.failures ?? []}
         childJobAnalyses={result.child_job_analyses ?? []}
         repoUrls={repoUrls}
+        originalIds={originalProviderIds}
+        catalogProviderIds={catalogProviderIds}
+        providerLabels={providerLabels}
       />
 
       {/* ---- AI spend breakdown ---- */}
@@ -806,7 +808,7 @@ function ReportContent() {
         {state.completedAt && <p>Completed: {formatTimestamp(state.completedAt)}</p>}
         {result.ai_provider && (
           <p>
-            AI: {result.ai_provider}
+            AI: {formatProviderLabel(result.ai_provider, originalProviderIds, providerLabels)}
             {result.ai_model ? ` (${result.ai_model})` : ''}
           </p>
         )}

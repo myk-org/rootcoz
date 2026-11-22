@@ -55,6 +55,52 @@ def test_normalize_provider(raw: str, canonical: str) -> None:
     assert normalize_provider(raw) == canonical
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("google-vertex-claude", "claude"),
+        ("GOOGLE-VERTEX-CLAUDE", "claude"),
+        ("google", "gemini"),
+        # google-vertex stays distinct in backend routing/restrictions so admins
+        # can restrict google and google-vertex independently; the UI maps its
+        # display label via formatProviderLabel.
+        ("google-vertex", "google-vertex"),
+        ("openai", "openai"),
+        ("anthropic", "anthropic"),
+        ("MyGateway", "MyGateway"),
+    ],
+)
+def test_public_provider_name(raw: str, expected: str) -> None:
+    assert ai_client.public_provider_name(raw) == expected
+
+
+def test_google_and_google_vertex_restrictions_stay_independent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restricting active_server_providers to google must not activate google-vertex."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "rootcoz.config.get_settings",
+        lambda: SimpleNamespace(active_server_providers="google"),
+    )
+    ai_client.update_model_catalog(
+        [
+            {"provider": "google", "id": "gemini-2.5-pro"},
+            {"provider": "google-vertex", "id": "gemini-2.5-pro"},
+        ]
+    )
+    assert ai_client.is_server_provider_active("google")
+    assert not ai_client.is_server_provider_active("google-vertex")
+
+    monkeypatch.setattr(
+        "rootcoz.config.get_settings",
+        lambda: SimpleNamespace(active_server_providers="google-vertex"),
+    )
+    assert ai_client.is_server_provider_active("google-vertex")
+    assert not ai_client.is_server_provider_active("google")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "removed_provider",

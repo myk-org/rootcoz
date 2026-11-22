@@ -7,6 +7,7 @@ import { groupPeerRounds } from '@/lib/peerDebate'
 import { resolvedSignature } from '@/lib/grouping'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ChevronDown, ChevronRight, Users } from 'lucide-react'
+import { useProviderLabels } from '@/lib/useProviderLabels'
 import { getPeerAiLabels } from './peerAiLabels'
 
 interface FailureWithDebate {
@@ -72,12 +73,18 @@ interface PeerAnalysisSummaryProps {
   failures: FailureAnalysis[]
   childJobAnalyses?: ChildJobAnalysis[]
   repoUrls: RepoUrl[]
+  originalIds?: Readonly<Record<string, string>>
+  catalogProviderIds?: readonly string[]
+  providerLabels?: Readonly<Record<string, string>>
 }
 
 export function PeerAnalysisSummary({
   failures,
   childJobAnalyses,
   repoUrls,
+  originalIds,
+  catalogProviderIds,
+  providerLabels: inheritedProviderLabels,
 }: PeerAnalysisSummaryProps) {
   const [expanded, setExpanded] = useState(false)
 
@@ -86,9 +93,19 @@ export function PeerAnalysisSummary({
     [failures, childJobAnalyses],
   )
 
+  const localProviderLabels = useProviderLabels(
+    catalogProviderIds ?? [],
+    debateFailures.flatMap(({ debate }) => [
+      ...(debate.ai_configs ?? []).map((c) => c.ai_provider),
+      ...debate.rounds.map((r) => r.ai_provider),
+    ]),
+    originalIds,
+  )
+  const providerLabels = inheritedProviderLabels ?? localProviderLabels
+
   const participatingAis = useMemo(
-    () => getPeerAiLabels(debateFailures),
-    [debateFailures],
+    () => getPeerAiLabels(debateFailures, originalIds, providerLabels),
+    [debateFailures, originalIds, providerLabels],
   )
   const consensusCount = useMemo(
     () => debateFailures.filter((d) => d.debate.consensus_reached).length,
@@ -145,7 +162,7 @@ export function PeerAnalysisSummary({
       {expanded && (
         <div className="border-t border-border-muted p-4 space-y-4">
           {debateFailures.map(({ id, testName, siblingTestNames, jobLabel, debate, primaryUsage }) => (
-            <DebateEntry key={id} testName={testName} siblingTestNames={siblingTestNames} jobLabel={jobLabel} debate={debate} primaryUsage={primaryUsage} repoUrls={repoUrls} />
+            <DebateEntry key={id} testName={testName} siblingTestNames={siblingTestNames} jobLabel={jobLabel} debate={debate} primaryUsage={primaryUsage} repoUrls={repoUrls} originalIds={originalIds} providerLabels={providerLabels} />
           ))}
         </div>
       )}
@@ -154,7 +171,7 @@ export function PeerAnalysisSummary({
 }
 
 /** A single failure's debate entry within the summary. */
-function DebateEntry({ testName, siblingTestNames, jobLabel, debate, primaryUsage, repoUrls }: { testName: string; siblingTestNames: string[]; jobLabel: string; debate: PeerDebate; primaryUsage?: FailureAnalysis['token_usage']; repoUrls: RepoUrl[] }) {
+function DebateEntry({ testName, siblingTestNames, jobLabel, debate, primaryUsage, repoUrls, originalIds, providerLabels }: { testName: string; siblingTestNames: string[]; jobLabel: string; debate: PeerDebate; primaryUsage?: FailureAnalysis['token_usage']; repoUrls: RepoUrl[]; originalIds?: Readonly<Record<string, string>>; providerLabels?: Readonly<Record<string, string>> }) {
   const [timelineOpen, setTimelineOpen] = useState(false)
   const groupedRounds = useMemo(() => groupPeerRounds(debate.rounds), [debate.rounds])
 
@@ -213,7 +230,7 @@ function DebateEntry({ testName, siblingTestNames, jobLabel, debate, primaryUsag
               </p>
               <div className="space-y-2">
                 {entries.map((entry, index) => (
-                  <PeerRoundEntry key={`r${roundNum}-${index}`} entry={entry} repoUrls={repoUrls} primaryUsage={primaryUsage} compact />
+                  <PeerRoundEntry key={`r${roundNum}-${index}`} entry={entry} repoUrls={repoUrls} primaryUsage={primaryUsage} originalIds={originalIds} providerLabels={providerLabels} compact />
                 ))}
               </div>
             </div>

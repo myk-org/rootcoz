@@ -53,7 +53,7 @@ async function headerParts(jobName: string) {
   showReport(jobName)
   const heading = await screen.findByRole('heading', { level: 1 })
   const identityRow = heading.parentElement as HTMLElement
-  const modelChip = screen.getByText('gemini / pro')
+  const modelChip = screen.getByText('Gemini / pro')
   const tokenBadge = screen.getByText(/100 in \/ 50 out/)
   const summaryRow = tokenBadge.parentElement as HTMLElement
   return { heading, identityRow, modelChip, tokenBadge, summaryRow }
@@ -101,6 +101,29 @@ describe('report header layout', () => {
   it('renders the model label exactly once in the report header', async () => {
     showReport('example')
     await screen.findByRole('heading', { level: 1 })
-    expect(screen.getAllByText('gemini / pro')).toHaveLength(1)
+    expect(screen.getAllByText('Gemini / pro')).toHaveLength(1)
+  })
+
+  it('restores exact catalog casing for a lowercase stored custom provider id', async () => {
+    const response: ResultResponse = {
+      job_id: 'job-2', jenkins_url: null, status: 'completed', created_at: '', base_url: null, result_url: null,
+      result: {
+        job_id: 'job-2', job_name: 'custom-job', build_number: 2, jenkins_url: null,
+        status: 'completed', summary: '', ai_provider: 'acmeai', ai_model: 'gw-1',
+        failures: [], child_job_analyses: [], token_usage: usage,
+      },
+    }
+    vi.mocked(api.get).mockImplementation(async (path) => {
+      if (path === '/results/job-2') return response
+      if (path === '/results/job-2/comments') return { comments: [], reviews: {} }
+      if (path === '/api/ai-models') return { providers: { AcmeAI: [{ id: 'gw-1', name: 'GW 1' }] } }
+      if (path.startsWith('/history/classifications')) return { classifications: [] }
+      if (path === '/results/job-2/enrich-comments') return { enrichments: {} }
+      throw new Error(`Unexpected request: ${path}`)
+    })
+    render(<MemoryRouter initialEntries={['/report/job-2']}><Routes><Route path="/report/:jobId" element={<ReportPage />} /></Routes></MemoryRouter>)
+    await screen.findByRole('heading', { level: 1 })
+    expect(await screen.findByText('AcmeAI / gw-1')).toBeInTheDocument()
+    expect(screen.getByText('AI: AcmeAI (gw-1)')).toBeInTheDocument()
   })
 })

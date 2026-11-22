@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import type { AiModelsResponse, ProviderStatus } from '@/types'
-import { buildProviderOptions, normalizeProvider, type AiProviderOption } from '@/lib/aiProviders'
+import { buildProviderOptions, foldCatalogKeys, type AiProviderOption } from '@/lib/aiProviders'
 
 export type { ProviderStatus }
 
@@ -36,41 +36,12 @@ function catalogKeyFor(username: string, isAdmin: boolean, authenticated: boolea
   return `${username}:${isAdmin ? '1' : '0'}`
 }
 
-/** Result of folding catalog record keys through normalizeProvider (lowercase). */
-type FoldedRecord<T> = {
-  folded: Record<string, T>
-  /** folded key → exact-case key from the server, for verbatim submission. */
-  originalIds: Record<string, string>
-}
-
 /*
- * Provider IDs are case-sensitive in the sidecar (a custom agent-dir
- * provider may be "EnMaaS"), but every consumer looks providers up
- * lowercased, so keys are folded once at load. The exact-case ID is kept
- * in originalIds — the backend's supported-provider check is an exact
- * match, so submissions must use the catalog's original casing. Two IDs
- * differing only in case cannot be told apart downstream — the backend
- * refuses ambiguous case-insensitive matches — so colliding variants are
- * dropped rather than one silently overwriting the other.
+ * Provider IDs are case-sensitive in the sidecar, but every consumer looks
+ * providers up lowercased, so keys are folded once at load via foldCatalogKeys.
+ * Exact-case IDs are kept in originalIds for verbatim submission and display;
+ * colliding case-distinct variants are dropped.
  */
-function foldCatalogKeys<T>(record: Record<string, T>): FoldedRecord<T> {
-  const seen = new Map<string, string>()
-  const folded: Record<string, T> = {}
-  const originalIds: Record<string, string> = {}
-  for (const [key, value] of Object.entries(record)) {
-    const normalized = normalizeProvider(key)
-    const original = seen.get(normalized)
-    if (original === undefined) {
-      seen.set(normalized, key)
-      folded[normalized] = value
-      originalIds[normalized] = key
-    } else if (original !== key) {
-      delete folded[normalized]
-      delete originalIds[normalized]
-    }
-  }
-  return { folded, originalIds }
-}
 
 function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
   const cached = catalogCache.get(cacheKey)
@@ -191,13 +162,13 @@ export function useProviderCatalog(): {
 export function useProviderOptions(
   currentValues: string | string[] | undefined = undefined,
 ): AiProviderOption[] {
-  const { providerKeys } = useProviderCatalog()
+  const { providerKeys, originalIds } = useProviderCatalog()
   const currentKey = Array.isArray(currentValues)
     ? currentValues.join('\0')
     : (currentValues ?? '')
 
   return useMemo(() => {
     const current = currentKey ? currentKey.split('\0') : []
-    return buildProviderOptions(providerKeys, current)
-  }, [providerKeys, currentKey])
+    return buildProviderOptions(providerKeys, current, originalIds)
+  }, [providerKeys, currentKey, originalIds])
 }

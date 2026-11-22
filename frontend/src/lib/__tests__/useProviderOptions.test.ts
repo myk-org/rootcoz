@@ -243,4 +243,5 @@ describe('useProviderCatalog shared fetch', () => {
     expect(getMock).toHaveBeenCalledTimes(2)
     unmount()
   })
+
 })

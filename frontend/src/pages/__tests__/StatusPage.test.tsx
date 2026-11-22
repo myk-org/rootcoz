@@ -12,6 +12,17 @@ const { onStatusChanged } = vi.hoisted(() => ({ onStatusChanged: { current: unde
 vi.mock('@/lib/api', () => ({ api: { get: vi.fn(), post: vi.fn() }, ApiError: class extends Error {} }))
 vi.mock('@/lib/useSSE', () => ({ useSSE: (_topic: string, handlers: Record<string, () => void>) => { onStatusChanged.current = handlers['status-changed'] } }))
 vi.mock('@/lib/auth', () => ({ useAuth: () => ({ isAdmin: false, isOperator: false, username: 'viewer' }) }))
+vi.mock('@/lib/useProviderOptions', () => ({
+  useProviderCatalog: () => ({
+    providerKeys: [],
+    providers: {},
+    enabled: [],
+    providerStatus: {},
+    originalIds: {},
+    settled: true,
+    loaded: true,
+  }),
+}))
 
 const usage: TokenUsageSummary = {
   total_input_tokens: 100, total_output_tokens: 20, total_cache_read_tokens: 0,

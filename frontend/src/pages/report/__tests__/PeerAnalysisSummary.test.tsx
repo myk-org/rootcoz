@@ -22,14 +22,14 @@ describe('getPeerAiLabels', () => {
   it('drops ai_configs[0] (main) and keeps peers', () => {
     const labels = getPeerAiLabels([debate([main, peerClaude, peerGemini])])
     expect(labels).toEqual([
-      'claude/claude-opus-4-6-1m',
-      'gemini/gemini-2.5-pro',
+      'Claude/claude-opus-4-6-1m',
+      'Gemini/gemini-2.5-pro',
     ])
   })
 
   it('keeps a peer that shares the main provider/model', () => {
     const labels = getPeerAiLabels([debate([main, main])])
-    expect(labels).toEqual(['openai/gpt-5'])
+    expect(labels).toEqual(['OpenAI/gpt-5'])
   })
 
   it('dedupes peer labels across debates', () => {
@@ -38,8 +38,41 @@ describe('getPeerAiLabels', () => {
       debate([main, peerClaude, peerGemini]),
     ])
     expect(labels).toEqual([
-      'claude/claude-opus-4-6-1m',
-      'gemini/gemini-2.5-pro',
+      'Claude/claude-opus-4-6-1m',
+      'Gemini/gemini-2.5-pro',
+    ])
+  })
+
+  it('maps internal sidecar provider ids to public labels', () => {
+    const labels = getPeerAiLabels([
+      debate([
+        main,
+        { ai_provider: 'google-vertex-claude', ai_model: 'claude-sonnet-4-6' },
+        { ai_provider: 'google-vertex', ai_model: 'gemini-2.5-pro' },
+      ]),
+    ])
+    expect(labels).toEqual([
+      'Claude/claude-sonnet-4-6',
+      'Gemini/gemini-2.5-pro',
+    ])
+  })
+
+  it('keeps distinct google and google-vertex peers visible and restores custom provider casing', () => {
+    const labels = getPeerAiLabels(
+      [
+        debate([
+          main,
+          { ai_provider: 'google', ai_model: 'gemini-2.5-pro' },
+          { ai_provider: 'google-vertex', ai_model: 'gemini-2.5-pro' },
+          { ai_provider: 'acmeai', ai_model: 'model-1' },
+        ]),
+      ],
+      { acmeai: 'AcmeAI' },
+    )
+    expect(labels).toEqual([
+      'AcmeAI/model-1',
+      'Gemini (API)/gemini-2.5-pro',
+      'Gemini (Vertex)/gemini-2.5-pro',
     ])
   })
 

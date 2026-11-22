@@ -9,7 +9,7 @@ import { api, extractApiDetail } from '@/lib/api'
 import { useSessionState } from '@/lib/useSessionState'
 import { unescapeCodeContent } from '@/lib/format'
 import { formatRelativeTime } from '@/lib/utils'
-import { useReportState, useReportDispatch } from '@/pages/report/reportState'
+import { useReportState, useReportDispatch, useReportProviderLabels } from '@/pages/report/reportState'
 import { reviewKey } from '@/lib/reviewKey'
 import { getTrackedIn, notifyReviewChanged, putReviewed, runBatched, scopeKey, scopedReviewState } from './failureUpdates'
 import { BULK_SELECT_CHECKBOX_CLASS } from '@/lib/constants'
@@ -32,17 +32,20 @@ import { ReAnalyzeDialog } from './ReAnalyzeDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { UuidCopyButton } from '@/components/shared/UuidCopyButton'
+import { formatProviderModelLabel } from '@/lib/aiProviders'
 import { useAuth } from '@/lib/auth'
 import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw, Link2, X } from 'lucide-react'
 
-function PreviousAnalysisEntry({ prev, index, repoUrls }: {
+function PreviousAnalysisEntry({ prev, index, repoUrls, originalIds, providerLabels }: {
   prev: PreviousAnalysis
   index: number
   repoUrls: RepoUrl[]
+  originalIds?: Readonly<Record<string, string>>
+  providerLabels?: Readonly<Record<string, string>>
 }) {
   const superseded = prev._superseded_by
   const supersededLabel = superseded
-    ? ` — re-analyzed with ${superseded.ai_provider}/${superseded.ai_model}${superseded.timestamp ? ` (${formatRelativeTime(superseded.timestamp)})` : ''}`
+    ? ` — re-analyzed with ${formatProviderModelLabel(superseded.ai_provider, superseded.ai_model, originalIds, '/', providerLabels)}${superseded.timestamp ? ` (${formatRelativeTime(superseded.timestamp)})` : ''}`
     : ''
 
   return (
@@ -194,7 +197,8 @@ interface FailureCardProps {
 export function FailureCard({ group, jobId, childJobName, childBuildNumber, index, activeHash }: FailureCardProps) {
   const scopedChildJobName = childJobName ?? ''
   const scopedChildBuildNumber = childBuildNumber ?? 0
-    const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, result, classifications, trackedIn, selection } = useReportState()
+  const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, result, classifications, trackedIn, selection } = useReportState()
+  const { originalProviderIds, catalogProviderIds, providerLabels } = useReportProviderLabels(group.tests)
   const dispatch = useReportDispatch()
   const { role, isOperator, isAdmin, username } = useAuth()
   const isViewer = role === 'viewer'
@@ -378,7 +382,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   </span>
                 </TooltipTrigger>
                 <TooltipContent>
-                  Re-analyzing using {rep.reanalyzed_with?.ai_provider ?? 'unknown'}{rep.reanalyzed_with?.ai_model ? ` / ${rep.reanalyzed_with.ai_model}` : ''}...
+                  Re-analyzing using {formatProviderModelLabel(rep.reanalyzed_with?.ai_provider, rep.reanalyzed_with?.ai_model, originalProviderIds, ' / ', providerLabels) || 'unknown'}...
                 </TooltipContent>
               </Tooltip>
             )}
@@ -403,7 +407,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               <Tooltip>
                 <TooltipTrigger asChild>
                   <span className="rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary cursor-default">
-                    {rep.reanalyzed_with.ai_provider}{rep.reanalyzed_with.ai_model ? ` / ${rep.reanalyzed_with.ai_model}` : ''}
+                    {formatProviderModelLabel(rep.reanalyzed_with.ai_provider, rep.reanalyzed_with.ai_model, originalProviderIds, ' / ', providerLabels)}
                   </span>
                 </TooltipTrigger>
                 <TooltipContent>Re-analyzed with different AI</TooltipContent>
@@ -647,14 +651,23 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               return prevList.length > 0 && (
                 <div className="space-y-2">
                   {prevList.map((prev, idx) => (
-                    <PreviousAnalysisEntry key={idx} prev={prev} index={idx} repoUrls={repoUrls} />
+                    <PreviousAnalysisEntry key={idx} prev={prev} index={idx} repoUrls={repoUrls} originalIds={originalProviderIds} providerLabels={providerLabels} />
                   ))}
                 </div>
               )
             })()}
 
             {/* Peer debate trail */}
-            {rep.peer_debate && <PeerDebateSection debate={rep.peer_debate} repoUrls={repoUrls} primaryUsage={usage} />}
+            {rep.peer_debate && (
+              <PeerDebateSection
+                debate={rep.peer_debate}
+                repoUrls={repoUrls}
+                primaryUsage={usage}
+                originalIds={originalProviderIds}
+                catalogProviderIds={catalogProviderIds}
+                providerLabels={providerLabels}
+              />
+            )}
 
             {/* ACTIONS line: Re-analyze, issue buttons, include links */}
             <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-border-muted">

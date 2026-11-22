@@ -94,10 +94,11 @@ function assertPiVersion(): void {
 assertPiVersion();
 
 // CLI and ACPX providers are not supported in rootcoz; clear any stale env
-// vars so @myk-org/pi-sidecar cannot re-enable them.
+// vars BEFORE importing @myk-org/pi-sidecar (static ESM imports hoist above
+// top-level statements).
 delete process.env.ACPX_AGENTS;
 delete process.env.CLI_AGENTS;
 
-import { startSidecar } from "@myk-org/pi-sidecar";
+const { startSidecar } = await import("@myk-org/pi-sidecar");
 
 startSidecar();

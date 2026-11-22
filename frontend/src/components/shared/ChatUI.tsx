@@ -3,8 +3,9 @@ import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { useSSE } from '@/lib/useSSE'
 import { Button } from '@/components/ui/button'
 import { AnalysisModelNotice, AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
+import { formatProviderModelLabel } from '@/lib/aiProviders'
 import { isAnalysisAiAvailable } from '@/lib/analysisAi'
-import { useProviderCatalog } from '@/lib/useProviderOptions'
+import { useCatalogProviderLabels } from '@/lib/useProviderLabels'
 import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
 import { useAuth } from '@/lib/auth'
 import { useAiSelection } from '@/lib/useAiSelection'
@@ -239,7 +240,10 @@ export function ChatUI({
   // entry elsewhere in the app falls back to the analysed pair instead.
   const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultProvider, defaultModel, { respectCleared: false })
   const { canUseServerProviders, canUseFreeProviders, role } = useAuth()
-  const { providers, providerStatus } = useProviderCatalog()
+  const { providers, providerStatus, originalIds, providerLabels } = useCatalogProviderLabels([
+    sessionChoice?.provider,
+    ...messages.map((m) => m.ai_provider),
+  ])
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
   const [copiedAll, setCopiedAll] = useState(false)
@@ -998,7 +1002,7 @@ export function ChatUI({
           <div className="flex items-center gap-3">
             {sessionStarted ? (
               <span className="text-xs text-text-secondary">{sessionChoice
-                ? `${sessionChoice.provider} / ${sessionChoice.model}${sessionChoice.credentialSource === 'server' ? ' · Server' : ' · User'}`
+                ? `${formatProviderModelLabel(sessionChoice.provider, sessionChoice.model, originalIds, ' / ', providerLabels)}${sessionChoice.credentialSource === 'server' ? ' · Server' : ' · User'}`
                 : 'Existing session · selection pinned by server'}</span>
             ) : <div className="flex flex-col items-end gap-1">
               <div className="flex items-center gap-3">
@@ -1136,7 +1140,7 @@ export function ChatUI({
                   <div className="flex items-center gap-2 text-[10px] text-text-tertiary">
                     {msg.role === 'user' && msg.username && <span>{msg.username}</span>}
                     {msg.role === 'assistant' && msg.ai_provider && (
-                      <span>{msg.ai_provider}{msg.ai_model ? ` / ${msg.ai_model}` : ''}</span>
+                      <span>{formatProviderModelLabel(msg.ai_provider, msg.ai_model, originalIds, ' / ', providerLabels)}</span>
                     )}
                     {msg.status === 'failed' && <span className="text-signal-red">Failed</span>}
                     <span>{formatTimestamp(msg.created_at)}</span>

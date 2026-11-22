@@ -15,6 +15,8 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { OriginJobBanner } from '@/components/shared/ReanalysisBanner'
+import { formatProviderModelLabel } from '@/lib/aiProviders'
+import { useCatalogProviderLabels } from '@/lib/useProviderLabels'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { useAuth } from '@/lib/auth'
 
@@ -295,10 +297,14 @@ export function StatusPage() {
   const queuedAtDisplay = data?.created_at ? formatTimestamp(data.created_at) : null
 
   const params = data?.result?.request_params
-  const mainAi = params?.ai_provider && params?.ai_model
-    ? `${params.ai_provider} / ${params.ai_model}`
-    : null
   const peers = params?.peer_ai_configs
+  const { originalIds: originalProviderIds, providerLabels } = useCatalogProviderLabels([
+    params?.ai_provider,
+    ...(peers ?? []).map((p) => p.ai_provider),
+  ])
+  const mainAi = params?.ai_provider && params?.ai_model
+    ? formatProviderModelLabel(params.ai_provider, params.ai_model, originalProviderIds, ' / ', providerLabels)
+    : null
   const hasPeers = !!peers?.length
   const testsRepoUrl = (params?.tests_repo_url ?? '').trim()
   const safeTestsRepoDisplay = safeRepoDisplay(testsRepoUrl)
@@ -345,7 +351,7 @@ export function StatusPage() {
               <StatusChip status={displayStatus} />
               {data.result.request_params?.ai_provider && (
                 <Badge variant="outline" className="text-[10px]">
-                  {data.result.request_params.ai_provider}{data.result.request_params.ai_model ? ` / ${data.result.request_params.ai_model}` : ''}
+                  {formatProviderModelLabel(data.result.request_params.ai_provider, data.result.request_params.ai_model, originalProviderIds, ' / ', providerLabels)}
                 </Badge>
               )}
               <div className="ml-auto flex items-center gap-3">
@@ -542,7 +548,7 @@ export function StatusPage() {
                     <div className="flex flex-col items-end gap-0.5">
                       {peers!.map((p, i) => (
                         <span key={i} className="font-mono text-xs">
-                          {p.ai_provider} / {p.ai_model}
+                          {formatProviderModelLabel(p.ai_provider, p.ai_model, originalProviderIds, ' / ', providerLabels)}
                         </span>
                       ))}
                     </div>

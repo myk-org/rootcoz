@@ -3,6 +3,7 @@ import type { FailureAnalysis, PeerDebate } from '@/types'
 import type { RepoUrl } from '@/lib/autoLink'
 import { Badge } from '@/components/ui/badge'
 import { PeerRoundEntry } from '@/components/shared/PeerRoundEntry'
+import { useProviderLabels } from '@/lib/useProviderLabels'
 import { groupPeerRounds } from '@/lib/peerDebate'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 
@@ -10,12 +11,24 @@ interface PeerDebateSectionProps {
   debate: PeerDebate
   repoUrls: RepoUrl[]
   primaryUsage?: FailureAnalysis['token_usage']
+  originalIds?: Readonly<Record<string, string>>
+  catalogProviderIds?: readonly string[]
+  providerLabels?: Readonly<Record<string, string>>
 }
 
-export function PeerDebateSection({ debate, repoUrls, primaryUsage }: PeerDebateSectionProps) {
+export function PeerDebateSection({ debate, repoUrls, primaryUsage, originalIds, catalogProviderIds, providerLabels: inheritedProviderLabels }: PeerDebateSectionProps) {
   const [expanded, setExpanded] = useState(false)
 
   const groupedRounds = groupPeerRounds(debate.rounds)
+  const localProviderLabels = useProviderLabels(
+    catalogProviderIds ?? [],
+    [
+      ...(debate.ai_configs ?? []).map((c) => c.ai_provider),
+      ...debate.rounds.map((r) => r.ai_provider),
+    ],
+    originalIds,
+  )
+  const providerLabels = inheritedProviderLabels ?? localProviderLabels
 
   return (
     <div className="rounded-md border border-border-muted">
@@ -50,7 +63,7 @@ export function PeerDebateSection({ debate, repoUrls, primaryUsage }: PeerDebate
               </p>
               <div className="space-y-2">
                 {entries.map((entry, i) => (
-                  <PeerRoundEntry key={`${entry.role}-${entry.ai_provider}-${i}`} entry={entry} repoUrls={repoUrls} primaryUsage={primaryUsage} />
+                  <PeerRoundEntry key={`${entry.role}-${entry.ai_provider}-${i}`} entry={entry} repoUrls={repoUrls} primaryUsage={primaryUsage} originalIds={originalIds} providerLabels={providerLabels} />
                 ))}
               </div>
             </div>
