@@ -114,6 +114,7 @@ COPY --chown=appuser:0 --from=builder /app/src /app/src
 
 # Copy built frontend assets from frontend builder
 COPY --chown=appuser:0 --from=frontend-builder /frontend/dist /app/frontend/dist
+RUN test -f /app/frontend/dist/favicon.svg && test ! -e /app/frontend/dist/icons.svg
 
 # Copy sidecar
 COPY --chown=appuser:0 --from=sidecar-builder /sidecar/dist /app/sidecar-helper/dist

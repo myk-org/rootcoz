@@ -32,13 +32,18 @@ commands = [
     "build",
   ],
   [
+    "sh",
+    "-c",
+    "test -f dist/favicon.svg && test ! -e dist/icons.svg",
+  ],
+  [
     "npm",
     "test",
   ],
 ]
 description = "Run frontend type check, build and tests"
 skip_install = true
-allowlist_externals = ["npm", "npx"]
+allowlist_externals = ["npm", "npx", "sh"]
 change_dir = "frontend"
 
 [env.chart]

@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeAll, expect, it, vi } from 'vitest'
 import { ChatUI } from '@/components/shared/ChatUI'
 import { ApiError } from '@/lib/api'
+import { INVALID_DATE_FALLBACK } from '@/lib/utils'
 import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
 import { useSSE } from '@/lib/useSSE'
 import { MockEventSource } from '@/test/MockEventSource'
@@ -16,7 +17,7 @@ vi.mock('@/lib/api', async importOriginal => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   api: { get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args), delete: (...args: unknown[]) => remove(...args) },
 }))
-vi.mock('@/lib/auth', () => ({ useAuth: () => ({ username: 'alice', isAdmin: false, authenticated: true, canUseServerProviders: grant, role: currentRole }) }))
+vi.mock('@/lib/auth', () => ({ useAuth: () => ({ username: 'alice', isAdmin: currentRole === 'admin', authenticated: true, canUseServerProviders: grant, role: currentRole }) }))
 vi.mock('@/lib/useSSE', () => ({ useSSE: vi.fn() }))
 
 HTMLElement.prototype.hasPointerCapture = () => false
@@ -71,14 +72,20 @@ afterEach(() => {
   cleanup(); grant = true; currentRole = 'reviewer'; act(() => resetProviderCatalogCache()); get.mockReset(); post.mockReset(); remove.mockReset()
 })
 
-it.each(['/api/chat/job', '/api/admin/chat'])('shows the disabled shared attachment control for %s', async path => {
+it.each([
+  { role: 'viewer', apiBasePath: '/api/chat/job', sseTopic: 'chat:job' },
+  { role: 'reviewer', apiBasePath: '/api/chat/job', sseTopic: 'chat:job' },
+  { role: 'operator', apiBasePath: '/api/chat/job', sseTopic: 'chat:job' },
+  { role: 'admin', apiBasePath: '/api/chat/job', sseTopic: 'chat:job' },
+  { role: 'admin', apiBasePath: '/api/admin/chat', sseTopic: 'admin-chat' },
+])('renders no attachment control or cannot-attach copy for $role ($apiBasePath)', async ({ role, apiBasePath, sseTopic }) => {
+  currentRole = role
   setup()
-  const user = userEvent.setup()
-  render(<ChatUI apiBasePath={path} sseTopic="chat:job" header={<h1>Chat</h1>} />)
-  const attach = screen.getByRole('button', { name: 'Attach files' })
-  expect(attach).toBeDisabled()
-  await user.hover(attach.parentElement!)
-  expect(await screen.findByRole('tooltip')).toHaveTextContent(/report.*feedback.*terminal/i)
+  render(<ChatUI apiBasePath={apiBasePath} sseTopic={sseTopic} header={<h1>Chat</h1>} />)
+  expect(await screen.findByRole('button', { name: 'Start Chat' })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /attach files/i })).not.toBeInTheDocument()
+  expect(screen.queryByLabelText(/issue attachments/i)).not.toBeInTheDocument()
+  expect(screen.queryByText(/cannot attach files/i)).not.toBeInTheDocument()
 })
 
 it('loads history without POST init and starts only with a valid catalog pair', async () => {
@@ -1534,4 +1541,36 @@ it('keeps polling past 5 minutes for a slow turn and delivers the reply when it 
   await act(async () => { vi.advanceTimersByTime(3000) })
   expect(await screen.findByText('Finished after 6 minutes.')).toBeInTheDocument()
   expect(composer).toBeEnabled()
+})
+
+it.each([
+  { label: 'job chat', role: 'reviewer', apiBasePath: '/api/chat/job', sseTopic: 'chat:job' },
+  { label: 'admin chat', role: 'admin', apiBasePath: '/api/admin/chat', sseTopic: 'admin-chat' },
+])('renders user, assistant, and system message timestamps in local time from naive UTC strings ($label)', async ({ label, role, apiBasePath, sseTopic }) => {
+  currentRole = role
+  const naiveUtc = '2026-11-20 14:27:56'
+  const offsetTs = '2026-11-20T16:27:56+02:00'
+  const expectedLocal = new Date(Date.UTC(2026, 10, 20, 14, 27, 56)).toLocaleString()
+  setup({
+    messages: [
+      { id: 1, job_id: 'job', role: 'user', content: 'user msg', username: 'alice', ai_provider: '', ai_model: '', status: 'completed', created_at: naiveUtc },
+      { id: 2, job_id: 'job', role: 'assistant', content: 'assistant msg', username: 'alice', ai_provider: 'openai', ai_model: 'gpt', status: 'completed', created_at: offsetTs },
+      { id: 3, job_id: 'job', role: 'system', content: 'server notice msg', username: '', ai_provider: '', ai_model: '', status: 'completed', created_at: naiveUtc },
+      { id: 4, job_id: 'job', role: 'assistant', content: 'missing ts msg', username: 'alice', ai_provider: '', ai_model: '', status: 'completed', created_at: '' },
+    ],
+    total: 4,
+    active_session: { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'user' },
+  })
+  render(<ChatUI apiBasePath={apiBasePath} sseTopic={sseTopic} header={<h1>{label}</h1>} defaultProvider="openai" defaultModel="gpt" />)
+  expect(await screen.findByText('server notice msg')).toBeInTheDocument()
+  // User, assistant (+02:00 equivalent), and system messages all resolve to the same local instant.
+  expect(screen.getAllByText(expectedLocal)).toHaveLength(3)
+  // Missing/invalid timestamp falls back via formatTimestamp instead of "Invalid Date".
+  expect(screen.queryByText('Invalid Date')).not.toBeInTheDocument()
+  expect(screen.getByText(INVALID_DATE_FALLBACK)).toBeInTheDocument()
+  // When running outside UTC, confirm the naive string was not treated as local time.
+  const misparsedLocal = new Date(naiveUtc).toLocaleString()
+  if (misparsedLocal !== expectedLocal) {
+    expect(screen.queryByText(misparsedLocal)).not.toBeInTheDocument()
+  }
 })

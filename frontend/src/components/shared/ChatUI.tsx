@@ -8,11 +8,10 @@ import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
 import { useAuth } from '@/lib/auth'
 import { useAiSelection } from '@/lib/useAiSelection'
-import { formatDuration, parseApiTimestamp, INVALID_DATE_FALLBACK } from '@/lib/utils'
+import { formatDuration, formatTimestamp, parseApiTimestamp, INVALID_DATE_FALLBACK } from '@/lib/utils'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
-import { AttachmentPicker } from '@/components/shared/AttachmentPicker'
 import { LinkedText } from '@/components/shared/LinkedText'
 import { ChatMarkdown } from '@/components/shared/ChatMarkdown'
 import type { RepoUrl } from '@/lib/autoLink'
@@ -1102,7 +1101,7 @@ export function ChatUI({
                 <LinkedText text={msg.content} repoUrls={EMPTY_REPO_URLS} />
               </div>
               <div className="mt-2 text-[10px] text-text-tertiary">
-                {new Date(msg.created_at).toLocaleString()}
+                {formatTimestamp(msg.created_at)}
               </div>
             </div>
           ) : (
@@ -1140,7 +1139,7 @@ export function ChatUI({
                       <span>{msg.ai_provider}{msg.ai_model ? ` / ${msg.ai_model}` : ''}</span>
                     )}
                     {msg.status === 'failed' && <span className="text-signal-red">Failed</span>}
-                    <span>{new Date(msg.created_at).toLocaleString()}</span>
+                    <span>{formatTimestamp(msg.created_at)}</span>
                   </div>
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -1198,8 +1197,7 @@ export function ChatUI({
 
         {/* Input area */}
         <div className="border-t border-border-muted px-6 py-3 shrink-0">
-          <AttachmentPicker files={[]} onChange={() => {}} disabledReason="Browser chat cannot attach files. Use the report or feedback dialog, or the terminal with --attach." />
-          <form onSubmit={handleSend} className="flex gap-2 mt-2">
+          <form onSubmit={handleSend} className="flex gap-2">
             <Textarea
               ref={inputRef}
               value={input}

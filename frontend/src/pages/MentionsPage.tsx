@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '@/lib/api'
-import { cn } from '@/lib/utils'
+import { cn, formatRelativeTime } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
 import { Pagination } from '@/components/shared/Pagination'
@@ -35,23 +35,6 @@ interface MentionsResponse {
 /* ------------------------------------------------------------------ */
 
 const LIMIT = 50
-
-function timeAgo(dateStr: string): string {
-  const date = new Date(dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T') + 'Z')
-  const now = Date.now()
-  const diffMs = now - date.getTime()
-  if (diffMs < 0) return 'just now'
-  const seconds = Math.floor(diffMs / 1000)
-  if (seconds < 60) return 'just now'
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  if (days < 30) return `${days}d ago`
-  const months = Math.floor(days / 30)
-  return `${months}mo ago`
-}
 
 /** Truncate text for list preview. Full text is available via expand-on-click.
  *  This is intentional UI summarization, not lossy data — the API always returns full text. */
@@ -266,7 +249,7 @@ export function MentionsPage() {
                         @{m.username}
                       </span>
                       <span className="text-[10px] text-text-tertiary">
-                        {timeAgo(m.created_at)}
+                        {formatRelativeTime(m.created_at)}
                       </span>
                     </div>
 
