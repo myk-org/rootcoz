@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId, sanitizeHttpHref } from '../utils'
+import {
+  ciSourceLabel,
+  formatTimestamp,
+  INVALID_DATE_FALLBACK,
+  parseApiTimestamp,
+  resolveBuildDisplayId,
+  resolveBuildUrl,
+  sanitizeHttpHref,
+} from '../utils'
 
 describe('ciSourceLabel', () => {
   it('returns "Prow" for prow analysis_type', () => {
@@ -98,5 +106,50 @@ describe('resolveBuildDisplayId', () => {
   it('returns null for missing build info', () => {
     expect(resolveBuildDisplayId({})).toBeNull()
     expect(resolveBuildDisplayId({ build_number: 0 })).toBeNull()
+  })
+})
+
+describe('parseApiTimestamp', () => {
+  const EXPECTED_UTC_MS = Date.UTC(2026, 10, 20, 14, 27, 56)
+
+  it('parses naive SQLite UTC strings as UTC rather than local time', () => {
+    expect(parseApiTimestamp('2026-11-20 14:27:56').getTime()).toBe(EXPECTED_UTC_MS)
+    expect(parseApiTimestamp(' 2026-11-20 14:27:56 ').getTime()).toBe(EXPECTED_UTC_MS)
+    expect(parseApiTimestamp('2026-11-20T14:27:56').getTime()).toBe(EXPECTED_UTC_MS)
+  })
+
+  it('does not shift timestamps that already carry Z or an explicit offset', () => {
+    expect(parseApiTimestamp('2026-11-20T14:27:56Z').getTime()).toBe(EXPECTED_UTC_MS)
+    expect(parseApiTimestamp('2026-11-20T14:27:56z').getTime()).toBe(EXPECTED_UTC_MS)
+    expect(parseApiTimestamp('2026-11-20T16:27:56+02:00').getTime()).toBe(EXPECTED_UTC_MS)
+    expect(parseApiTimestamp('2026-11-20T09:27:56-05:00').getTime()).toBe(EXPECTED_UTC_MS)
+    expect(parseApiTimestamp('2026-11-20 16:27:56+0200').getTime()).toBe(EXPECTED_UTC_MS)
+  })
+
+  it('returns an invalid Date for empty, whitespace-only, or non-string inputs', () => {
+    expect(Number.isNaN(parseApiTimestamp('').getTime())).toBe(true)
+    expect(Number.isNaN(parseApiTimestamp('   ').getTime())).toBe(true)
+    expect(Number.isNaN(parseApiTimestamp(null as unknown as string).getTime())).toBe(true)
+  })
+})
+
+describe('formatTimestamp', () => {
+  const EXPECTED_LOCAL = new Date(Date.UTC(2026, 10, 20, 14, 27, 56)).toLocaleString()
+
+  it('formats naive SQLite UTC strings in local time', () => {
+    expect(formatTimestamp('2026-11-20 14:27:56')).toBe(EXPECTED_LOCAL)
+  })
+
+  it('does not double-shift timestamps with Z or explicit offsets', () => {
+    expect(formatTimestamp('2026-11-20T14:27:56Z')).toBe(EXPECTED_LOCAL)
+    expect(formatTimestamp('2026-11-20T16:27:56+02:00')).toBe(EXPECTED_LOCAL)
+    expect(formatTimestamp('2026-11-20T09:27:56-05:00')).toBe(EXPECTED_LOCAL)
+  })
+
+  it('returns the fallback dash for empty or invalid timestamps', () => {
+    expect(formatTimestamp(null)).toBe(INVALID_DATE_FALLBACK)
+    expect(formatTimestamp(undefined)).toBe(INVALID_DATE_FALLBACK)
+    expect(formatTimestamp('')).toBe(INVALID_DATE_FALLBACK)
+    expect(formatTimestamp('not-a-date')).toBe(INVALID_DATE_FALLBACK)
   })
 })

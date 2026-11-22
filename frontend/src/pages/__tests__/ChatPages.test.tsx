@@ -34,3 +34,22 @@ it('prefills admin defaults without starting chat', async () => {
   expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled()
   expect(post).not.toHaveBeenCalledWith('/api/admin/chat/init', expect.anything())
 })
+
+it('renders naive UTC timestamps in local time on AdminChatPage with no attachment UI', async () => {
+  const naiveUtc = '2026-11-20 14:27:56'
+  const expectedLocal = new Date(Date.UTC(2026, 10, 20, 14, 27, 56)).toLocaleString()
+  get.mockImplementation(async (path: string) => path === '/api/default-server-settings' ? { ai_provider: 'openai', ai_model: 'gpt' }
+    : path.startsWith('/api/ai-models') ? { providers: { openai: [{ id: 'gpt', provider: 'openai', name: 'GPT', credential_sources: ['server'] }] } }
+      : {
+        messages: [
+          { id: 1, job_id: '', role: 'assistant', content: 'admin reply', username: 'alice', ai_provider: 'openai', ai_model: 'gpt', status: 'completed', created_at: naiveUtc },
+        ],
+        total: 1,
+        active_session: { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'server' },
+      })
+  render(<AdminChatPage />)
+  expect(await screen.findByText('admin reply')).toBeInTheDocument()
+  expect(screen.getByText(expectedLocal)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /attach files/i })).not.toBeInTheDocument()
+  expect(screen.queryByText(/cannot attach files/i)).not.toBeInTheDocument()
+})
