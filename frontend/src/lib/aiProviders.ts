@@ -138,24 +138,36 @@ export function extractOriginalProviderIds(
  * Format a provider ID for user-facing display (pickers, selected chips,
  * active session headers, report badges).
  *
- * Built-in sidecar IDs map through KNOWN_PROVIDER_LABELS; operator-configured
- * custom providers preserve their catalog casing via `originalIds`.
+ * Resolution order:
+ * 1. Pre-computed collision-aware map (`disambiguatedLabels`) when provided.
+ * 2. Built-in sidecar ID mapping (`KNOWN_PROVIDER_LABELS`).
+ * 3. Operator-configured custom provider from the catalog (`originalIds`):
+ *    preserves explicit mixed casing verbatim, or title-cases all-lowercase
+ *    custom names.
+ * 4. Mixed-case custom provider name before the catalog loads (preserved verbatim).
+ * 5. Unmapped non-catalog IDs pass through raw instead of being silently
+ *    disguised as derived public labels.
  */
 export function formatProviderLabel(
   provider: string,
   originalIds?: Readonly<Record<string, string>>,
+  disambiguatedLabels?: Readonly<Record<string, string>>,
 ): string {
   const trimmed = provider.trim()
   if (!trimmed) return ''
   const key = normalizeProvider(trimmed)
+  const disambiguated = ownRecordValue(disambiguatedLabels, key)
+  if (disambiguated !== undefined) return disambiguated
+
   const known = ownRecordValue(KNOWN_PROVIDER_LABELS, key)
   if (known !== undefined) return known
 
-  const exact = ownRecordValue(originalIds, key) ?? trimmed
-  // Preserve explicit operator casing from models.json (e.g. mixed-case gateways)
-  // so dropdown options and selected-value displays always agree.
-  if (/[A-Z]/.test(exact)) return exact
-  return titleCaseProvider(exact)
+  const catalogSpelling = ownRecordValue(originalIds, key)
+  if (catalogSpelling !== undefined) {
+    return /[A-Z]/.test(catalogSpelling) ? catalogSpelling : titleCaseProvider(catalogSpelling)
+  }
+
+  return trimmed
 }
 
 /**
@@ -167,27 +179,22 @@ export function disambiguateProviderLabels(
   originalIds?: Readonly<Record<string, string>>,
 ): Record<string, string> {
   const uniqueIds = new Set<string>()
-  const effectiveOriginals: Record<string, string> = Object.create(null) as Record<string, string>
-  if (originalIds) {
-    for (const key of Object.keys(originalIds)) {
-      effectiveOriginals[key] = originalIds[key]
-    }
-  }
+  const rawSpellings = new Map<string, string>()
   for (const raw of ids) {
     if (!raw) continue
     const trimmed = raw.trim()
     if (!trimmed) continue
     const normalized = normalizeProvider(trimmed)
     uniqueIds.add(normalized)
-    if (!Object.hasOwn(effectiveOriginals, normalized)) {
-      effectiveOriginals[normalized] = trimmed
+    if (!rawSpellings.has(normalized)) {
+      rawSpellings.set(normalized, trimmed)
     }
   }
 
   const byLabel = new Map<string, string[]>()
   const baseLabels = new Map<string, string>()
   for (const id of uniqueIds) {
-    const label = formatProviderLabel(id, effectiveOriginals)
+    const label = formatProviderLabel(rawSpellings.get(id) ?? id, originalIds)
     baseLabels.set(id, label)
     const group = byLabel.get(label)
     if (group) group.push(id)
@@ -216,9 +223,9 @@ export function formatProviderModelLabel(
   model?: string | undefined,
   originalIds?: Readonly<Record<string, string>>,
   separator = ' / ',
-  labelOverride?: string,
+  disambiguatedLabels?: Readonly<Record<string, string>>,
 ): string {
-  const label = labelOverride ?? (provider ? formatProviderLabel(provider, originalIds) : '')
+  const label = provider ? formatProviderLabel(provider, originalIds, disambiguatedLabels) : ''
   if (!label) return ''
   return model ? `${label}${separator}${model}` : label
 }

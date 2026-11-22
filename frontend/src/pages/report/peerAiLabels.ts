@@ -9,6 +9,7 @@ import type { PeerDebate } from '@/types'
 export function getPeerAiLabels(
   debates: Array<{ debate: PeerDebate }>,
   originalIds?: Readonly<Record<string, string>>,
+  providerLabels?: Readonly<Record<string, string>>,
 ): string[] {
   const uniqueConfigs = new Map<string, { ai_provider: string; ai_model: string }>()
   for (const { debate } of debates) {
@@ -21,10 +22,12 @@ export function getPeerAiLabels(
       }
     }
   }
-  const labels = disambiguateProviderLabels(
-    [...uniqueConfigs.values()].map((cfg) => cfg.ai_provider),
-    originalIds,
-  )
+  const labels =
+    providerLabels ??
+    disambiguateProviderLabels(
+      [...uniqueConfigs.values()].map((cfg) => cfg.ai_provider),
+      originalIds,
+    )
   return [...uniqueConfigs.values()]
     .map((cfg) =>
       formatProviderModelLabel(
@@ -32,7 +35,7 @@ export function getPeerAiLabels(
         cfg.ai_model,
         originalIds,
         '/',
-        labels[normalizeProvider(cfg.ai_provider)],
+        labels,
       ),
     )
     .sort()

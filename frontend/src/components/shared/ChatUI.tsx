@@ -3,7 +3,7 @@ import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { useSSE } from '@/lib/useSSE'
 import { Button } from '@/components/ui/button'
 import { AnalysisModelNotice, AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
-import { disambiguateProviderLabels, formatProviderModelLabel, normalizeProvider } from '@/lib/aiProviders'
+import { disambiguateProviderLabels, formatProviderModelLabel } from '@/lib/aiProviders'
 import { isAnalysisAiAvailable } from '@/lib/analysisAi'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
@@ -743,7 +743,7 @@ export function ChatUI({
           <div className="flex items-center gap-3">
             {sessionStarted ? (
               <span className="text-xs text-text-secondary">{sessionChoice
-                ? `${formatProviderModelLabel(sessionChoice.provider, sessionChoice.model, originalIds, ' / ', providerLabels[normalizeProvider(sessionChoice.provider)])}${sessionChoice.credentialSource === 'server' ? ' · Server' : ' · User'}`
+                ? `${formatProviderModelLabel(sessionChoice.provider, sessionChoice.model, originalIds, ' / ', providerLabels)}${sessionChoice.credentialSource === 'server' ? ' · Server' : ' · User'}`
                 : 'Existing session · selection pinned by server'}</span>
             ) : <div className="flex flex-col items-end gap-1">
               <div className="flex items-center gap-3">
@@ -881,7 +881,7 @@ export function ChatUI({
                   <div className="flex items-center gap-2 text-[10px] text-text-tertiary">
                     {msg.role === 'user' && msg.username && <span>{msg.username}</span>}
                     {msg.role === 'assistant' && msg.ai_provider && (
-                      <span>{formatProviderModelLabel(msg.ai_provider, msg.ai_model, originalIds, ' / ', providerLabels[normalizeProvider(msg.ai_provider)])}</span>
+                      <span>{formatProviderModelLabel(msg.ai_provider, msg.ai_model, originalIds, ' / ', providerLabels)}</span>
                     )}
                     {msg.status === 'failed' && <span className="text-signal-red">Failed</span>}
                     <span>{new Date(msg.created_at).toLocaleString()}</span>

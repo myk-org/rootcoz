@@ -35,7 +35,7 @@ import { ReportPortalButton } from './report/ReportPortalButton'
 import { DatadogButton } from './report/DatadogButton'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { OriginJobBanner, ReanalyzedForwardBanner } from '@/components/shared/ReanalysisBanner'
-import { extractOriginalProviderIds, formatProviderLabel, formatProviderModelLabel } from '@/lib/aiProviders'
+import { disambiguateProviderLabels, extractOriginalProviderIds, formatProviderLabel, formatProviderModelLabel } from '@/lib/aiProviders'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { useAuth } from '@/lib/auth'
 
@@ -420,6 +420,10 @@ function ReportContent() {
     () => extractOriginalProviderIds(state.aiModels),
     [state.aiModels],
   )
+  const providerLabels = useMemo(
+    () => disambiguateProviderLabels(Object.keys(state.aiModels), originalProviderIds),
+    [state.aiModels, originalProviderIds],
+  )
 
   // Expand/collapse all for top-level failure cards
   const getFailureKeys = useCallback(
@@ -517,7 +521,7 @@ function ReportContent() {
         <div className="mt-2 flex flex-wrap items-center gap-3">
           {result.ai_provider && (
             <Badge variant="outline" className="whitespace-nowrap text-[10px]">
-              {formatProviderModelLabel(result.ai_provider, result.ai_model, originalProviderIds)}
+              {formatProviderModelLabel(result.ai_provider, result.ai_model, originalProviderIds, ' / ', providerLabels)}
             </Badge>
           )}
           {result.token_usage ? (
@@ -730,6 +734,7 @@ function ReportContent() {
         childJobAnalyses={result.child_job_analyses ?? []}
         repoUrls={repoUrls}
         originalIds={originalProviderIds}
+        catalogProviderIds={Object.keys(state.aiModels)}
       />
 
       {/* ---- AI spend breakdown ---- */}
@@ -800,7 +805,7 @@ function ReportContent() {
         {state.completedAt && <p>Completed: {formatTimestamp(state.completedAt)}</p>}
         {result.ai_provider && (
           <p>
-            AI: {formatProviderLabel(result.ai_provider, originalProviderIds)}
+            AI: {formatProviderLabel(result.ai_provider, originalProviderIds, providerLabels)}
             {result.ai_model ? ` (${result.ai_model})` : ''}
           </p>
         )}

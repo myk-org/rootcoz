@@ -120,10 +120,15 @@ describe('formatProviderLabel', () => {
     expect(formatProviderLabel('')).toBe('')
   })
 
+  it('does not disguise unmapped non-catalog ids with title-case fallback', () => {
+    expect(formatProviderLabel('unknown-builtin-id')).toBe('unknown-builtin-id')
+  })
+
   it('does not collide with Object.prototype properties such as constructor or toString', () => {
-    expect(formatProviderLabel('constructor')).toBe('Constructor')
-    expect(formatProviderLabel('toString')).toBe('toString')
-    expect(buildProviderOptions(['constructor', 'toString', 'openai'])).toEqual([
+    const customOriginals = extractOriginalProviderIds({ constructor: [], toString: [] })
+    expect(formatProviderLabel('constructor', customOriginals)).toBe('Constructor')
+    expect(formatProviderLabel('toString', customOriginals)).toBe('toString')
+    expect(buildProviderOptions(['constructor', 'toString', 'openai'], [], customOriginals)).toEqual([
       { value: 'constructor', label: 'Constructor' },
       { value: 'openai', label: 'OpenAI' },
       { value: 'tostring', label: 'toString' },

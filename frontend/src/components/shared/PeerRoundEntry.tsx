@@ -13,9 +13,10 @@ interface PeerRoundEntryProps {
   compact?: boolean
   primaryUsage?: TokenUsageSummary | null
   originalIds?: Readonly<Record<string, string>>
+  providerLabels?: Readonly<Record<string, string>>
 }
 
-export function PeerRoundEntry({ entry, repoUrls, compact = false, primaryUsage, originalIds }: PeerRoundEntryProps) {
+export function PeerRoundEntry({ entry, repoUrls, compact = false, primaryUsage, originalIds, providerLabels }: PeerRoundEntryProps) {
   const [detailsExpanded, setDetailsExpanded] = useState(false)
   const isOrchestrator = entry.role === 'orchestrator'
 
@@ -32,7 +33,7 @@ export function PeerRoundEntry({ entry, repoUrls, compact = false, primaryUsage,
           {isOrchestrator ? (compact ? 'Main AI' : 'Orchestrator') : 'Peer'}
         </Badge>
         <span className="font-mono text-[10px] text-text-tertiary">
-          {formatProviderModelLabel(entry.ai_provider, entry.ai_model, originalIds, '/')}
+          {formatProviderModelLabel(entry.ai_provider, entry.ai_model, originalIds, '/', providerLabels)}
         </span>
         {entry.classification && (
           <ClassificationBadge classification={entry.classification} className="text-[10px]" />

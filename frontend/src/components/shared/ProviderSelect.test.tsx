@@ -45,11 +45,11 @@ describe('server settings provider picker', () => {
     const user = userEvent.setup()
     render(<ProviderSelect value="legacy" onChange={() => {}} showCredentialSources />)
     const picker = screen.getByRole('combobox')
-    await waitFor(() => expect(picker).toHaveTextContent('Legacy'))
+    await waitFor(() => expect(picker).toHaveTextContent('legacy'))
     await user.click(picker)
-    expect(screen.getByRole('option', { name: 'Legacy' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'legacy' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Empty' })).toBeInTheDocument()
-    expect(screen.queryByRole('option', { name: /Legacy · Server|Empty · Server/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /legacy · Server|Empty · Server/ })).not.toBeInTheDocument()
   })
 
   it('renders public labels for sidecar ids and preserves custom provider casing', async () => {

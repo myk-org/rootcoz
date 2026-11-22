@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   _resetProviderCatalogCacheForTests,
   resetProviderCatalogCache,
+  useCachedCatalog,
   useEnabledProviders,
   useProviderCatalog,
   useProviderOptions,
@@ -242,5 +243,34 @@ describe('useProviderCatalog shared fetch', () => {
     })
     expect(getMock).toHaveBeenCalledTimes(2)
     unmount()
+  })
+
+  it('notifies useCachedCatalog readers when the shared catalog finishes loading without triggering a fetch', async () => {
+    let resolveGet: (value: unknown) => void = () => {}
+    getMock.mockImplementation(() => new Promise((resolve) => { resolveGet = resolve }))
+
+    const passive = renderHook(() => useCachedCatalog())
+    expect(getMock).toHaveBeenCalledTimes(0)
+    expect(passive.result.current.originalIds).toEqual({})
+
+    const active = renderHook(() => useProviderCatalog())
+    expect(getMock).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      resolveGet({
+        providers: {
+          AcmeAI: [{ id: 'm1', name: 'M1' }],
+        },
+        provider_status: {},
+      })
+    })
+
+    await waitFor(() => {
+      expect(passive.result.current.originalIds.acmeai).toBe('AcmeAI')
+      expect(passive.result.current.providerKeys).toEqual(['acmeai'])
+    })
+
+    passive.unmount()
+    active.unmount()
   })
 })

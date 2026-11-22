@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { api, getRecentFailedCalls } from '@/lib/api'
 import { createIssueFailureMessage, createOutcomeUnknown } from '@/lib/issueCreateError'
 import { getRecentErrors } from '@/lib/errorCapture'
@@ -26,8 +26,8 @@ import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { CheckCircle2, ExternalLink } from 'lucide-react'
-import { formatProviderModelLabel } from '@/lib/aiProviders'
-import { useCachedOriginalIds } from '@/lib/useProviderOptions'
+import { disambiguateProviderLabels, formatProviderModelLabel } from '@/lib/aiProviders'
+import { useCachedCatalog } from '@/lib/useProviderOptions'
 import { completeAiPairOverride } from '@/lib/analysisAi'
 import { useAiSelection } from '@/lib/useAiSelection'
 import type {
@@ -52,7 +52,11 @@ export function FeedbackDialog({ open, onOpenChange, capabilities }: FeedbackDia
   const [description, setDescription] = useState('')
   // Empty = server default (resolved server-side). Shared with the other AI surfaces.
   const { aiProvider, aiModel, setAiPair } = useAiSelection()
-  const originalProviderIds = useCachedOriginalIds()
+  const { providerKeys, originalIds: originalProviderIds } = useCachedCatalog()
+  const providerLabels = useMemo(
+    () => disambiguateProviderLabels(providerKeys, originalProviderIds),
+    [providerKeys, originalProviderIds],
+  )
   const [phase, setPhase] = useState<Phase>('form')
   const [issueUrl, setIssueUrl] = useState('')
   const [attachments, setAttachments] = useState<File[]>([])
@@ -347,7 +351,7 @@ export function FeedbackDialog({ open, onOpenChange, capabilities }: FeedbackDia
             )}
             <div className="rounded-md border border-border-muted bg-surface-elevated px-3 py-2 text-xs text-text-secondary">
               {previewAi.generated
-                ? `Generated using AI with ${formatProviderModelLabel(previewAi.provider, previewAi.model, originalProviderIds, '/')}`
+                ? `Generated using AI with ${formatProviderModelLabel(previewAi.provider, previewAi.model, originalProviderIds, '/', providerLabels)}`
                 : 'No AI model generated this issue — the fallback template was used.'}
             </div>
             <div className="space-y-2">

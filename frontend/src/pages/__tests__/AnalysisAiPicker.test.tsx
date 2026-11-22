@@ -132,7 +132,7 @@ describe('analysis credential-scoped pickers', () => {
     const result = { request_params: { ai_provider: 'missing', ai_model: 'old', peer_ai_configs: [] } } as unknown as AnalysisResult
     render(<MemoryRouter><ReAnalyzeDialog open onOpenChange={() => {}} result={result} jobId="job" /></MemoryRouter>)
     const provider = await screen.findByRole('combobox', { name: 'AI Provider' })
-    expect(provider).toHaveTextContent('Missing (unavailable)')
+    expect(provider).toHaveTextContent('missing (unavailable)')
     const modelInput = screen.getByRole('combobox', { name: 'AI Model' })
     expect(modelInput).toHaveValue('old')
     expect(modelInput).not.toHaveAttribute('readonly')

@@ -15,8 +15,8 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { OriginJobBanner } from '@/components/shared/ReanalysisBanner'
-import { formatProviderModelLabel } from '@/lib/aiProviders'
-import { useCachedOriginalIds } from '@/lib/useProviderOptions'
+import { disambiguateProviderLabels, formatProviderModelLabel } from '@/lib/aiProviders'
+import { useCachedCatalog } from '@/lib/useProviderOptions'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { useAuth } from '@/lib/auth'
 
@@ -296,12 +296,24 @@ export function StatusPage() {
   const displayStatus = isTimeout ? 'timeout' : status
   const queuedAtDisplay = data?.created_at ? formatTimestamp(data.created_at) : null
 
-  const originalProviderIds = useCachedOriginalIds()
+  const { providerKeys, originalIds: originalProviderIds } = useCachedCatalog()
   const params = data?.result?.request_params
-  const mainAi = params?.ai_provider && params?.ai_model
-    ? formatProviderModelLabel(params.ai_provider, params.ai_model, originalProviderIds)
-    : null
   const peers = params?.peer_ai_configs
+  const providerLabels = useMemo(
+    () =>
+      disambiguateProviderLabels(
+        [
+          ...providerKeys,
+          ...(params?.ai_provider ? [params.ai_provider] : []),
+          ...(peers ?? []).map((p) => p.ai_provider),
+        ],
+        originalProviderIds,
+      ),
+    [providerKeys, params?.ai_provider, peers, originalProviderIds],
+  )
+  const mainAi = params?.ai_provider && params?.ai_model
+    ? formatProviderModelLabel(params.ai_provider, params.ai_model, originalProviderIds, ' / ', providerLabels)
+    : null
   const hasPeers = !!peers?.length
   const testsRepoUrl = (params?.tests_repo_url ?? '').trim()
   const safeTestsRepoDisplay = safeRepoDisplay(testsRepoUrl)
@@ -348,7 +360,7 @@ export function StatusPage() {
               <StatusChip status={displayStatus} />
               {data.result.request_params?.ai_provider && (
                 <Badge variant="outline" className="text-[10px]">
-                  {formatProviderModelLabel(data.result.request_params.ai_provider, data.result.request_params.ai_model, originalProviderIds)}
+                  {formatProviderModelLabel(data.result.request_params.ai_provider, data.result.request_params.ai_model, originalProviderIds, ' / ', providerLabels)}
                 </Badge>
               )}
               <div className="ml-auto flex items-center gap-3">
@@ -545,7 +557,7 @@ export function StatusPage() {
                     <div className="flex flex-col items-end gap-0.5">
                       {peers!.map((p, i) => (
                         <span key={i} className="font-mono text-xs">
-                          {formatProviderModelLabel(p.ai_provider, p.ai_model, originalProviderIds)}
+                          {formatProviderModelLabel(p.ai_provider, p.ai_model, originalProviderIds, ' / ', providerLabels)}
                         </span>
                       ))}
                     </div>
