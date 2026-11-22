@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   extractSuiteNameFromXml,
+  FAST_XML_PREFIX_BYTES,
   MAX_FILE_JOB_NAME_LENGTH,
   validateFileJobName,
 } from '@/lib/junitXml'
@@ -101,5 +102,29 @@ describe('extractSuiteNameFromXml', () => {
     expect(extractSuiteNameFromXml('   ')).toBeNull()
     expect(extractSuiteNameFromXml('<testsuite name="unclosed"')).toBeNull()
     expect(extractSuiteNameFromXml('not xml at all')).toBeNull()
+  })
+
+  it('extracts suite names from large XML via bounded prefix scan without building a full DOM', () => {
+    const padding = 'x'.repeat(FAST_XML_PREFIX_BYTES + 1024)
+    expect(
+      extractSuiteNameFromXml(
+        `<?xml version="1.0"?><!-- comment --><testsuite note="a > b" name="large-root-suite"><testcase name="t1">${padding}</testcase></testsuite>`,
+      ),
+    ).toBe('large-root-suite')
+    expect(
+      extractSuiteNameFromXml(
+        `<testsuites name="outer-large"><testsuite name="inner-large"><testcase>${padding}</testcase></testsuite></testsuites>`,
+      ),
+    ).toBe('inner-large')
+    expect(
+      extractSuiteNameFromXml(
+        `<testsuites name="outer-fallback"><testsuite><testcase>${padding}</testcase></testsuite></testsuites>`,
+      ),
+    ).toBe('outer-fallback')
+    expect(
+      extractSuiteNameFromXml(
+        `<testsuite name="../etc/passwd"><testcase>${padding}</testcase></testsuite>`,
+      ),
+    ).toBeNull()
   })
 })

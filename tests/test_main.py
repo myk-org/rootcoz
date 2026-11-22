@@ -2043,6 +2043,64 @@ class TestFileJobNaming:
         restored = FileSource.restore_reanalyze_fields(params)
         assert restored == {"raw_xml": self.NAMED_XML, "job_name": "explicit-suite"}
 
+    def test_xml_suite_literally_named_file_analysis_does_not_get_id_suffix(
+        self, test_client
+    ) -> None:
+        xml = (
+            '<testsuite name="file-analysis" tests="1" failures="1">'
+            '<testcase name="t1"><failure message="boom"/></testcase>'
+            "</testsuite>"
+        )
+        with patch(
+            "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+        ) as mock_process:
+            resp = test_client.post("/submit", json={"type": "file", "raw_xml": xml})
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        assert mock_process.await_args.kwargs["display_name"] == "file-analysis"
+        stored = test_client.get(f"/results/{job_id}").json()["result"]
+        assert stored["job_name"] == "file-analysis"
+
+    def test_raw_request_with_stray_job_name_still_gets_unique_fallback_suffix(
+        self, test_client
+    ) -> None:
+        with patch(
+            "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+        ) as mock_process:
+            resp = test_client.post(
+                "/submit",
+                json={
+                    "type": "raw",
+                    "job_name": "stray-name",
+                    "failures": [{"test_name": "t1", "error": "boom"}],
+                },
+            )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        expected = f"raw-analysis-{job_id[:8]}"
+        assert mock_process.await_args.kwargs["display_name"] == expected
+        stored = test_client.get(f"/results/{job_id}").json()["result"]
+        assert stored["job_name"] == expected
+
+    def test_resolve_request_display_name_offloads_file_source_to_thread(self) -> None:
+        from rootcoz.main import _resolve_request_display_name
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.file_source import FileSource
+
+        body = UnifiedAnalyzeRequest(type="file", raw_xml=self.NAMED_XML)
+        calls: list[tuple[object, tuple[object, ...]]] = []
+
+        async def _fake_to_thread(func, *args, **kwargs):
+            calls.append((func, args))
+            return func(*args, **kwargs)
+
+        with patch("rootcoz.main.asyncio.to_thread", side_effect=_fake_to_thread):
+            display_name, is_fallback = asyncio.run(_resolve_request_display_name(body))
+
+        assert display_name == "qe-ui-check-submit"
+        assert is_fallback is False
+        assert calls == [(FileSource.resolve_display_name, (body,))]
+
 
 class TestProwIdentityStamping:
     """Tests for ProwSource identity helpers."""

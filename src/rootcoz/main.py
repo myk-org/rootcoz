@@ -344,6 +344,7 @@ from rootcoz.sources import (
 )
 from rootcoz.sources import chat_workspace as source_chat_workspace
 from rootcoz.sources.base import (
+    GENERIC_FALLBACK_DISPLAY_NAMES,
     INGEST_COMPLETE_SUMMARY,
     CISourceResult,
     resolve_display_build_id,
@@ -6933,6 +6934,7 @@ async def _enqueue_ci_source_analysis(
     is_admin: bool = False,
     ingest_only: bool = False,
     existing_job_id: str = "",
+    is_generic_fallback: bool | None = None,
 ) -> dict[str, Any]:
     """Build params, persist initial state, spawn task, and return response.
 
@@ -6982,17 +6984,12 @@ async def _enqueue_ci_source_analysis(
     job_id_var.set(job_id)
 
     # Append short job_id suffix to generic fallback names for uniqueness
-    _GENERIC_FALLBACK_NAMES = {
-        "file-analysis",
-        "raw-analysis",
-        "prow-analysis",
-        "jenkins-analysis",
-        "prow-re-analysis",
-        "file-re-analysis",
-        "raw-re-analysis",
-        "jenkins-re-analysis",
-    }
-    if display_name in _GENERIC_FALLBACK_NAMES and not body.name and not body.job_name:
+    should_suffix = (
+        is_generic_fallback
+        if is_generic_fallback is not None
+        else (display_name in GENERIC_FALLBACK_DISPLAY_NAMES and not body.name)
+    )
+    if should_suffix:
         display_name = f"{display_name}-{job_id[:8]}"
 
     # Build and persist initial state
@@ -8408,19 +8405,19 @@ async def _process_ci_source_analysis(
             analysis_slots.release(job_id)
 
 
-def _resolve_request_display_name(body: UnifiedAnalyzeRequest) -> str:
-    """Resolve dashboard display name from the request or the source plugin."""
+async def _resolve_request_display_name(
+    body: UnifiedAnalyzeRequest,
+) -> tuple[str, bool]:
+    """Resolve ``(display_name, is_generic_fallback)`` off the event loop."""
     display_name: str = body.name or ""
     if display_name:
-        return display_name
+        return display_name, False
     from rootcoz.sources.registry import SOURCE_REGISTRY
 
     source_cls = SOURCE_REGISTRY.get(body.type)
-    return (
-        source_cls.default_display_name(body)
-        if source_cls is not None
-        else f"{body.type}-analysis"
-    )
+    if source_cls is None:
+        return f"{body.type}-analysis", True
+    return await asyncio.to_thread(source_cls.resolve_display_name, body)
 
 
 def _resolve_submitted_job_name(body: UnifiedAnalyzeRequest, display_name: str) -> str:
@@ -8466,7 +8463,7 @@ async def analyze(
         finally:
             ai_username.reset(token)
 
-        display_name = _resolve_request_display_name(body)
+        display_name, is_generic_fallback = await _resolve_request_display_name(body)
         job_name = _resolve_submitted_job_name(body, display_name)
 
         async def _enqueue() -> dict[str, Any]:
@@ -8480,6 +8477,7 @@ async def analyze(
                 username=request.state.username,
                 message_prefix="Analysis",
                 is_admin=bool(request.state.is_admin),
+                is_generic_fallback=is_generic_fallback,
             )
 
         return provider, model, job_name, display_name, _enqueue
@@ -8509,7 +8507,7 @@ async def submit(
         # Preliminary checks stay inside the audited scope (see ``analyze``).
         _require_operator(request)
         _check_allow_list(request)
-        display_name = _resolve_request_display_name(body)
+        display_name, is_generic_fallback = await _resolve_request_display_name(body)
         job_name = _resolve_submitted_job_name(body, display_name)
         merged = _merge_settings(body, settings)
 
@@ -8525,6 +8523,7 @@ async def submit(
                 message_prefix="Submit",
                 is_admin=bool(request.state.is_admin),
                 ingest_only=True,
+                is_generic_fallback=is_generic_fallback,
             )
 
         return "", "", job_name, display_name, _enqueue
@@ -8758,12 +8757,18 @@ async def analyze_submitted_job(
     await _resolve_ai_config_allow_defer(unified_body, get_settings(), request)
     merged = _merge_settings(unified_body, get_settings())
     resolved_peers = await _validate_peer_configs(unified_body, merged)
-    display_name = (
+    existing_name = (
         unified_body.name
         or result_data.get("display_name")
         or result_data.get("job_name")
-        or source_cls.default_display_name(unified_body)
     )
+    if existing_name:
+        display_name = existing_name
+        is_generic_fallback = False
+    else:
+        display_name, is_generic_fallback = await asyncio.to_thread(
+            source_cls.resolve_display_name, unified_body
+        )
     claim = await claim_submitted_job_for_analyze(job_id)
     if claim is None:
         raise HTTPException(
@@ -8796,6 +8801,7 @@ async def analyze_submitted_job(
             message_prefix="Analysis",
             is_admin=bool(request.state.is_admin),
             existing_job_id=job_id,
+            is_generic_fallback=is_generic_fallback,
         )
     except Exception:
         await release_submitted_job_analyze_claim(
@@ -8932,7 +8938,13 @@ async def re_analyze(
     resolved_peers = await _validate_peer_configs(unified_body, merged)
 
     # Resolve display name — prefer original name, then plugin fallback
-    display_name = unified_body.name or source_cls.default_display_name(unified_body)
+    if unified_body.name:
+        display_name = unified_body.name
+        is_generic_fallback = False
+    else:
+        display_name, is_generic_fallback = await asyncio.to_thread(
+            source_cls.resolve_display_name, unified_body
+        )
 
     rerun = {
         "request": request,
@@ -8955,6 +8967,7 @@ async def re_analyze(
             reanalyzed_from_job_id=job_id,
             reanalyzed_from_job_name=origin_job_display_name,
             is_admin=bool(request.state.is_admin),
+            is_generic_fallback=is_generic_fallback,
         )
     except Exception:
         await _audit_analysis_rerun(**rerun, outcome="failure")

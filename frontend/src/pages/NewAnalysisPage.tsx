@@ -53,7 +53,7 @@ export function NewAnalysisPage() {
   // Raw XML (paste / upload)
   const [rawXml, setRawXml] = useState('')
   const [xmlJobName, setXmlJobName] = useState('')
-  const [xmlJobNameEdited, setXmlJobNameEdited] = useState(false)
+  const xmlJobNameEditedRef = useRef(false)
   const [uploadFileName, setUploadFileName] = useState('')
 
   // Prow fields
@@ -192,40 +192,47 @@ export function NewAnalysisPage() {
   const deferAiToTestsRepo = !!testsRepoUrl.trim() && !aiProvider && !aiModel
   const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, peerConfigs, enablePeers, false, canUseServerProviders, canUseFreeProviders, deferAiToTestsRepo)
 
-  const handleRawXmlChange = useCallback((nextXml: string) => {
-    setRawXml(nextXml)
-    if (!xmlJobNameEdited) {
-      setXmlJobName(extractSuiteNameFromXml(nextXml) ?? '')
+  useEffect(() => {
+    if (inputMode !== 'paste' || xmlJobNameEditedRef.current) return
+    if (!rawXml.trim()) {
+      setXmlJobName('')
+      return
     }
-  }, [xmlJobNameEdited])
+    const timer = window.setTimeout(() => {
+      if (!xmlJobNameEditedRef.current) {
+        setXmlJobName(extractSuiteNameFromXml(rawXml) ?? '')
+      }
+    }, 150)
+    return () => window.clearTimeout(timer)
+  }, [inputMode, rawXml])
 
   const handleXmlJobNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value
     setXmlJobName(value)
-    setXmlJobNameEdited(value.trim() !== '')
+    xmlJobNameEditedRef.current = value.trim() !== ''
   }, [])
 
   const handleFileUpload = useCallback((file: File) => {
     setError('')
-    handleRawXmlChange('')
+    setRawXml('')
     setUploadFileName('')
     const reader = new FileReader()
     reader.onload = (e) => {
       const content = e.target?.result
       if (typeof content === 'string') {
-        handleRawXmlChange(content)
+        setRawXml(content)
         setUploadFileName(file.name)
       }
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
     reader.onerror = () => {
-      handleRawXmlChange('')
+      setRawXml('')
       setUploadFileName('')
       setError(`Failed to read file: ${file.name}`)
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
     reader.readAsText(file)
-  }, [handleRawXmlChange])
+  }, [])
 
   const handleSubmit = useCallback(async () => {
     if (!canSubmit) return
@@ -564,7 +571,7 @@ export function NewAnalysisPage() {
                 className="flex w-full rounded-md border border-border-default bg-surface-elevated px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent min-h-[200px] resize-y font-mono"
                 placeholder="Paste JUnit XML content..."
                 value={rawXml}
-                onChange={(e) => handleRawXmlChange(e.target.value)}
+                onChange={(e) => setRawXml(e.target.value)}
               />
             </div>
           </Section>

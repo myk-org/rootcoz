@@ -33,6 +33,21 @@ INGEST_COMPLETE_SUMMARY = (
     "Select Analyze to investigate the recorded failures."
 )
 
+# Synthetic source placeholders that receive a short job_id suffix at enqueue
+# time when no caller-supplied name or CI/XML-derived identity is available.
+GENERIC_FALLBACK_DISPLAY_NAMES: frozenset[str] = frozenset(
+    {
+        "file-analysis",
+        "raw-analysis",
+        "prow-analysis",
+        "jenkins-analysis",
+        "prow-re-analysis",
+        "file-re-analysis",
+        "raw-re-analysis",
+        "jenkins-re-analysis",
+    }
+)
+
 if TYPE_CHECKING:
     from rootcoz.repository import RepositoryManager
 
@@ -315,6 +330,18 @@ class CISource(ABC):
         Subclasses override to derive a name from source-specific fields.
         """
         return getattr(body, "job_name", None) or f"{cls.__name__}-analysis"
+
+    @classmethod
+    def resolve_display_name(cls, body: Any) -> tuple[str, bool]:
+        """Return ``(display_name, is_generic_fallback)`` for a request.
+
+        ``is_generic_fallback`` is ``True`` only when the resolved name is a
+        synthetic placeholder that should receive a short ``job_id`` suffix at
+        enqueue time, never when the name came from caller input or CI/XML
+        metadata.
+        """
+        name = cls.default_display_name(body)
+        return name, name in GENERIC_FALLBACK_DISPLAY_NAMES
 
     @classmethod
     def restore_reanalyze_fields(

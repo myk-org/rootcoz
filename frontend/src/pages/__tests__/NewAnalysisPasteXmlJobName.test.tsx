@@ -94,7 +94,7 @@ describe('NewAnalysisPage Paste XML Job Name', () => {
       target: { value: '<testsuite name="qe-ui-check-submit"><testcase name="t1"/></testsuite>' },
     })
 
-    expect(jobNameInput.value).toBe('qe-ui-check-submit')
+    await waitFor(() => expect(jobNameInput.value).toBe('qe-ui-check-submit'))
     await waitFor(() => expect(submitButton).toBeEnabled())
     await user.click(submitButton)
 
@@ -115,7 +115,7 @@ describe('NewAnalysisPage Paste XML Job Name', () => {
       target: { value: '<testsuites><testsuite name="nested-suite"/></testsuites>' },
     })
 
-    expect(jobNameInput.value).toBe('nested-suite')
+    await waitFor(() => expect(jobNameInput.value).toBe('nested-suite'))
     await waitFor(() => expect(submitButton).toBeEnabled())
     await user.click(submitButton)
 
@@ -135,7 +135,7 @@ describe('NewAnalysisPage Paste XML Job Name', () => {
     fireEvent.change(xmlTextarea, {
       target: { value: '<testsuite name="initial-suite"/>' },
     })
-    expect(jobNameInput.value).toBe('initial-suite')
+    await waitFor(() => expect(jobNameInput.value).toBe('initial-suite'))
 
     await user.clear(jobNameInput)
     await user.type(jobNameInput, 'manual-override-name')
@@ -143,6 +143,7 @@ describe('NewAnalysisPage Paste XML Job Name', () => {
     fireEvent.change(xmlTextarea, {
       target: { value: '<testsuite name="later-suite"/>' },
     })
+    await new Promise((resolve) => setTimeout(resolve, 200))
     expect(jobNameInput.value).toBe('manual-override-name')
 
     await waitFor(() => expect(submitButton).toBeEnabled())
@@ -163,11 +164,12 @@ describe('NewAnalysisPage Paste XML Job Name', () => {
 
     await user.type(jobNameInput, 'custom-first')
     fireEvent.change(xmlTextarea, { target: { value: '<testsuite name="suite-a"/>' } })
+    await new Promise((resolve) => setTimeout(resolve, 200))
     expect(jobNameInput.value).toBe('custom-first')
 
     await user.clear(jobNameInput)
     fireEvent.change(xmlTextarea, { target: { value: '<testsuite name="suite-b"/>' } })
-    expect(jobNameInput.value).toBe('suite-b')
+    await waitFor(() => expect(jobNameInput.value).toBe('suite-b'))
   })
 
   it('leaves Job Name empty and omits job_name from payload when XML has no suite name', async () => {

@@ -85,11 +85,11 @@ class FileSource(CISource):
         )
 
     @classmethod
-    def default_display_name(cls, body: Any) -> str:
-        """Resolve display name from explicit job_name, XML suite name, or fallback."""
+    def resolve_display_name(cls, body: Any) -> tuple[str, bool]:
+        """Resolve ``(display_name, is_generic_fallback)`` for file analyses."""
         explicit = getattr(body, "job_name", None)
         if explicit:
-            return explicit
+            return explicit, False
         raw_xml = getattr(body, "raw_xml", None)
         if isinstance(raw_xml, str) and raw_xml:
             suite_name = extract_suite_name_from_xml(raw_xml)
@@ -98,8 +98,14 @@ class FileSource(CISource):
                     "Derived file-analysis job name %r from JUnit XML suite",
                     suite_name,
                 )
-                return suite_name
-        return "file-analysis"
+                return suite_name, False
+        return "file-analysis", True
+
+    @classmethod
+    def default_display_name(cls, body: Any) -> str:
+        """Resolve display name from explicit job_name, XML suite name, or fallback."""
+        name, _ = cls.resolve_display_name(body)
+        return name
 
     @classmethod
     def restore_reanalyze_fields(

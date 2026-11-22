@@ -1,4 +1,7 @@
 export const MAX_FILE_JOB_NAME_LENGTH = 500
+// Above this size, avoid building a full multi-MB DOM on the browser main thread;
+// scan opening <testsuite>/<testsuites> start tags in the leading prefix instead.
+export const FAST_XML_PREFIX_BYTES = 65_536
 
 // Mirrors backend FILE_JOB_NAME_PATTERN in src/rootcoz/models.py.
 export const FILE_JOB_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._:()+-]*$/
@@ -46,6 +49,53 @@ function validSuiteName(el: Element): string | null {
   return validateFileJobName(raw) === null ? raw : null
 }
 
+function parseStartTagName(tagName: string, rawAttrs: string): string | null {
+  const attrs = rawAttrs.replace(/\/\s*$/, '').trim()
+  if (!attrs) return null
+  try {
+    const doc = new DOMParser().parseFromString(`<${tagName} ${attrs}/>`, 'text/xml')
+    const root = doc.documentElement
+    if (
+      !root ||
+      root.localName === 'parsererror' ||
+      doc.getElementsByTagName('parsererror').length > 0
+    ) {
+      return null
+    }
+    return validSuiteName(root)
+  } catch {
+    return null
+  }
+}
+
+function extractSuiteNameFromLargeXmlPrefix(rawXml: string): string | null {
+  const head = rawXml
+    .slice(0, FAST_XML_PREFIX_BYTES)
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<\?[\s\S]*?\?>/g, '')
+    .replace(/<!DOCTYPE[^>]*>/gi, '')
+
+  const tagRe =
+    /<(?:[A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]*)(\s(?:[^>"']|"[^"]*"|'[^']*')*)?>/g
+  let isRoot = true
+  let fallbackName: string | null = null
+  let match: RegExpExecArray | null
+
+  while ((match = tagRe.exec(head)) !== null) {
+    const localName = match[1]
+    const rawAttrs = match[2] ?? ''
+    if (localName === 'testsuite') {
+      const name = parseStartTagName('testsuite', rawAttrs)
+      if (name) return name
+      if (isRoot) return null
+    } else if (isRoot && localName === 'testsuites') {
+      fallbackName = parseStartTagName('testsuites', rawAttrs)
+    }
+    isRoot = false
+  }
+  return fallbackName
+}
+
 /**
  * Extract and validate a JUnit suite name from raw XML in the browser.
  *
@@ -58,6 +108,10 @@ function validSuiteName(el: Element): string | null {
  */
 export function extractSuiteNameFromXml(rawXml: string): string | null {
   if (!rawXml || !rawXml.trim()) return null
+
+  if (rawXml.length > FAST_XML_PREFIX_BYTES) {
+    return extractSuiteNameFromLargeXmlPrefix(rawXml)
+  }
 
   let doc: Document
   try {
