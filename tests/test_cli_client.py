@@ -1374,6 +1374,29 @@ class TestRootCozClientAnalyzeFile:
         client = _make_client(handler)
         client.analyze_file("<testsuites/>")
 
+    def test_analyze_file_with_job_name(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body["type"] == "file"
+            assert body["job_name"] == "my-junit-suite"
+            return httpx.Response(202, json={"status": "queued", "job_id": "f4"})
+
+        client = _make_client(handler)
+        result = client.analyze_file("<testsuites/>", job_name="my-junit-suite")
+        assert result["status"] == "queued"
+
+    def test_submit_file_with_job_name(self):
+        def handler(request):
+            assert request.url.path == "/submit"
+            body = json.loads(request.content)
+            assert body["type"] == "file"
+            assert body["job_name"] == "my-junit-suite"
+            return httpx.Response(202, json={"status": "queued", "job_id": "f5"})
+
+        client = _make_client(handler)
+        result = client.submit_file("<testsuites/>", job_name="my-junit-suite")
+        assert result["status"] == "queued"
+
 
 class TestRootCozClientAnalyzeProw:
     def test_analyze_prow_sends_correct_body(self):

@@ -1857,7 +1857,10 @@ def analyze(
         "",
         "--job-name",
         "-j",
-        help="Job name (required when --source jenkins or prow).",
+        help=(
+            "Job name (required when --source jenkins or prow; "
+            "optional override for --source file)."
+        ),
     ),
     build_number: str = typer.Option(
         "",
@@ -2020,6 +2023,14 @@ def analyze(
         if not xml_path.exists() or not xml_path.is_file():
             typer.echo(f"Error: file not found: {xml_file}", err=True)
             raise typer.Exit(1)
+        if job_name:
+            from rootcoz.models import validate_file_job_name
+
+            try:
+                job_name = validate_file_job_name(job_name)
+            except ValueError as exc:
+                typer.echo(f"Error: invalid job name: {exc}", err=True)
+                raise typer.Exit(1) from None
 
     _positive_int_fields: dict[str, int | None] = {
         "--jira-max-results": jira_max_results,
@@ -2193,7 +2204,7 @@ def analyze(
                 typer.echo(f"Error: cannot read XML file '{xml_file}': {exc}", err=True)
                 raise typer.Exit(1) from None
             post_file = client.submit_file if ingest_only else client.analyze_file
-            data = post_file(raw_xml, name=name, **extras)
+            data = post_file(raw_xml, name=name, job_name=job_name, **extras)
     except RootCozError as err:
         _handle_error(err)
 

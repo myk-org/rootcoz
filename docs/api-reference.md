@@ -112,7 +112,7 @@ The shared body accepts the server defaults as per-request overrides:
 | Field | Purpose |
 | --- | --- |
 | `type` | `jenkins`, `file`, `raw`, or `prow` |
-| `job_name`, `build_number` | Jenkins job and build |
+| `job_name`, `build_number` | Jenkins job and build (`job_name` is also an optional override for `file`; otherwise derived from JUnit `<testsuite name>`, falling back to `file-analysis-<id>`) |
 | `raw_xml`, `failures`, `passed_tests`, `skipped_tests` | File and raw sources |
 | `prow_job_name`, `build_id`, `gcs_prefix` | Prow build identity and artifact prefix |
 | `prow_url`, `gcs_bucket` | Prow server defaults, overridable per request |
