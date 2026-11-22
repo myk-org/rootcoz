@@ -204,7 +204,7 @@ function ReportContent() {
         // AI configs and classifications are best-effort
         const [aiModelsResult, classificationsResult] = await Promise.allSettled([
           api.get<AiModelsResponse>('/api/ai-models'),
-          api.get<{ classifications: Array<{ test_name: string; classification: string; job_name: string; parent_job_name: string; reason: string; references_info: string; created_by: string; job_id: string; child_build_number: number; created_at: string }> }>(
+          api.get<{ classifications: Array<{ test_name: string; classification: string; job_name: string; parent_job_name: string; reason: string; references_info: string; created_by: string; job_id: string; child_build_number: number; created_at: string | null | undefined }> }>(
             `/history/classifications?job_id=${id}`,
           ),
         ])
@@ -215,8 +215,17 @@ function ReportContent() {
         }
         if (classificationsResult.status === 'fulfilled') {
           const classMap: Record<string, string> = {}
+          const parseCreatedAt = (ts: string | null | undefined): number =>
+            ts ? parseApiTimestamp(ts).getTime() : Number.NaN
           const sorted = [...(classificationsResult.value.classifications ?? [])]
-            .sort((a, b) => parseApiTimestamp(b.created_at).getTime() - parseApiTimestamp(a.created_at).getTime())
+            .sort((a, b) => {
+              const aTime = parseCreatedAt(a.created_at)
+              const bTime = parseCreatedAt(b.created_at)
+              if (Number.isNaN(aTime) && Number.isNaN(bTime)) return 0
+              if (Number.isNaN(aTime)) return 1
+              if (Number.isNaN(bTime)) return -1
+              return bTime - aTime
+            })
           for (const c of sorted) {
             // Use composite key to handle same test_name across different child jobs
             const key = reviewKey(c.test_name, c.job_name, c.child_build_number)

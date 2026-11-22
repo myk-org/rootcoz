@@ -52,10 +52,12 @@ export function formatDuration(start: Date, end: Date): string {
 
 /** Parse a UTC timestamp from the API (SQLite format) into a Date. */
 export function parseApiTimestamp(ts: string): Date {
-  // Normalize: trim, replace space separator with T, then append Z only when no
+  if (typeof ts !== 'string') return new Date(Number.NaN)
+  const trimmed = ts.trim()
+  if (!trimmed) return new Date(Number.NaN)
+  // Normalize: replace space separator with T, then append Z only when no
   // timezone offset is present.  The regex handles Z, +HH:MM, -HH:MM, +HHMM,
   // -HHMM, and bare +HH/-HH offsets.
-  const trimmed = ts.trim()
   let normalized = trimmed.includes('T') ? trimmed : trimmed.replace(' ', 'T')
   if (!/(?:[Zz]|[+-]\d{2}(?::?\d{2})?)$/.test(normalized)) {
     normalized += 'Z'

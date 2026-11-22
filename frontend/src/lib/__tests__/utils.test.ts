@@ -125,6 +125,12 @@ describe('parseApiTimestamp', () => {
     expect(parseApiTimestamp('2026-11-20T09:27:56-05:00').getTime()).toBe(EXPECTED_UTC_MS)
     expect(parseApiTimestamp('2026-11-20 16:27:56+0200').getTime()).toBe(EXPECTED_UTC_MS)
   })
+
+  it('returns an invalid Date for empty, whitespace-only, or non-string inputs', () => {
+    expect(Number.isNaN(parseApiTimestamp('').getTime())).toBe(true)
+    expect(Number.isNaN(parseApiTimestamp('   ').getTime())).toBe(true)
+    expect(Number.isNaN(parseApiTimestamp(null as unknown as string).getTime())).toBe(true)
+  })
 })
 
 describe('formatTimestamp', () => {

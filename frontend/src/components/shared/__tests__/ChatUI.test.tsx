@@ -1137,7 +1137,11 @@ it('does not clear while the initial Start request is in flight', async () => {
   await act(async () => { finishInit({ ready: false, preparing: { phase: 'preparing', detail: '' } }) })
 })
 
-it('renders user, assistant, and system message timestamps in local time from naive UTC strings', async () => {
+it.each([
+  { label: 'job chat', role: 'reviewer', apiBasePath: '/api/chat/job', sseTopic: 'chat:job' },
+  { label: 'admin chat', role: 'admin', apiBasePath: '/api/admin/chat', sseTopic: 'admin-chat' },
+])('renders user, assistant, and system message timestamps in local time from naive UTC strings ($label)', async ({ label, role, apiBasePath, sseTopic }) => {
+  currentRole = role
   const naiveUtc = '2026-11-20 14:27:56'
   const offsetTs = '2026-11-20T16:27:56+02:00'
   const expectedLocal = new Date(Date.UTC(2026, 10, 20, 14, 27, 56)).toLocaleString()
@@ -1151,7 +1155,7 @@ it('renders user, assistant, and system message timestamps in local time from na
     total: 4,
     active_session: { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'user' },
   })
-  render(page())
+  render(<ChatUI apiBasePath={apiBasePath} sseTopic={sseTopic} header={<h1>{label}</h1>} defaultProvider="openai" defaultModel="gpt" />)
   expect(await screen.findByText('server notice msg')).toBeInTheDocument()
   // User, assistant (+02:00 equivalent), and system messages all resolve to the same local instant.
   expect(screen.getAllByText(expectedLocal)).toHaveLength(3)
