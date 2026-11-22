@@ -1053,6 +1053,26 @@ async def test_an_unlinked_identity_gets_a_suggestion_not_an_account(
             assert (await cursor.fetchone())["n"] == 0
 
 
+async def test_a_signed_out_visitor_keeps_the_device_approval_destination(
+    temp_db_path: Path,
+) -> None:
+    """The CLI prints /login/device; it must answer with the shell, not a 303.
+
+    A redirect to bare /login throws the path away, so the person is returned to /
+    after signing in instead of the code-entry screen they were sent to.
+    """
+    for client in make_app_client(temp_db_path, {}):
+        response = client.get(
+            "/login/device",
+            headers={"accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert response.status_code != 303, response.headers.get("location")
+        _assert_spa_page(response)
+        # The APIs the page calls stay authenticated.
+        assert client.get("/api/auth/sso/device/approve/lookup").status_code == 401
+
+
 async def test_an_orphaned_identity_is_healed_so_it_cannot_block_relinking(
     temp_db_path: Path,
 ) -> None:

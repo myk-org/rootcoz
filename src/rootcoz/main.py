@@ -4730,6 +4730,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/api/releases/latest",
             "/metrics",
             "/pending",
+            # The CLI's approval screen. The page itself is anonymous so a
+            # signed-out visitor who opens the verification URL keeps it as the
+            # destination (ProtectedRoute sends them to /login with `from`), and
+            # returns here after signing in. The approval APIs it calls are NOT
+            # public — approving acts on an account.
+            "/login/device",
             "/favicon.ico",
             "/favicon.svg",
             "/sw.js",

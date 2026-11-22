@@ -71,6 +71,17 @@ def test_the_sso_surfaces_stay_public() -> None:
         assert _public(path), f"{path} must stay public — it runs before a session"
 
 
+def test_the_device_approval_page_is_public_so_its_destination_survives() -> None:
+    """A signed-out visitor must keep /login/device as where they land back.
+
+    The CLI prints that URL. If the middleware refuses it, it answers 303 to bare
+    /login, the path is gone, and the person is returned to / after signing in
+    instead of the code-entry screen — so the page is anonymous while the APIs it
+    calls (see the test below) are not.
+    """
+    assert _public("/login/device")
+
+
 def test_the_device_approval_surfaces_stay_authenticated() -> None:
     """Approval acts on an account, so it must never be reachable anonymously."""
     for path in (
