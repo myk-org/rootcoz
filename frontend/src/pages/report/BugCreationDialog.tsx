@@ -1,5 +1,6 @@
-import { Children, cloneElement, isValidElement, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
+import { Children, cloneElement, isValidElement, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { api, extractApiDetail } from '@/lib/api'
+import { buildRepoOptions, type RepoEntry } from '@/lib/repoOptions'
 import { createIssueFailureMessage, createOutcomeUnknown } from '@/lib/issueCreateError'
 import { IssueCreateError } from '@/components/shared/IssueCreateError'
 import { useSubmitGuard } from '@/lib/useSubmitGuard'
@@ -68,7 +69,7 @@ interface BugCreationDialogProps {
   defaultAiProvider?: string
   defaultAiModel?: string
   includeLinks?: boolean
-  availableRepos?: Array<{ name: string; url: string }>
+  availableRepos?: RepoEntry[]
   defaultProjectKey?: string
   capabilities?: Capabilities | null
   /** Called after a bug issue is successfully created (with the issue URL). */
@@ -122,7 +123,9 @@ export function BugCreationDialog({
   // duplicate it. Only a 4xx refusal is the server saying it filed nothing.
   const [createMaybeFiled, setCreateMaybeFiled] = useState(false)
   const guardSubmit = useSubmitGuard()
-  const [selectedRepo, setSelectedRepo] = useState(availableRepos?.[0]?.url ?? '')
+  const repoOptions = useMemo(() => buildRepoOptions(availableRepos), [availableRepos])
+  const [selectedRepoKey, setSelectedRepoKey] = useState('')
+  const selectedRepoOption = repoOptions.find((r) => r.value === selectedRepoKey) ?? repoOptions[0]
   const [jiraProjectKey, setJiraProjectKey] = useState(defaultProjectKey || '')
   const [confirmedProjectKey, setConfirmedProjectKey] = useState(defaultProjectKey || '')
   // Project search results belong to the query they were fetched for.
@@ -177,7 +180,7 @@ export function BugCreationDialog({
 
   function getTrackerChoices() {
     return {
-      ...(target === 'github' && selectedRepo ? { github_repo_url: selectedRepo } : {}),
+      ...(target === 'github' && selectedRepoOption ? { github_repo_url: selectedRepoOption.url } : {}),
       ...(target === 'jira' && jiraProjectKey ? { jira_project_key: jiraProjectKey } : {}),
       ...(target === 'jira' && jiraSecurityLevel ? { jira_security_level: jiraSecurityLevel } : {}),
       ...(target === 'jira' ? { jira_issue_type: jiraIssueType === '__custom__' ? customIssueType : jiraIssueType } : {}),
@@ -371,7 +374,7 @@ export function BugCreationDialog({
       setErrorMsg('')
       setCreateError('')
       setCreateMaybeFiled(false)
-      setSelectedRepo(availableRepos?.[0]?.url ?? '')
+      setSelectedRepoKey('')
       setJiraProjectKey(defaultProjectKey || '')
       setConfirmedProjectKey(defaultProjectKey || '')
       setProjectSearch(null)
@@ -474,16 +477,16 @@ export function BugCreationDialog({
                 {attachments.length > 0 && ' Selected files remain listed below for inspection.'}
               </p>
             )}
-            {target === 'github' && availableRepos && availableRepos.length > 1 && (
+            {target === 'github' && repoOptions.length > 1 && (
               <div className="space-y-2">
                 <label htmlFor="bug-repo" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Repository</label>
-                <Select value={selectedRepo} onValueChange={setSelectedRepo}>
+                <Select value={selectedRepoOption?.value ?? ''} onValueChange={setSelectedRepoKey}>
                   <SelectTrigger id="bug-repo">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {availableRepos.map((r) => (
-                      <SelectItem key={r.url} value={r.url}>{r.name}</SelectItem>
+                    {repoOptions.map((r) => (
+                      <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>

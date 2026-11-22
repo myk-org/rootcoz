@@ -1056,3 +1056,147 @@ describe('BugCreationDialog issue attachments', () => {
     expect(post.mock.calls.filter(([path]) => path === createPathFor('github'))).toHaveLength(0)
   })
 })
+
+describe('BugCreationDialog repository picker', () => {
+  async function openGithubPreviewWithRepos(
+    user: ReturnType<typeof userEvent.setup>,
+    availableRepos: Array<{ name: string; url: string; ref?: string }>,
+  ) {
+    render(
+      <MemoryRouter>
+        <ReportProvider>
+          <BugCreationDialog
+            open
+            onOpenChange={() => {}}
+            jobId="job-1"
+            testName="test-a"
+            target="github"
+            availableRepos={availableRepos}
+          />
+        </ReportProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: /continue/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+  }
+
+  it('disambiguates same-name repos at different refs with single selection and clean trigger text (#635)', async () => {
+    const user = userEvent.setup()
+    const sha = '87b98b49e2c5802816cbb787dadac9475c0cab32' // pragma: allowlist secret
+    const shaUrl = 'https://github.com/kubevirt/containerized-data-importer'
+    const mainUrl = 'https://github.com/kubevirt/containerized-data-importer.git'
+
+    post.mockImplementation(async (path: string) => {
+      if (path.endsWith('/preview-github-issue')) {
+        return { title: 'Issue title', body: 'Issue body', similar_issues: [] }
+      }
+      if (path.endsWith('/create-github-issue')) {
+        return { url: 'https://github.com/kubevirt/containerized-data-importer/issues/42', number: 42, title: 'Issue title', comment_id: 1 }
+      }
+      return {}
+    })
+
+    await openGithubPreviewWithRepos(user, [
+      { name: 'containerized-data-importer', url: shaUrl, ref: sha },
+      { name: 'containerized-data-importer', url: mainUrl, ref: 'main' },
+    ])
+
+    // Preview request sent the first entry's original URL (never the composite picker key).
+    expect(post).toHaveBeenCalledWith(
+      '/results/job-1/preview-github-issue',
+      expect.objectContaining({ github_repo_url: shaUrl }),
+    )
+
+    // Trigger displays only the selected label — never concatenated labels.
+    const trigger = screen.getByRole('combobox', { name: 'Repository' })
+    expect(trigger).toHaveTextContent('containerized-data-importer @ 87b98b4')
+    expect(trigger.textContent).not.toContain('main')
+
+    // Opening the picker shows two distinct options with exactly one selected.
+    await user.click(trigger)
+    const options = await screen.findAllByRole('option')
+    expect(options).toHaveLength(2)
+    expect(options[0]).toHaveTextContent('containerized-data-importer @ 87b98b4')
+    expect(options[1]).toHaveTextContent('containerized-data-importer @ main')
+    expect(options.filter((opt) => opt.getAttribute('aria-selected') === 'true')).toHaveLength(1)
+    expect(options[0]).toHaveAttribute('aria-selected', 'true')
+    expect(options[1]).toHaveAttribute('aria-selected', 'false')
+
+    // Switching selection updates trigger text cleanly and submits the newly chosen URL.
+    await user.click(options[1])
+    expect(trigger).toHaveTextContent('containerized-data-importer @ main')
+    expect(trigger.textContent).not.toContain('87b98b4')
+
+    await user.click(trigger)
+    const updatedOptions = await screen.findAllByRole('option')
+    expect(updatedOptions.filter((opt) => opt.getAttribute('aria-selected') === 'true')).toHaveLength(1)
+    expect(updatedOptions[0]).toHaveAttribute('aria-selected', 'false')
+    expect(updatedOptions[1]).toHaveAttribute('aria-selected', 'true')
+    await user.click(updatedOptions[1])
+
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        '/results/job-1/create-github-issue',
+        expect.objectContaining({ github_repo_url: mainUrl }),
+      ),
+    )
+  })
+
+  it('collapses duplicate entries with the same normalized URL and same ref into one entry', async () => {
+    const user = userEvent.setup()
+    const repoUrl = 'https://github.com/kubevirt/containerized-data-importer'
+
+    await openGithubPreviewWithRepos(user, [
+      { name: 'containerized-data-importer', url: repoUrl, ref: 'main' },
+      { name: 'containerized-data-importer', url: `${repoUrl}.git/`, ref: 'main' },
+    ])
+
+    // Collapsing leaves 1 repo, so no redundant repository picker is shown.
+    expect(screen.queryByRole('combobox', { name: 'Repository' })).not.toBeInTheDocument()
+    expect(post).toHaveBeenCalledWith(
+      '/results/job-1/preview-github-issue',
+      expect.objectContaining({ github_repo_url: repoUrl }),
+    )
+  })
+
+  it('keeps clean display names when a collapsed duplicate sits alongside another distinct repo', async () => {
+    const user = userEvent.setup()
+    const cdiUrl = 'https://github.com/kubevirt/containerized-data-importer'
+    const testsUrl = 'https://github.com/kubevirt/kubevirt-tests'
+
+    await openGithubPreviewWithRepos(user, [
+      { name: 'containerized-data-importer', url: cdiUrl, ref: 'main' },
+      { name: 'containerized-data-importer', url: `${cdiUrl}.git`, ref: 'main' },
+      { name: 'kubevirt-tests', url: testsUrl, ref: 'main' },
+    ])
+
+    const trigger = screen.getByRole('combobox', { name: 'Repository' })
+    expect(trigger).toHaveTextContent('containerized-data-importer')
+    expect(trigger.textContent).not.toContain('@')
+
+    await user.click(trigger)
+    const options = await screen.findAllByRole('option')
+    expect(options).toHaveLength(2)
+    expect(options[0]).toHaveTextContent('containerized-data-importer')
+    expect(options[1]).toHaveTextContent('kubevirt-tests')
+    expect(options[0].textContent).not.toContain('@')
+    expect(options[1].textContent).not.toContain('@')
+  })
+
+  it('handles a single repo without rendering a redundant picker and submits its URL', async () => {
+    const user = userEvent.setup()
+    const singleUrl = 'https://github.com/kubevirt/containerized-data-importer'
+
+    await openGithubPreviewWithRepos(user, [
+      { name: 'containerized-data-importer', url: singleUrl, ref: 'main' },
+    ])
+
+    expect(screen.queryByRole('combobox', { name: 'Repository' })).not.toBeInTheDocument()
+    expect(post).toHaveBeenCalledWith(
+      '/results/job-1/preview-github-issue',
+      expect.objectContaining({ github_repo_url: singleUrl }),
+    )
+  })
+})

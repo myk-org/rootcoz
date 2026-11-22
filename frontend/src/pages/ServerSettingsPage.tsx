@@ -5,6 +5,7 @@ import { useLatestRef } from '@/lib/useLatestRef'
 import { useSSE } from '@/lib/useSSE'
 import { useAuth } from '@/lib/auth'
 import { formatBytes, formatUptime } from '@/lib/format'
+import { formatTimestamp } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Input } from '@/components/ui/input'
@@ -2564,7 +2565,7 @@ function SettingRow({
             <p className="text-xs text-text-tertiary">
               Modified by <span className="font-medium text-text-secondary">{setting.updated_by}</span>
               {setting.updated_at && (
-                <> at <span className="font-medium text-text-secondary">{new Date(setting.updated_at).toLocaleString()}</span></>
+                <> at <span className="font-medium text-text-secondary">{formatTimestamp(setting.updated_at)}</span></>
               )}
             </p>
           )}
@@ -2671,7 +2672,7 @@ function HistoryToggle({
             history.map((entry) => (
               <div key={entry.id} className="text-xs text-text-secondary">
                 <span className="text-text-tertiary">
-                  {new Date(entry.changed_at.replace(' ', 'T') + 'Z').toLocaleString()}
+                  {formatTimestamp(entry.changed_at)}
                 </span>
                 {' · '}
                 <span className={entry.action === 'reset' ? 'text-signal-amber' : 'text-signal-blue'}>
