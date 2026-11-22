@@ -26,8 +26,9 @@ export type TestNameMode = (typeof TEST_NAME_MODES)[number]['value']
 
 export const DEFAULT_TEST_NAME_MODE: TestNameMode = 'contains'
 
-/** The eleven canonical dimensions, in bar order. Both pages use this list. */
+/** The twelve canonical dimensions, in bar order. Both pages use this list. */
 export const JOB_FILTER_KEYS = [
+  'search',
   'team',
   'tier',
   'version',
@@ -55,6 +56,7 @@ export const TEST_NAME_WRITE_KEYS = ['date_from', 'date_to', ...TEST_NAME_FILTER
 export const JOB_FILTER_READ_ALIASES = ['from', 'to'] as const
 
 export interface JobFilterValues {
+  search: string
   team: string[]
   tier: string[]
   version: string[]
@@ -71,6 +73,7 @@ export interface JobFilterValues {
 }
 
 export const EMPTY_JOB_FILTERS: JobFilterValues = {
+  search: '',
   team: [],
   tier: [],
   version: [],
@@ -103,7 +106,7 @@ export function searchParamsToFilters(
 }
 
 /** Replace allowlisted filter params in a URLSearchParams copy, leaving
- * everything else (e.g. `search`) untouched. */
+ * non-filter params (e.g. `report`) untouched. */
 export function applyFiltersToParams(
   params: URLSearchParams,
   filters: FilterValues,
@@ -211,6 +214,7 @@ export function jobFiltersFromFilters(
   options: { submitters?: string[] } = {},
 ): JobFilterValues {
   return {
+    search: asText(filters.search),
     team: asList(filters.team),
     tier: asList(filters.tier),
     version: asList(filters.version),
@@ -236,6 +240,7 @@ export function jobFiltersFromFilters(
  */
 export function jobFiltersToFilters(values: JobFilterValues): FilterValues {
   const out: FilterValues = {}
+  if (values.search) out.search = values.search
   for (const key of ['team', 'tier', 'version', 'label', 'exclude_label', 'status', 'submitted_by'] as const) {
     const list = values[key]
     if (list.length > 0) out[key] = list
@@ -279,6 +284,7 @@ export function jobFiltersToApiQuery(page: FilterPage, values: JobFilterValues):
   }
 
   if (page === 'dashboard') {
+    if (values.search) params.set('search', values.search)
     repeated('team', values.team)
     repeated('tier', values.tier)
     repeated('version', values.version)

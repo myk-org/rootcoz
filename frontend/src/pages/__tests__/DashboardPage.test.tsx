@@ -1,13 +1,21 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DashboardPage } from '@/pages/DashboardPage'
+import { resetLastAppliedPresetForTests } from '@/lib/filterPresets'
 
 const apiGet = vi.fn()
+const apiPost = vi.fn()
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>()
-  return { ...actual, api: { get: (...args: unknown[]) => apiGet(...args) } }
+  return {
+    ...actual,
+    api: {
+      get: (...args: unknown[]) => apiGet(...args),
+      post: (...args: unknown[]) => apiPost(...args),
+    },
+  }
 })
 
 vi.mock('@/lib/auth', () => ({
@@ -79,10 +87,38 @@ function mockApi(total: number, submitters = ['alice', 'yuval']) {
   })
 }
 
-function renderPage(route = '/') {
+function LocationProbe() {
+  const location = useLocation()
+  return <div data-testid="location-probe">{location.pathname}{location.search}</div>
+}
+
+function NavControls() {
+  const navigate = useNavigate()
+  return (
+    <>
+      <button type="button" onClick={() => navigate(-1)}>Go back</button>
+      <button type="button" onClick={() => navigate('/?search=external&team=net')}>Nav external</button>
+      <button type="button" onClick={() => navigate('/')}>Nav clean</button>
+    </>
+  )
+}
+
+function renderPage(route = '/', initialEntries?: string[]) {
   return render(
-    <MemoryRouter initialEntries={[route]}>
-      <DashboardPage />
+    <MemoryRouter initialEntries={initialEntries ?? [route]}>
+      <Routes>
+        <Route
+          path="/"
+          element={
+            <>
+              <DashboardPage />
+              <LocationProbe />
+              <NavControls />
+            </>
+          }
+        />
+        <Route path="/other" element={<LocationProbe />} />
+      </Routes>
     </MemoryRouter>,
   )
 }
@@ -391,5 +427,195 @@ describe('DashboardPage test-name filter', () => {
     await waitFor(() => expect(requests.at(-1)?.get('test_name')).toBeNull())
     expect(requests.at(-1)?.get('date_from')).toBe('2024-01-01')
     expect(requests.at(-1)?.get('date_to')).toBe('2024-01-05')
+  })
+})
+
+describe('DashboardPage search URL contract', () => {
+  beforeEach(() => {
+    resetLastAppliedPresetForTests()
+  })
+
+  afterEach(() => {
+    apiGet.mockReset()
+    apiPost.mockReset()
+  })
+
+  it('seeds input and first API request from ?search= with zero unfiltered flash', async () => {
+    mockApi(5)
+    renderPage('/?search=kubevirt')
+
+    expect(screen.getByPlaceholderText('Filter jobs...')).toHaveValue('kubevirt')
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+    expect(requests[0]?.get('search')).toBe('kubevirt')
+    expect(screen.getByTestId('location-probe').textContent).toBe('/?search=kubevirt')
+  })
+
+  it('debounces typing into URL using replace: true', async () => {
+    mockApi(5)
+    renderPage('/', ['/other', '/'])
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+
+    const input = screen.getByPlaceholderText('Filter jobs...')
+    await userEvent.type(input, 'kubevirt')
+
+    await waitFor(() =>
+      expect(screen.getByTestId('location-probe').textContent).toBe('/?search=kubevirt'),
+    )
+    await waitFor(() => expect(requests.at(-1)?.get('search')).toBe('kubevirt'))
+
+    // replace: true means going back returns to /other instead of '/'
+    await userEvent.click(screen.getByRole('button', { name: 'Go back' }))
+    await waitFor(() => expect(screen.getByTestId('location-probe').textContent).toBe('/other'))
+  })
+
+  it('preserves search in URL when clicking status and label filters, without clobbering mid-debounce typing', async () => {
+    mockApi(5)
+    const fallback = apiGet.getMockImplementation()!
+    apiGet.mockImplementation((path: string) =>
+      path === '/api/jobs/metadata'
+        ? Promise.resolve([{ job_id: 'job-1', labels: ['nightly'], team: 'storage' }])
+        : fallback(path),
+    )
+
+    renderPage('/?search=kube')
+    await waitFor(() => expect(requests[0]?.get('search')).toBe('kube'))
+    const labelChip = await screen.findByRole('button', { name: /nightly/i })
+
+    // Start typing mid-debounce, then click tag & status before 300ms elapses
+    const input = screen.getByPlaceholderText('Filter jobs...')
+    fireEvent.change(input, { target: { value: 'kubevirt' } })
+    expect(input).toHaveValue('kubevirt')
+
+    await userEvent.click(labelChip)
+    await userEvent.click(screen.getByRole('button', { name: 'All statuses' }))
+    await userEvent.click(await screen.findByText('failed'))
+    await userEvent.keyboard('{Escape}')
+
+    // Mid-debounce typing survived the other filter clicks
+    expect(input).toHaveValue('kubevirt')
+
+    await waitFor(() => {
+      const sp = new URLSearchParams(screen.getByTestId('location-probe').textContent?.split('?')[1] ?? '')
+      expect(sp.get('search')).toBe('kubevirt')
+      expect(sp.getAll('status')).toEqual(['failed'])
+      expect(sp.getAll('label')).toEqual(['nightly'])
+    })
+  })
+
+  it('saves and restores search in filter presets and clears search when applying a preset without search', async () => {
+    const presetWithoutSearch = {
+      id: 1,
+      name: 'Storage only',
+      page: 'dashboard',
+      scope: 'user',
+      filters: { team: ['storage'] },
+      created_at: '2026-01-01T00:00:00',
+      updated_at: '2026-01-01T00:00:00',
+    }
+    const presetWithSearch = {
+      id: 2,
+      name: 'Kubevirt failed',
+      page: 'dashboard',
+      scope: 'user',
+      filters: { search: 'kubevirt', status: ['failed'] },
+      created_at: '2026-01-02T00:00:00',
+      updated_at: '2026-01-02T00:00:00',
+    }
+    const savedPreset = {
+      id: 3,
+      name: 'Saved search',
+      page: 'dashboard',
+      scope: 'user',
+      filters: { search: 'kubevirt', status: 'failed' },
+      created_at: '2026-01-03T00:00:00',
+      updated_at: '2026-01-03T00:00:00',
+    }
+    mockApi(5)
+    const fallback = apiGet.getMockImplementation()!
+    apiGet.mockImplementation((path: string) =>
+      path.startsWith('/api/user/filter-presets')
+        ? Promise.resolve([presetWithoutSearch, presetWithSearch])
+        : fallback(path),
+    )
+    apiPost.mockResolvedValue(savedPreset)
+
+    renderPage('/?search=kubevirt&status=failed')
+    await waitFor(() => expect(requests[0]?.get('search')).toBe('kubevirt'))
+
+    // Save preset containing search
+    await userEvent.click(screen.getByTestId('filter-presets-trigger'))
+    await userEvent.click(screen.getByTestId('filter-preset-save-as'))
+    fireEvent.change(screen.getByTestId('filter-preset-save-name'), {
+      target: { value: 'Saved search' },
+    })
+    await userEvent.click(screen.getByTestId('filter-preset-save-confirm'))
+
+    await waitFor(() =>
+      expect(apiPost).toHaveBeenCalledWith('/api/user/filter-presets', {
+        name: 'Saved search',
+        page: 'dashboard',
+        scope: 'user',
+        filters: { search: 'kubevirt', status: 'failed' },
+      }),
+    )
+
+    // Apply preset without search -> replaces all FILTER_PRESET_KEYS, clearing search
+    await userEvent.click(screen.getByTestId('filter-presets-trigger'))
+    await userEvent.click(screen.getByTestId('filter-preset-1'))
+
+    await waitFor(() => expect(screen.getByPlaceholderText('Filter jobs...')).toHaveValue(''))
+    expect(screen.getByTestId('location-probe').textContent).toBe('/?team=storage')
+    await waitFor(() => {
+      const last = requests.at(-1)
+      expect(last?.get('search')).toBeNull()
+      expect(last?.getAll('team')).toEqual(['storage'])
+    })
+
+    // Apply preset with search -> restores search in URL, input, and API query
+    await userEvent.click(screen.getByTestId('filter-presets-trigger'))
+    await userEvent.click(screen.getByTestId('filter-preset-2'))
+
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText('Filter jobs...')).toHaveValue('kubevirt'),
+    )
+    const sp = new URLSearchParams(screen.getByTestId('location-probe').textContent?.split('?')[1] ?? '')
+    expect(sp.get('search')).toBe('kubevirt')
+    expect(sp.getAll('status')).toEqual(['failed'])
+    await waitFor(() => {
+      const last = requests.at(-1)
+      expect(last?.get('search')).toBe('kubevirt')
+      expect(last?.getAll('status')).toEqual(['failed'])
+    })
+  })
+
+  it('syncs external URL changes into input and cancels any pending debounce timer', async () => {
+    mockApi(5)
+    renderPage('/?search=initial')
+    await waitFor(() => expect(requests[0]?.get('search')).toBe('initial'))
+
+    // Start typing (schedules 300ms debounce)
+    const input = screen.getByPlaceholderText('Filter jobs...')
+    fireEvent.change(input, { target: { value: 'initialtyping' } })
+    expect(input).toHaveValue('initialtyping')
+
+    // External URL change before debounce settles
+    await userEvent.click(screen.getByRole('button', { name: 'Nav external' }))
+
+    await waitFor(() => expect(input).toHaveValue('external'))
+    await waitFor(() => {
+      const last = requests.at(-1)
+      expect(last?.get('search')).toBe('external')
+      expect(last?.getAll('team')).toEqual(['net'])
+    })
+
+    // Wait past the 300ms debounce window to ensure the cancelled timer never overwrites URL
+    await new Promise((r) => setTimeout(r, 350))
+    expect(input).toHaveValue('external')
+    expect(screen.getByTestId('location-probe').textContent).toBe('/?search=external&team=net')
+
+    // External navigation to clean URL clears search
+    await userEvent.click(screen.getByRole('button', { name: 'Nav clean' }))
+    await waitFor(() => expect(input).toHaveValue(''))
+    await waitFor(() => expect(requests.at(-1)?.get('search')).toBeNull())
   })
 })

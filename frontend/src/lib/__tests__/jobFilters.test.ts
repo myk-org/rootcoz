@@ -33,8 +33,9 @@ const values = (over: Partial<JobFilterValues> = {}): JobFilterValues => ({
 })
 
 describe('canonical keys', () => {
-  it('lists the eleven dimensions once, in bar order', () => {
+  it('lists the twelve dimensions once, in bar order', () => {
     expect(JOB_FILTER_KEYS).toEqual([
+      'search',
       'team',
       'tier',
       'version',
@@ -52,8 +53,9 @@ describe('canonical keys', () => {
 })
 
 describe('URL round-trip', () => {
-  it('reads back exactly what it wrote, leaving `search` alone', () => {
+  it('reads back exactly what it wrote, leaving non-filter params alone', () => {
     const start = values({
+      search: 'kubevirt',
       team: ['a', 'b'],
       status: ['failed'],
       review_status: 'reviewed',
@@ -62,12 +64,23 @@ describe('URL round-trip', () => {
       test_name: 'tests.login.test_one',
       test_name_mode: 'exact',
     })
-    const url = applyJobFiltersToParams(new URLSearchParams('search=keepme'), start, DASHBOARD_KEYS)
+    const url = applyJobFiltersToParams(new URLSearchParams('report=totals'), start, DASHBOARD_KEYS)
 
-    expect(url.get('search')).toBe('keepme')
+    expect(url.get('report')).toBe('totals')
+    expect(url.get('search')).toBe('kubevirt')
     expect(url.getAll('team')).toEqual(['a', 'b'])
     expect(url.get('review_status')).toBe('reviewed')
     expect(jobFiltersFromParams(url, DASHBOARD_KEYS)).toEqual(start)
+  })
+
+  it('clears search when applying filters without search', () => {
+    const url = applyJobFiltersToParams(
+      new URLSearchParams('search=old&team=a'),
+      values({ team: ['b'] }),
+      DASHBOARD_KEYS,
+    )
+    expect(url.get('search')).toBeNull()
+    expect(url.getAll('team')).toEqual(['b'])
   })
 
   it('reads the legacy from/to aliases and rewrites them as canonical keys', () => {
@@ -143,6 +156,7 @@ describe('preset normalisation', () => {
 
 describe('per-page API encoding', () => {
   const picked = values({
+    search: 'kubevirt',
     team: ['a', 'b'],
     label: ['nightly'],
     exclude_label: ['flaky'],
@@ -154,8 +168,9 @@ describe('per-page API encoding', () => {
     test_name_mode: 'exact',
   })
 
-  it('repeats list values for the dashboard endpoint', () => {
+  it('repeats list values and includes search for the dashboard endpoint', () => {
     const q = jobFiltersToApiQuery('dashboard', picked)
+    expect(q.get('search')).toBe('kubevirt')
     expect(q.getAll('team')).toEqual(['a', 'b'])
     expect(q.getAll('label')).toEqual(['nightly'])
     expect(q.getAll('exclude_label')).toEqual(['flaky'])
@@ -164,8 +179,9 @@ describe('per-page API encoding', () => {
     expect(q.get('test_name_mode')).toBe('exact')
   })
 
-  it('sends CSV for the reports endpoint, renaming labels to tags', () => {
+  it('sends CSV for the reports endpoint, renaming labels to tags and omitting search', () => {
     const q = jobFiltersToApiQuery('reports', picked)
+    expect(q.get('search')).toBeNull()
     expect(q.get('team')).toBe('a,b')
     expect(q.get('tags')).toBe('nightly')
     expect(q.get('exclude_tags')).toBe('flaky')

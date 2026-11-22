@@ -46,6 +46,7 @@ import {
   applyJobFiltersToParams,
   DEFAULT_TEST_NAME_MODE,
   EMPTY_JOB_FILTERS,
+  jobFiltersFromFilters,
   jobFiltersFromParams,
   TEST_NAME_WRITE_KEYS,
   type TestNameMode,
@@ -156,20 +157,60 @@ export function DashboardPage() {
   const [jobs, setJobs] = useState<DashboardJobWithMetadata[]>([])
   const [totalJobs, setTotalJobs] = useState(0)
   const [loading, setLoading] = useState(true)
-  const [search, setSearch] = useState('')
-  const [debouncedSearch, setDebouncedSearch] = useState('')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const urlSearch = searchParams.get('search') ?? ''
+  const [search, setSearch] = useState(urlSearch)
+  const [debouncedSearch, setDebouncedSearch] = useState(urlSearch)
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastCommittedSearchRef = useRef(urlSearch)
 
   // Debounce search input (300ms) to avoid excessive backend requests
   useEffect(() => {
-    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current)
-    searchDebounceRef.current = setTimeout(() => setDebouncedSearch(search), 300)
-    return () => { if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current) }
-  }, [search])
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current)
+      searchDebounceRef.current = null
+    }
+    if (search === debouncedSearch) return
+    searchDebounceRef.current = setTimeout(() => {
+      searchDebounceRef.current = null
+      setDebouncedSearch(search)
+    }, 300)
+    return () => {
+      if (searchDebounceRef.current) {
+        clearTimeout(searchDebounceRef.current)
+        searchDebounceRef.current = null
+      }
+    }
+  }, [search, debouncedSearch])
+
+  // Persist committed search to URL (replace: true) while preserving other params
+  useEffect(() => {
+    if (debouncedSearch === lastCommittedSearchRef.current) return
+    lastCommittedSearchRef.current = debouncedSearch
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      if (debouncedSearch) next.set('search', debouncedSearch)
+      else next.delete('search')
+      return next
+    }, { replace: true })
+  }, [debouncedSearch, setSearchParams])
+
+  // Sync external URL `search` changes (preset apply, sidebar navigation, back/forward)
+  // without clobbering in-progress typing when another filter changes mid-debounce
+  useEffect(() => {
+    if (urlSearch === lastCommittedSearchRef.current) return
+    lastCommittedSearchRef.current = urlSearch
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current)
+      searchDebounceRef.current = null
+    }
+    setSearch(urlSearch)
+    setDebouncedSearch(urlSearch)
+  }, [urlSearch])
+
   const { sortKey, sortDir, handleSort } = useTableSort('dash', 'created_at', 'desc', ['created_at'])
   const [page, setPage] = useState(1)
   const [perPage, setPerPage] = useState(20)
-  const [searchParams, setSearchParams] = useSearchParams()
 
   const statusParam = searchParams.getAll('status').sort().join(',')
   const selectedStatuses = useMemo(() => {
@@ -626,12 +667,20 @@ export function DashboardPage() {
         <JobFilterBar
           page="dashboard"
           searchParams={searchParams}
-          onApplyPreset={(filters) =>
+          onApplyPreset={(filters) => {
+            const presetSearch = jobFiltersFromFilters(filters).search
+            if (searchDebounceRef.current) {
+              clearTimeout(searchDebounceRef.current)
+              searchDebounceRef.current = null
+            }
+            lastCommittedSearchRef.current = presetSearch
+            setSearch(presetSearch)
+            setDebouncedSearch(presetSearch)
             setSearchParams(
               (prev) => applyFiltersToParams(prev, filters, FILTER_PRESET_KEYS.dashboard),
               { replace: true },
             )
-          }
+          }}
           search={{ value: search, onChange: setSearch, placeholder: 'Filter jobs...' }}
           submitters={{
             values: submittedBy,
