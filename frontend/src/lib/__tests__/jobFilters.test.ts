@@ -9,6 +9,7 @@ import {
   JOB_FILTER_KEYS,
   TEST_NAME_FILTER_KEYS,
   applyJobFiltersToParams,
+  hasActiveJobFilters,
   jobFiltersFromFilters,
   jobFiltersFromParams,
   jobFiltersToApiQuery,
@@ -227,5 +228,30 @@ describe('normalizeSubmitters', () => {
   it('caps the selection at 50', () => {
     const many = Array.from({ length: 55 }, (_, i) => `user${i}`)
     expect(normalizeSubmitters(many, [])).toHaveLength(50)
+  })
+})
+
+describe('hasActiveJobFilters', () => {
+  it('returns false when no dimension is active or only a parked test_name_mode is set', () => {
+    expect(hasActiveJobFilters(EMPTY_JOB_FILTERS)).toBe(false)
+    expect(hasActiveJobFilters(values({ test_name_mode: 'exact' }))).toBe(false)
+  })
+
+  it.each<[string, Partial<JobFilterValues>]>([
+    ['search', { search: 'kubevirt' }],
+    ['team', { team: ['storage'] }],
+    ['tier', { tier: ['tier1'] }],
+    ['version', { version: ['4.18'] }],
+    ['label', { label: ['nightly'] }],
+    ['exclude_label', { exclude_label: ['flaky'] }],
+    ['status', { status: ['failed'] }],
+    ['review_status', { review_status: 'reviewed' }],
+    ['analysis_state', { analysis_state: 'submitted' }],
+    ['submitted_by', { submitted_by: ['alice'] }],
+    ['date_from', { date_from: '2026-11-01' }],
+    ['date_to', { date_to: '2026-11-10' }],
+    ['test_name', { test_name: 'test_checkout' }],
+  ])('returns true for %s-only filters', (_label, override) => {
+    expect(hasActiveJobFilters(values(override))).toBe(true)
   })
 })

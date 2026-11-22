@@ -256,6 +256,17 @@ export function jobFiltersToFilters(values: JobFilterValues): FilterValues {
   return out
 }
 
+/**
+ * Whether any filter dimension is currently active.
+ *
+ * Shared by the dashboard and reports pages so "Clear filters" appears for
+ * every dimension that narrows the view — including search-only, date-only,
+ * and test-name-only states.
+ */
+export function hasActiveJobFilters(values: JobFilterValues): boolean {
+  return Object.keys(jobFiltersToFilters(values)).length > 0
+}
+
 /** Write typed values into the URL, dropping the legacy date aliases. */
 export function applyJobFiltersToParams(
   params: URLSearchParams,

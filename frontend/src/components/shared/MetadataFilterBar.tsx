@@ -126,13 +126,13 @@ export function MetadataLabelChips({ allLabels, labels, excludeLabels, onLabelTo
 
 // ─── Combined clear-filters button ─────────────────────────────────────────
 
-interface MetadataClearButtonProps {
+interface ClearFiltersButtonProps {
   hasFilters: boolean
   onClearAll: () => void
 }
 
-/** Renders a "Clear filters" button when filters are active. */
-export function MetadataClearButton({ hasFilters, onClearAll }: MetadataClearButtonProps) {
+/** Renders a "Clear filters" button when any filter is active. */
+export function ClearFiltersButton({ hasFilters, onClearAll }: ClearFiltersButtonProps) {
   if (!hasFilters) return null
   return (
     <Button variant="ghost" size="sm" onClick={onClearAll} className="h-7 px-2 text-xs text-text-tertiary hover:text-text-secondary">

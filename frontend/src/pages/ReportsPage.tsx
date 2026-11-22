@@ -28,7 +28,9 @@ import { parseAnalysisState, type AnalysisStateFilter } from '@/lib/analysis-sta
 import { FILTER_PRESET_KEYS } from '@/lib/filterPresets'
 import {
   applyFiltersToParams,
+  DEFAULT_TEST_NAME_MODE,
   EMPTY_JOB_FILTERS,
+  hasActiveJobFilters,
   jobFiltersFromFilters,
   jobFiltersFromParams,
   jobFiltersToApiQuery,
@@ -153,7 +155,7 @@ type ReportsAction =
   | { type: 'SET_SEARCH'; value: string }
   | { type: 'TOGGLE_META'; field: 'teams' | 'tiers' | 'versions'; value: string }
   | { type: 'CLEAR_META'; field: 'teams' | 'tiers' | 'versions' }
-  | { type: 'CLEAR_ALL_META' }
+  | { type: 'CLEAR_ALL_FILTERS' }
   | { type: 'SET_DATE_RANGE'; from: string; to: string }
   | { type: 'TOGGLE_STATUS'; value: string }
   | { type: 'CLEAR_STATUSES' }
@@ -261,8 +263,24 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
       return { ...state, [action.field]: toggleInSet(state[action.field], action.value) }
     case 'CLEAR_META':
       return { ...state, [action.field]: new Set<string>() }
-    case 'CLEAR_ALL_META':
-      return { ...state, teams: new Set(), tiers: new Set(), versions: new Set(), statuses: new Set<string>(), reviewStatus: 'all' as ReviewStatusValue, analysisState: 'all' as AnalysisStateFilter, testName: '', testNameMode: 'contains' as TestNameMode, submitters: [], labels: [], excludeLabels: [] }
+    case 'CLEAR_ALL_FILTERS':
+      return {
+        ...state,
+        search: '',
+        teams: new Set(),
+        tiers: new Set(),
+        versions: new Set(),
+        dateFrom: '',
+        dateTo: '',
+        statuses: new Set<string>(),
+        reviewStatus: 'all' as ReviewStatusValue,
+        analysisState: 'all' as AnalysisStateFilter,
+        testName: '',
+        testNameMode: DEFAULT_TEST_NAME_MODE,
+        submitters: [],
+        labels: [],
+        excludeLabels: [],
+      }
     case 'SET_DATE_RANGE':
       return { ...state, dateFrom: action.from, dateTo: action.to }
     case 'TOGGLE_STATUS':
@@ -726,7 +744,7 @@ export function ReportsPage() {
 
   const fetchSeqRef = useRef(0)
 
-  const hasMetadataFilters = teams.size > 0 || tiers.size > 0 || versions.size > 0 || statuses.size > 0 || reviewStatus !== 'all' || analysisState !== 'all' || submitters.length > 0 || labels.length > 0 || excludeLabels.length > 0 || testName !== ''
+  const hasActiveFilters = useMemo(() => hasActiveJobFilters(jobFilterValues), [jobFilterValues])
 
   // Build query params shared by all endpoints
   const queryString = useMemo(
@@ -840,8 +858,8 @@ export function ReportsPage() {
             onChange: (from, to) => dispatch({ type: 'SET_DATE_RANGE', from, to }),
           }}
           clearAll={{
-            hasFilters: hasMetadataFilters,
-            onClear: () => dispatch({ type: 'CLEAR_ALL_META' }),
+            hasFilters: hasActiveFilters,
+            onClear: () => dispatch({ type: 'CLEAR_ALL_FILTERS' }),
           }}
           testName={{
             name: testName,

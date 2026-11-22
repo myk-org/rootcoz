@@ -225,4 +225,90 @@ describe('ReportsPage filters', () => {
     })
     expect(reportRequests.at(-1)?.get('search')).toBeNull()
   })
+
+  it('shows Clear filters and inline clear for search-only state on reports and clears both', async () => {
+    renderReports('/reports?search=kubevirt')
+    const input = screen.getByPlaceholderText('Filter reports...')
+    expect(input).toHaveValue('kubevirt')
+
+    expect(screen.getByRole('button', { name: 'Clear search' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Clear filters' })).toBeInTheDocument()
+
+    // Inline clear resets search and hides both buttons
+    await userEvent.click(screen.getByRole('button', { name: 'Clear search' }))
+    expect(input).toHaveValue('')
+    await waitFor(() =>
+      expect(screen.getByTestId('location-probe').textContent).toBe('/reports'),
+    )
+    expect(screen.queryByRole('button', { name: 'Clear search' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull()
+
+    // Typing again shows Clear filters; clicking Clear filters resets input and URL
+    await userEvent.type(input, 'storage')
+    expect(screen.getByRole('button', { name: 'Clear filters' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Clear filters' }))
+    expect(input).toHaveValue('')
+    await waitFor(() =>
+      expect(screen.getByTestId('location-probe').textContent).toBe('/reports'),
+    )
+    expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull()
+  })
+
+  it('shows Clear filters for date-only state on reports and clears date range and request', async () => {
+    renderReports('/reports?date_from=2026-11-01&date_to=2026-11-10')
+    await waitFor(() =>
+      expect(reportRequests.at(-1)?.get('date_from')).toBe('2026-11-01'),
+    )
+    expect(reportRequests.at(-1)?.get('date_to')).toBe('2026-11-10')
+
+    const clearAllBtn = screen.getByRole('button', { name: 'Clear filters' })
+    expect(clearAllBtn).toBeInTheDocument()
+
+    await userEvent.click(clearAllBtn)
+
+    await waitFor(() =>
+      expect(screen.getByTestId('location-probe').textContent).toBe('/reports'),
+    )
+    await waitFor(() => {
+      const last = reportRequests.at(-1)
+      expect(last?.get('date_from')).toBeNull()
+      expect(last?.get('date_to')).toBeNull()
+    })
+    expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull()
+  })
+
+  it('clears all filters on reports while preserving the active report tab', async () => {
+    const fallback = apiGet.getMockImplementation()!
+    apiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/reports/classification-overrides')) {
+        reportRequests.push(new URLSearchParams(path.split('?')[1] ?? ''))
+        return Promise.resolve({
+          total: 0,
+          total_reviewed: 0,
+          ai_correct: 0,
+          ai_accuracy_pct: 100,
+          groups: [],
+          details: [],
+        })
+      }
+      return fallback(path)
+    })
+
+    renderReports('/reports?report=classification-overrides&search=virt&date_from=2026-11-01&team=storage&test_name=test_x')
+    await waitFor(() => expect(reportRequests.at(-1)?.get('date_from')).toBe('2026-11-01'))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Clear filters' }))
+
+    expect(screen.getByPlaceholderText('Filter reports...')).toHaveValue('')
+    await waitFor(() =>
+      expect(screen.getByTestId('location-probe').textContent).toBe('/reports?report=classification-overrides'),
+    )
+    await waitFor(() => {
+      const last = reportRequests.at(-1)
+      expect(last?.get('date_from')).toBeNull()
+      expect(last?.get('team')).toBeNull()
+      expect(last?.get('test_name')).toBeNull()
+    })
+    expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull()
+  })
 })

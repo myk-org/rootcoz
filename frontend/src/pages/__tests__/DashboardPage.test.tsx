@@ -706,3 +706,108 @@ describe('DashboardPage search URL contract', () => {
     expect(requests.at(-1)?.getAll('team')).toEqual(['storage'])
   })
 })
+
+describe('DashboardPage clear filters and inline clear (#652)', () => {
+  beforeEach(() => {
+    resetLastAppliedPresetForTests()
+  })
+
+  afterEach(() => {
+    apiGet.mockReset()
+    apiPost.mockReset()
+    apiPut.mockReset()
+  })
+
+  it('shows Clear filters and inline clear for search-only state and clears everything', async () => {
+    mockApi(5)
+    renderPage('/?search=kubevirt')
+    await waitFor(() => expect(requests[0]?.get('search')).toBe('kubevirt'))
+
+    const input = screen.getByPlaceholderText('Filter jobs...')
+    expect(input).toHaveValue('kubevirt')
+    expect(screen.getByRole('button', { name: 'Clear search' })).toBeInTheDocument()
+    const clearAllBtn = screen.getByRole('button', { name: 'Clear filters' })
+    expect(clearAllBtn).toBeInTheDocument()
+
+    // Start typing mid-debounce, then click Clear filters before debounce settles
+    fireEvent.change(input, { target: { value: 'kubevirt-draft' } })
+    await userEvent.click(clearAllBtn)
+
+    expect(input).toHaveValue('')
+    expect(screen.getByTestId('location-probe').textContent).toBe('/')
+    await waitFor(() => expect(requests.at(-1)?.get('search')).toBeNull())
+    expect(screen.queryByRole('button', { name: 'Clear search' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull()
+
+    // Pending debounce timer was cancelled and never restores the cleared search
+    await new Promise((r) => setTimeout(r, 350))
+    expect(input).toHaveValue('')
+    expect(screen.getByTestId('location-probe').textContent).toBe('/')
+    expect(requests.at(-1)?.get('search')).toBeNull()
+  })
+
+  it('clears search immediately via inline clear without disturbing other active filters', async () => {
+    mockApi(5)
+    renderPage('/?search=kubevirt&team=storage')
+    await waitFor(() => expect(requests[0]?.get('search')).toBe('kubevirt'))
+
+    const input = screen.getByPlaceholderText('Filter jobs...')
+    fireEvent.change(input, { target: { value: 'kubevirt-typing' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Clear search' }))
+
+    expect(input).toHaveValue('')
+    expect(screen.queryByRole('button', { name: 'Clear search' })).toBeNull()
+    expect(screen.getByTestId('location-probe').textContent).toBe('/?team=storage')
+    await waitFor(() => {
+      const last = requests.at(-1)
+      expect(last?.get('search')).toBeNull()
+      expect(last?.getAll('team')).toEqual(['storage'])
+    })
+    // Global Clear filters remains visible because team=storage is still active
+    expect(screen.getByRole('button', { name: 'Clear filters' })).toBeInTheDocument()
+
+    await new Promise((r) => setTimeout(r, 350))
+    expect(screen.getByTestId('location-probe').textContent).toBe('/?team=storage')
+  })
+
+  it('shows Clear filters for date-only state (including legacy from/to) and clears dates', async () => {
+    mockApi(5)
+    renderPage('/?from=2026-11-01&to=2026-11-10')
+    await waitFor(() => expect(requests[0]?.get('date_from')).toBe('2026-11-01'))
+    expect(requests[0]?.get('date_to')).toBe('2026-11-10')
+
+    const clearAllBtn = screen.getByRole('button', { name: 'Clear filters' })
+    expect(clearAllBtn).toBeInTheDocument()
+
+    await userEvent.click(clearAllBtn)
+
+    expect(screen.getByTestId('location-probe').textContent).toBe('/')
+    await waitFor(() => {
+      const last = requests.at(-1)
+      expect(last?.get('date_from')).toBeNull()
+      expect(last?.get('date_to')).toBeNull()
+    })
+    expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull()
+  })
+
+  it('clears search, dates, and test name together on Clear filters', async () => {
+    mockApi(5)
+    renderPage('/?search=kube&date_from=2026-11-01&date_to=2026-11-10&test_name=test_login&test_name_mode=exact')
+    await waitFor(() => expect(requests[0]?.get('test_name')).toBe('test_login'))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Clear filters' }))
+
+    expect(screen.getByPlaceholderText('Filter jobs...')).toHaveValue('')
+    expect(screen.getByTestId('location-probe').textContent).toBe('/')
+    await waitFor(() => {
+      const last = requests.at(-1)
+      expect(last?.get('search')).toBeNull()
+      expect(last?.get('date_from')).toBeNull()
+      expect(last?.get('date_to')).toBeNull()
+      expect(last?.get('test_name')).toBeNull()
+      expect(last?.get('test_name_mode')).toBeNull()
+    })
+    expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Clear test name' })).toBeNull()
+  })
+})
