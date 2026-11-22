@@ -16,7 +16,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { OriginJobBanner } from '@/components/shared/ReanalysisBanner'
 import { disambiguateProviderLabels, formatProviderModelLabel } from '@/lib/aiProviders'
-import { useCachedCatalog } from '@/lib/useProviderOptions'
+import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { useAuth } from '@/lib/auth'
 
@@ -296,7 +296,7 @@ export function StatusPage() {
   const displayStatus = isTimeout ? 'timeout' : status
   const queuedAtDisplay = data?.created_at ? formatTimestamp(data.created_at) : null
 
-  const { providerKeys, originalIds: originalProviderIds } = useCachedCatalog()
+  const { providerKeys, originalIds: originalProviderIds } = useProviderCatalog()
   const params = data?.result?.request_params
   const peers = params?.peer_ai_configs
   const providerLabels = useMemo(

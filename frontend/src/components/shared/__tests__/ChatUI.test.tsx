@@ -1154,3 +1154,26 @@ it('uses the same public provider label in picker, active session header, and as
   expect(screen.getByText('Claude / claude-sonnet-4-6')).toBeInTheDocument()
   expect(screen.queryByText(/google-vertex-claude|Mygateway/)).not.toBeInTheDocument()
 })
+
+it('disambiguates a historical google-vertex message when the catalog currently lists google', async () => {
+  setup()
+  const googleOnlyCatalog = {
+    providers: {
+      google: [{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google', credential_sources: ['server'] }],
+    },
+    provider_status: {},
+  }
+  get.mockImplementation((path: string) => Promise.resolve(
+    path.startsWith('/api/ai-models')
+      ? googleOnlyCatalog
+      : {
+          messages: [{ id: 1, job_id: 'job', role: 'assistant', content: 'old reply', username: '', ai_provider: 'google-vertex', ai_model: 'gemini-2.5-pro', status: 'completed', created_at: '2026-01-01T00:00:00Z' }],
+          total: 1,
+          active_session: { ai_provider: 'google', ai_model: 'gemini-2.5-pro', credential_source: 'server' },
+          active_session_version: 'v1',
+        },
+  ))
+  render(page('google', 'gemini-2.5-pro'))
+  expect(await screen.findByText('Gemini (API) / gemini-2.5-pro · Server')).toBeInTheDocument()
+  expect(screen.getByText('Gemini (Vertex) / gemini-2.5-pro')).toBeInTheDocument()
+})

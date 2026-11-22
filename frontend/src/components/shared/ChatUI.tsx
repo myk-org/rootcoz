@@ -175,8 +175,16 @@ export function ChatUI({
   const { canUseServerProviders, canUseFreeProviders, role } = useAuth()
   const { providers, providerStatus, originalIds } = useProviderCatalog()
   const providerLabels = useMemo(
-    () => disambiguateProviderLabels(Object.keys(providers), originalIds),
-    [providers, originalIds],
+    () =>
+      disambiguateProviderLabels(
+        [
+          ...Object.keys(providers),
+          ...(sessionChoice?.provider ? [sessionChoice.provider] : []),
+          ...messages.map((m) => m.ai_provider).filter(Boolean),
+        ],
+        originalIds,
+      ),
+    [providers, sessionChoice?.provider, messages, originalIds],
   )
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)

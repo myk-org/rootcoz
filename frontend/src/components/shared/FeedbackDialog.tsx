@@ -27,7 +27,7 @@ import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { CheckCircle2, ExternalLink } from 'lucide-react'
 import { disambiguateProviderLabels, formatProviderModelLabel } from '@/lib/aiProviders'
-import { useCachedCatalog } from '@/lib/useProviderOptions'
+import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { completeAiPairOverride } from '@/lib/analysisAi'
 import { useAiSelection } from '@/lib/useAiSelection'
 import type {
@@ -52,7 +52,7 @@ export function FeedbackDialog({ open, onOpenChange, capabilities }: FeedbackDia
   const [description, setDescription] = useState('')
   // Empty = server default (resolved server-side). Shared with the other AI surfaces.
   const { aiProvider, aiModel, setAiPair } = useAiSelection()
-  const { providerKeys, originalIds: originalProviderIds } = useCachedCatalog()
+  const { providerKeys, originalIds: originalProviderIds } = useProviderCatalog()
   const providerLabels = useMemo(
     () => disambiguateProviderLabels(providerKeys, originalProviderIds),
     [providerKeys, originalProviderIds],

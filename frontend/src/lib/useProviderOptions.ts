@@ -28,16 +28,8 @@ const SETTLED_EMPTY_CATALOG: CatalogState = { ...EMPTY_CATALOG, settled: true }
 const catalogInflight = new Map<string, Promise<CatalogState>>()
 const catalogCache = new Map<string, CatalogState>()
 let catalogGeneration = 0
-/** Mounted useProviderCatalog consumers — notified on cache reset (triggers refetch). */
+/** Mounted useProviderCatalog consumers — notified on cache reset. */
 const catalogSubscribers = new Set<() => void>()
-/** Passive cache readers — notified on both cache population and reset (never triggers a fetch). */
-const catalogCacheListeners = new Set<() => void>()
-
-function notifyCatalogCacheListeners(): void {
-  for (const notify of [...catalogCacheListeners]) {
-    notify()
-  }
-}
 
 function catalogKeyFor(username: string, isAdmin: boolean, authenticated: boolean): string {
   if (!authenticated || !username) return 'anon'
@@ -75,7 +67,6 @@ function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
       if (generation === catalogGeneration && catalogInflight.get(cacheKey) === req) {
         catalogCache.set(cacheKey, next)
         catalogInflight.delete(cacheKey)
-        notifyCatalogCacheListeners()
       }
       return next
     })
@@ -99,7 +90,6 @@ export function resetProviderCatalogCache(): void {
   for (const notify of [...catalogSubscribers]) {
     notify()
   }
-  notifyCatalogCacheListeners()
 }
 
 /** @deprecated Prefer resetProviderCatalogCache — kept for existing tests. */
@@ -164,34 +154,6 @@ export function useProviderCatalog(): {
   }, [cacheKey, reloadToken])
 
   return state.key === cacheKey ? state.catalog : catalogCache.get(cacheKey) ?? EMPTY_CATALOG
-}
-
-/**
- * Read cached provider keys and exact-case IDs without triggering a fresh
- * /api/ai-models request. Re-renders automatically when any consumer populates
- * or resets the shared catalog cache.
- */
-export function useCachedCatalog(): {
-  providerKeys: string[]
-  originalIds: Record<string, string>
-} {
-  const { username, isAdmin, authenticated } = useAuth()
-  const cacheKey = catalogKeyFor(username, isAdmin, authenticated)
-  const [, setTick] = useState(0)
-
-  useEffect(() => {
-    const notify = () => setTick((n) => n + 1)
-    catalogCacheListeners.add(notify)
-    return () => {
-      catalogCacheListeners.delete(notify)
-    }
-  }, [])
-
-  const cached = catalogCache.get(cacheKey)
-  return {
-    providerKeys: cached?.providerKeys ?? EMPTY_CATALOG.providerKeys,
-    originalIds: cached?.originalIds ?? EMPTY_CATALOG.originalIds,
-  }
 }
 
 /**

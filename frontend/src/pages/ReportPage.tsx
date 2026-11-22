@@ -421,8 +421,16 @@ function ReportContent() {
     [state.aiModels],
   )
   const providerLabels = useMemo(
-    () => disambiguateProviderLabels(Object.keys(state.aiModels), originalProviderIds),
-    [state.aiModels, originalProviderIds],
+    () =>
+      disambiguateProviderLabels(
+        [
+          ...Object.keys(state.aiModels),
+          ...(result?.ai_provider ? [result.ai_provider] : []),
+          ...(result?.request_params?.peer_ai_configs ?? []).map((p) => p.ai_provider).filter(Boolean),
+        ],
+        originalProviderIds,
+      ),
+    [state.aiModels, result, originalProviderIds],
   )
 
   // Expand/collapse all for top-level failure cards
