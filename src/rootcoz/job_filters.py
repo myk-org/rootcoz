@@ -45,14 +45,6 @@ CANONICAL_JOB_FILTER_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Read-only legacy aliases mapped to canonical names.
-LEGACY_FILTER_KEY_ALIASES: dict[str, str] = {
-    "from": "date_from",
-    "to": "date_to",
-    "tags": "label",
-    "exclude_tags": "exclude_label",
-}
-
 # URL query param names each page's presets may carry (validated on save).
 # Legacy date keys stay accepted on reports so presets saved before the unified
 # contract still replay; the UI writes the canonical pair.
@@ -76,7 +68,8 @@ MAX_SUBMITTED_BY_COUNT: int = 50
 # The filtered endpoint caps one submitted_by value at this many characters;
 # storage also drops over-long historical values from the picker.
 MAX_SUBMITTED_BY_LENGTH: int = 64
-MAX_CSV_FILTER_LENGTH: int = 2000
+MAX_FILTER_LIST_TOTAL_LENGTH: int = 2000
+MAX_FILTER_LIST_ITEMS: int = 100
 
 ANALYSIS_STATE_SUBMITTED: Literal["submitted"] = "submitted"
 ANALYSIS_STATE_ANALYZED: Literal["analyzed"] = "analyzed"
@@ -95,31 +88,38 @@ def parse_filter_list(
     values: str | Sequence[str] | None,
     *,
     split_csv: bool = True,
-    max_length: int = MAX_CSV_FILTER_LENGTH,
+    max_length: int = MAX_FILTER_LIST_TOTAL_LENGTH,
+    max_items: int = MAX_FILTER_LIST_ITEMS,
 ) -> tuple[str, ...]:
     """Normalize a repeatable and/or comma-separated filter value into unique strings.
 
     Accepts ``None``, a bare string (optionally CSV), or a sequence of strings
     (each element optionally CSV when *split_csv* is True). Trims whitespace,
-    drops empty entries, and deduplicates while preserving order.
+    drops empty entries, deduplicates while preserving order, and enforces
+    cumulative character and item-count limits so SQL ``IN`` clauses remain bounded.
     """
     if not values:
         return ()
     raw_items: Sequence[str] = (values,) if isinstance(values, str) else values
     collected: list[str] = []
+    total_chars = 0
     for raw in raw_items:
         if not isinstance(raw, str):
             raw = str(raw)
-        if len(raw) > max_length:
+        total_chars += len(raw)
+        if total_chars > max_length:
             raise ValueError(
-                f"Filter value too long ({len(raw)} chars, max {max_length})"
+                f"Filter value too long ({total_chars} chars, max {max_length})"
             )
         parts = raw.split(",") if split_csv else (raw,)
         for part in parts:
             cleaned = part.strip()
             if cleaned:
                 collected.append(cleaned)
-    return tuple(dict.fromkeys(collected))
+    deduped = tuple(dict.fromkeys(collected))
+    if len(deduped) > max_items:
+        raise ValueError(f"Too many filter values ({len(deduped)}, max {max_items})")
+    return deduped
 
 
 def normalize_submitters(values: str | Sequence[str] | None) -> frozenset[str]:
@@ -255,8 +255,8 @@ def parse_job_filters_query(
     exclude_tags: str | Sequence[str] | None = None,
     search: str = "",
     status: str | Sequence[str] | None = None,
-    date_from: str = "",
-    date_to: str = "",
+    date_from: str | None = None,
+    date_to: str | None = None,
     legacy_from: str = "",
     legacy_to: str = "",
     review_status: str = "",
@@ -264,34 +264,49 @@ def parse_job_filters_query(
     submitted_by: str | Sequence[str] | None = None,
     test_name: str = "",
     test_name_mode: str = DEFAULT_TEST_NAME_MODE,
+    split_csv: bool = False,
 ) -> JobFilters:
     """Parse HTTP query parameters into canonical ``JobFilters``.
 
-    Accepts both repeatable lists and CSV strings for list-valued fields
-    (except ``submitted_by``, which is never split on commas), and resolves
-    legacy aliases (``from``/``to``, ``tags``/``exclude_tags``) with canonical
-    names taking precedence whenever both are supplied.
+    *split_csv* controls whether canonical list parameters (``team``, ``tier``,
+    ``version``, ``label``, ``exclude_label``, ``status``) split comma-delimited
+    items (``True`` for Reports CSV compatibility, ``False`` for Dashboard so
+    literal commas in metadata/label names stay intact). Legacy ``tags`` /
+    ``exclude_tags`` aliases always accept CSV. ``submitted_by`` is never split
+    on commas.
+
+    When a canonical parameter is explicitly present (even if empty), it takes
+    precedence over its legacy alias (``from``/``to``, ``tags``/``exclude_tags``).
     """
-    canonical_labels = parse_filter_list(label)
-    legacy_labels = parse_filter_list(tags)
-    canonical_exclude = parse_filter_list(exclude_label)
-    legacy_exclude = parse_filter_list(exclude_tags)
+    resolved_labels = (
+        parse_filter_list(label, split_csv=split_csv)
+        if label is not None
+        else parse_filter_list(tags, split_csv=True)
+    )
+    resolved_exclude = (
+        parse_filter_list(exclude_label, split_csv=split_csv)
+        if exclude_label is not None
+        else parse_filter_list(exclude_tags, split_csv=True)
+    )
+    resolved_date_from = date_from if date_from is not None else legacy_from
+    resolved_date_to = date_to if date_to is not None else legacy_to
 
     return JobFilters.from_values(
         team=team,
         tier=tier,
         version=version,
-        labels=canonical_labels or legacy_labels,
-        exclude_labels=canonical_exclude or legacy_exclude,
+        labels=resolved_labels,
+        exclude_labels=resolved_exclude,
         search=search,
         status=status,
-        date_from=date_from or legacy_from,
-        date_to=date_to or legacy_to,
+        date_from=resolved_date_from,
+        date_to=resolved_date_to,
         review_status=review_status,
         analysis_state=analysis_state,
         submitters=submitted_by,
         test_name=test_name,
         test_name_mode=test_name_mode,
+        split_csv=split_csv,
     )
 
 
@@ -323,51 +338,6 @@ def validate_filter_preset_filters(page: str, filters: Mapping[str, Any]) -> Non
     if submitters is not None:
         values = [submitters] if isinstance(submitters, str) else list(submitters)
         normalize_submitters([str(value) for value in values])
-
-
-def parse_filter_preset(page: str, filters: Mapping[str, Any]) -> JobFilters:
-    """Validate a preset filter map and normalize it into ``JobFilters``."""
-    validate_filter_preset_filters(page, filters)
-    raw_review = filters.get("review_status", "")
-    if isinstance(raw_review, list):
-        raw_review = raw_review[0] if raw_review else ""
-    # Legacy presets created before #546 occasionally stored "unreviewed".
-    if raw_review == "unreviewed":
-        raw_review = "not_reviewed"
-    raw_analysis = filters.get("analysis_state", "")
-    if isinstance(raw_analysis, list):
-        raw_analysis = raw_analysis[0] if raw_analysis else ""
-    raw_test_name = filters.get("test_name", "")
-    if isinstance(raw_test_name, list):
-        raw_test_name = raw_test_name[0] if raw_test_name else ""
-    raw_mode = filters.get("test_name_mode", DEFAULT_TEST_NAME_MODE)
-    if isinstance(raw_mode, list):
-        raw_mode = raw_mode[0] if raw_mode else DEFAULT_TEST_NAME_MODE
-
-    def _scalar(key: str) -> str:
-        val = filters.get(key, "")
-        if isinstance(val, list):
-            return str(val[0]) if val else ""
-        return str(val) if val is not None else ""
-
-    return parse_job_filters_query(
-        team=filters.get("team"),
-        tier=filters.get("tier"),
-        version=filters.get("version"),
-        label=filters.get("label"),
-        exclude_label=filters.get("exclude_label"),
-        search=_scalar("search"),
-        status=filters.get("status"),
-        date_from=_scalar("date_from"),
-        date_to=_scalar("date_to"),
-        legacy_from=_scalar("from"),
-        legacy_to=_scalar("to"),
-        review_status=str(raw_review or ""),
-        analysis_state=str(raw_analysis or ""),
-        submitted_by=filters.get("submitted_by"),
-        test_name=str(raw_test_name or ""),
-        test_name_mode=str(raw_mode or DEFAULT_TEST_NAME_MODE),
-    )
 
 
 # ─── Shared SQL predicate compilation ───────────────────────────────────────

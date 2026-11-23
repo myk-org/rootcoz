@@ -58,11 +58,21 @@ class TestFilterParsingAndAliases:
             "gamma",
         )
 
-    def test_parse_filter_list_rejects_oversized_entry(self) -> None:
+    def test_parse_filter_list_rejects_oversized_or_too_many_entries(self) -> None:
         with pytest.raises(ValueError, match="Filter value too long"):
-            job_filters.parse_filter_list("x" * (job_filters.MAX_CSV_FILTER_LENGTH + 1))
+            job_filters.parse_filter_list(
+                "x" * (job_filters.MAX_FILTER_LIST_TOTAL_LENGTH + 1)
+            )
+        # Cumulative length across repeated parameters is also bounded
+        with pytest.raises(ValueError, match="Filter value too long"):
+            job_filters.parse_filter_list(["x" * 1001, "y" * 1000])
+        # Item count across repeated parameters is bounded
+        with pytest.raises(ValueError, match="Too many filter values"):
+            job_filters.parse_filter_list(
+                [f"v{i}" for i in range(job_filters.MAX_FILTER_LIST_ITEMS + 1)]
+            )
 
-    def test_query_parser_normalizes_legacy_aliases_canonical_wins(self) -> None:
+    def test_query_parser_normalizes_legacy_aliases_and_preserves_commas(self) -> None:
         # Legacy aliases work when canonical keys are omitted
         legacy = job_filters.parse_job_filters_query(
             team="storage,core",
@@ -72,6 +82,7 @@ class TestFilterParsingAndAliases:
             legacy_to="2025-12-31",
             review_status="all",
             analysis_state="all",
+            split_csv=True,
         )
         assert legacy.team == ("storage", "core")
         assert legacy.labels == ("aws", "bare-metal")
@@ -80,6 +91,15 @@ class TestFilterParsingAndAliases:
         assert legacy.date_to == "2025-12-31"
         assert legacy.review_status == ""
         assert legacy.analysis_state == ""
+
+        # Dashboard mode (split_csv=False) preserves literal commas in labels/teams
+        comma_bearing = job_filters.parse_job_filters_query(
+            team=["platform,core"],
+            label=["platform,aws"],
+            split_csv=False,
+        )
+        assert comma_bearing.team == ("platform,core",)
+        assert comma_bearing.labels == ("platform,aws",)
 
         # Canonical keys take precedence when both canonical and legacy are supplied
         both = job_filters.parse_job_filters_query(
@@ -91,11 +111,29 @@ class TestFilterParsingAndAliases:
             legacy_from="2025-01-01",
             date_to="2026-06-01",
             legacy_to="2025-12-31",
+            split_csv=True,
         )
         assert both.labels == ("io2-csi",)
         assert both.exclude_labels == ("smoke",)
         assert both.date_from == "2026-01-01"
         assert both.date_to == "2026-06-01"
+
+        # Explicitly empty canonical params do NOT revive legacy aliases
+        cleared = job_filters.parse_job_filters_query(
+            label=[""],
+            tags=["aws"],
+            exclude_label=[""],
+            exclude_tags=["nightly"],
+            date_from="",
+            legacy_from="2025-01-01",
+            date_to="",
+            legacy_to="2025-12-31",
+            split_csv=True,
+        )
+        assert cleared.labels == ()
+        assert cleared.exclude_labels == ()
+        assert cleared.date_from == ""
+        assert cleared.date_to == ""
 
     def test_submitted_by_preserves_commas_and_enforces_caps(self) -> None:
         # Usernames may contain commas — never split on commas
@@ -150,23 +188,6 @@ class TestFilterPresetValidationAndParsing:
             job_filters.validate_filter_preset_filters(
                 "dashboard", {"submitted_by": ["x" * 65]}
             )
-
-    def test_parse_filter_preset_normalizes_legacy_keys(self) -> None:
-        parsed = job_filters.parse_filter_preset(
-            "reports",
-            {
-                "team": ["storage"],
-                "from": "2026-01-01",
-                "to": "2026-01-31",
-                "review_status": "unreviewed",
-                "submitted_by": ["alice"],
-            },
-        )
-        assert parsed.team == ("storage",)
-        assert parsed.date_from == "2026-01-01"
-        assert parsed.date_to == "2026-01-31"
-        assert parsed.review_status == "not_reviewed"
-        assert parsed.submitters == frozenset({"alice"})
 
 
 # ─── Unit tests: shared SQL predicate compilation ───────────────────────────
@@ -495,16 +516,17 @@ class TestDashboardAndReportsParity:
                 ("review_status", "all"),
             ],
         )
-        # Legacy CSV + from/to + tags shape
+        # Legacy tags + from/to shape with repeatable team
         legacy = seeded_client.get(
             "/api/dashboard/filtered",
-            params={
-                "team": "mtv,cnv",
-                "tags": "aws,bare-metal,ocs-rbd",
-                "from": "2026-03-10",
-                "to": "2026-03-15",
-                "review_status": "",
-            },
+            params=[
+                ("team", "mtv"),
+                ("team", "cnv"),
+                ("tags", "aws,bare-metal,ocs-rbd"),
+                ("from", "2026-03-10"),
+                ("to", "2026-03-15"),
+                ("review_status", ""),
+            ],
         )
         assert canonical.status_code == 200, canonical.text
         assert legacy.status_code == 200, legacy.text
@@ -513,6 +535,44 @@ class TestDashboardAndReportsParity:
             "job-bm-ocs",
         }
         assert canonical.json() == legacy.json()
+
+    def test_dashboard_preserves_comma_bearing_labels_and_rejects_oversized_lists(
+        self, seeded_client: TestClient, temp_db_path: Path
+    ) -> None:
+        async def _seed_comma() -> None:
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                await storage.save_result(
+                    "job-comma",
+                    "https://jenkins.example.com/job/comma-job/1/",
+                    "completed",
+                    {"job_name": "comma-job", "build_number": 1, "failures": []},
+                )
+                await storage.set_job_metadata(
+                    "comma-job", team="team,one", labels=["platform,aws"]
+                )
+
+        asyncio.run(_seed_comma())
+        resp = seeded_client.get(
+            "/api/dashboard/filtered",
+            params={"team": "team,one", "label": "platform,aws"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert [j["job_id"] for j in resp.json()["jobs"]] == ["job-comma"]
+
+        # Empty canonical param overrides legacy alias (does not revive legacy tags)
+        cleared = seeded_client.get(
+            "/api/dashboard/filtered",
+            params=[("label", ""), ("tags", "aws")],
+        )
+        assert cleared.status_code == 200, cleared.text
+        assert len(cleared.json()["jobs"]) == 4
+
+        # Too many repeated filter params are rejected with 400
+        too_many = seeded_client.get(
+            "/api/reports/totals",
+            params=[("team", f"t{i}") for i in range(101)],
+        )
+        assert too_many.status_code == 400, too_many.text
 
     def test_dashboard_same_day_date_matches_sqlite_timestamp(
         self, seeded_client: TestClient

@@ -19493,9 +19493,6 @@ async def delete_user_ai_credential(provider: str, request: Request) -> JSONResp
 
 # --- Filter presets (#179) ---
 
-# Canonical per-page filter allowlist lives in rootcoz.job_filters.
-_FILTER_PRESET_KEYS = job_filters.FILTER_PRESET_KEYS
-
 
 def _validate_filter_preset_filters(page: str, filters: dict[str, Any]) -> None:
     """Reject unknown or invalid filter preset values for the page with 422."""
@@ -24898,10 +24895,10 @@ async def list_jobs_metadata(
 ) -> list[dict[str, Any]]:
     """List all job metadata, optionally filtered by team, tier, version, or labels."""
     try:
-        team_list = list(job_filters.parse_filter_list(team))
-        tier_list = list(job_filters.parse_filter_list(tier))
-        version_list = list(job_filters.parse_filter_list(version))
-        label_list = list(job_filters.parse_filter_list(label))
+        team_list = list(job_filters.parse_filter_list(team, split_csv=False))
+        tier_list = list(job_filters.parse_filter_list(tier, split_csv=False))
+        version_list = list(job_filters.parse_filter_list(version, split_csv=False))
+        label_list = list(job_filters.parse_filter_list(label, split_csv=False))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     logger.debug(
@@ -25114,93 +25111,97 @@ async def preview_metadata_rules(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _parse_job_filters_query(
-    team: Annotated[
-        list[str] | None, Query(description="Filter by team (repeatable or CSV)")
-    ] = None,
-    tier: Annotated[
-        list[str] | None, Query(description="Filter by tier (repeatable or CSV)")
-    ] = None,
-    version: Annotated[
-        list[str] | None, Query(description="Filter by version (repeatable or CSV)")
-    ] = None,
-    label: Annotated[
-        list[str] | None,
-        Query(description="Include jobs with labels (repeatable or CSV)"),
-    ] = None,
-    exclude_label: Annotated[
-        list[str] | None,
-        Query(description="Exclude jobs with labels (repeatable or CSV)"),
-    ] = None,
-    search: Annotated[str, Query(description="Search job name or ID")] = "",
-    status: Annotated[
-        list[str] | None, Query(description="Filter by status (repeatable or CSV)")
-    ] = None,
-    date_from: Annotated[str, Query(description="Start date (ISO)")] = "",
-    date_to: Annotated[str, Query(description="End date (ISO)")] = "",
-    review_status: Annotated[
-        str, Query(description="Filter: all, reviewed, not_reviewed (empty = all)")
-    ] = "",
-    analysis_state: Annotated[
-        str, Query(description="Filter: submitted, analyzed (empty = all)")
-    ] = "",
-    submitted_by: Annotated[
-        list[str] | None,
-        Query(description="Filter by submitter (repeatable, substring match)"),
-    ] = None,
-    test_name: Annotated[
-        str,
-        Query(
-            max_length=job_filters.MAX_TEST_NAME_LENGTH,
-            description="Keep only jobs with a failing test whose name matches this text.",
-        ),
-    ] = "",
-    test_name_mode: Annotated[
-        str,
-        Query(description="One of: " + ", ".join(job_filters.TEST_NAME_MODES)),
-    ] = job_filters.DEFAULT_TEST_NAME_MODE,
-    # Legacy read aliases — accepted on both dashboard and reports for backwards compatibility.
-    legacy_from: Annotated[str, Query(alias="from", include_in_schema=False)] = "",
-    legacy_to: Annotated[str, Query(alias="to", include_in_schema=False)] = "",
-    legacy_tags: Annotated[
-        list[str] | None, Query(alias="tags", include_in_schema=False)
-    ] = None,
-    legacy_exclude_tags: Annotated[
-        list[str] | None, Query(alias="exclude_tags", include_in_schema=False)
-    ] = None,
-) -> job_filters.JobFilters:
-    """Canonical FastAPI dependency parsing job filters for dashboard & reports.
+def _make_job_filters_dep(*, split_csv: bool) -> Any:
+    """Build a FastAPI Depends wrapper around ``job_filters.parse_job_filters_query``.
 
-    DB-free on purpose: FastAPI resolves this before route guards such as
-    ``_require_can_view_reports`` run, so it must never touch storage.
+    Dashboard passes ``split_csv=False`` so literal commas in repeated metadata
+    and label values are preserved intact; Reports passes ``split_csv=True`` for
+    backwards-compatible CSV query strings while also accepting repeatable params.
+    DB-free on purpose: FastAPI resolves this before route guards run.
     """
-    try:
-        return job_filters.parse_job_filters_query(
-            team=team,
-            tier=tier,
-            version=version,
-            label=label,
-            exclude_label=exclude_label,
-            tags=legacy_tags,
-            exclude_tags=legacy_exclude_tags,
-            search=search,
-            status=status,
-            date_from=date_from,
-            date_to=date_to,
-            legacy_from=legacy_from,
-            legacy_to=legacy_to,
-            review_status=review_status,
-            analysis_state=analysis_state,
-            submitted_by=submitted_by,
-            test_name=test_name,
-            test_name_mode=test_name_mode,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def _parse(
+        team: Annotated[list[str] | None, Query(description="Filter by team")] = None,
+        tier: Annotated[list[str] | None, Query(description="Filter by tier")] = None,
+        version: Annotated[
+            list[str] | None, Query(description="Filter by version")
+        ] = None,
+        label: Annotated[
+            list[str] | None,
+            Query(description="Include jobs with labels"),
+        ] = None,
+        exclude_label: Annotated[
+            list[str] | None,
+            Query(description="Exclude jobs with labels"),
+        ] = None,
+        search: Annotated[str, Query(description="Search job name or ID")] = "",
+        status: Annotated[
+            list[str] | None, Query(description="Filter by status")
+        ] = None,
+        date_from: Annotated[str | None, Query(description="Start date (ISO)")] = None,
+        date_to: Annotated[str | None, Query(description="End date (ISO)")] = None,
+        review_status: Annotated[
+            str, Query(description="Filter: all, reviewed, not_reviewed (empty = all)")
+        ] = "",
+        analysis_state: Annotated[
+            str, Query(description="Filter: submitted, analyzed (empty = all)")
+        ] = "",
+        submitted_by: Annotated[
+            list[str] | None,
+            Query(description="Filter by submitter (repeatable, substring match)"),
+        ] = None,
+        test_name: Annotated[
+            str,
+            Query(
+                max_length=job_filters.MAX_TEST_NAME_LENGTH,
+                description="Keep only jobs with a failing test whose name matches this text.",
+            ),
+        ] = "",
+        test_name_mode: Annotated[
+            str,
+            Query(description="One of: " + ", ".join(job_filters.TEST_NAME_MODES)),
+        ] = job_filters.DEFAULT_TEST_NAME_MODE,
+        # Legacy read aliases — accepted on both dashboard and reports for backwards compatibility.
+        legacy_from: Annotated[str, Query(alias="from", include_in_schema=False)] = "",
+        legacy_to: Annotated[str, Query(alias="to", include_in_schema=False)] = "",
+        legacy_tags: Annotated[
+            list[str] | None, Query(alias="tags", include_in_schema=False)
+        ] = None,
+        legacy_exclude_tags: Annotated[
+            list[str] | None, Query(alias="exclude_tags", include_in_schema=False)
+        ] = None,
+    ) -> job_filters.JobFilters:
+        try:
+            return job_filters.parse_job_filters_query(
+                team=team,
+                tier=tier,
+                version=version,
+                label=label,
+                exclude_label=exclude_label,
+                tags=legacy_tags,
+                exclude_tags=legacy_exclude_tags,
+                search=search,
+                status=status,
+                date_from=date_from,
+                date_to=date_to,
+                legacy_from=legacy_from,
+                legacy_to=legacy_to,
+                review_status=review_status,
+                analysis_state=analysis_state,
+                submitted_by=submitted_by,
+                test_name=test_name,
+                test_name_mode=test_name_mode,
+                split_csv=split_csv,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return Depends(_parse)
 
 
-# Module-level singleton matching the house Depends pattern (see _SETTINGS_DEP).
-_JOB_FILTERS_DEP = Depends(_parse_job_filters_query)
+# Module-level singletons matching the house Depends pattern (see _SETTINGS_DEP).
+_DASHBOARD_FILTERS_DEP = _make_job_filters_dep(split_csv=False)
+_REPORTS_FILTERS_DEP = _make_job_filters_dep(split_csv=True)
 
 
 def _log_job_filters(endpoint: str, filters: job_filters.JobFilters) -> None:
@@ -25229,7 +25230,7 @@ def _log_job_filters(endpoint: str, filters: job_filters.JobFilters) -> None:
 
 @app.get("/api/dashboard/filtered", operation_id="apiDashboardFiltered")
 async def api_dashboard_filtered(
-    filters: job_filters.JobFilters = _JOB_FILTERS_DEP,
+    filters: job_filters.JobFilters = _DASHBOARD_FILTERS_DEP,
     limit: int = Query(default=500, ge=0, description="Max results (0 = no limit)"),
     offset: int = Query(default=0, ge=0, description="Rows to skip"),
 ) -> dict[str, Any]:
@@ -25294,7 +25295,7 @@ async def list_dashboard_test_names(
 @app.get("/api/reports/totals", operation_id="reportsTotals")
 async def reports_totals(
     request: Request,
-    filters: job_filters.JobFilters = _JOB_FILTERS_DEP,
+    filters: job_filters.JobFilters = _REPORTS_FILTERS_DEP,
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -25317,7 +25318,7 @@ async def reports_totals(
 )
 async def reports_classification_overrides(
     request: Request,
-    filters: job_filters.JobFilters = _JOB_FILTERS_DEP,
+    filters: job_filters.JobFilters = _REPORTS_FILTERS_DEP,
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -25337,7 +25338,7 @@ async def reports_classification_overrides(
 @app.get("/api/reports/issues-created", operation_id="reportsIssuesCreated")
 async def reports_issues_created(
     request: Request,
-    filters: job_filters.JobFilters = _JOB_FILTERS_DEP,
+    filters: job_filters.JobFilters = _REPORTS_FILTERS_DEP,
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
