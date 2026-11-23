@@ -1,6 +1,7 @@
 import { AnalysisStateFilterControl } from '@/components/shared/AnalysisStateFilter'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { FilterPresetsMenu } from '@/components/shared/FilterPresetsMenu'
+import { FacetDropdowns } from '@/components/shared/FacetDropdowns'
 import { ClearFiltersButton, MetadataDropdowns } from '@/components/shared/MetadataFilterBar'
 import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
 import { ReviewStatusFilter } from '@/components/shared/ReviewStatusFilter'
@@ -12,6 +13,7 @@ import type { AnalysisStateFilter } from '@/lib/analysis-state'
 import type { FilterPresetPage } from '@/lib/filterPresets'
 import type { FilterValues, TestNameMode } from '@/lib/jobFilters'
 import type { ReviewStatusFilter as ReviewStatusValue } from '@/lib/review-status'
+import type { FilterFacet } from '@/types'
 
 const STATUS_OPTIONS = ['completed', 'running', 'waiting', 'pending', 'failed', 'timeout', 'aborted'] as const
 
@@ -46,7 +48,13 @@ export interface JobFilterBarProps {
   dateRange: { from: string; to: string; onChange: (from: string, to: string) => void }
   /** Clearing every filter the bar holds; the button says nothing when there are none. */
   clearAll: { hasFilters: boolean; onClear: () => void }
-  /** Dashboard only: filtering *jobs* by the name of a failing test (#546 B). */
+  /** Admin-defined tag facets over existing labels (#658), shared by both pages. */
+  facets?: {
+    items: FilterFacet[]
+    selectedLabels: string[]
+    onLabelsChange: (nextLabels: string[]) => void
+  }
+  /** Filtering *jobs* by the name of a failing test (#546 B). */
   testName?: { name: string; mode: TestNameMode; onChange: (name: string, mode: TestNameMode) => void }
 }
 
@@ -70,6 +78,7 @@ export function JobFilterBar({
   analysisState,
   dateRange,
   clearAll,
+  facets,
   testName,
 }: JobFilterBarProps) {
   return (
@@ -95,6 +104,13 @@ export function JobFilterBar({
         className="w-full sm:w-48"
       />
       <MetadataDropdowns {...metadata} />
+      {facets && (
+        <FacetDropdowns
+          facets={facets.items}
+          selectedLabels={facets.selectedLabels}
+          onLabelsChange={facets.onLabelsChange}
+        />
+      )}
       <MultiSelectFilter
         label="All statuses"
         options={[...STATUS_OPTIONS]}

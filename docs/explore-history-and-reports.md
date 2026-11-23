@@ -33,7 +33,7 @@ Open `History`, use the search box to narrow the table by test name, then add a 
 Start with `Failure Rate`, `Total Runs`, `Failures`, and `Consecutive` to understand whether the test is stable, degrading, or repeatedly broken. Then read the classification badges, comments, `First seen`, and `Last seen`, and open any row in `Recent Runs` to jump back to a specific result.
 
 4. Move to `Reports` for broader trends.
-Choose `Total Failures` when you want summary counts, `Classification Overrides` when you want review changes, or `Issues Created` when you want follow-up visibility. Use the filters across the top — `All teams`, `All tiers`, `All versions`, `All statuses`, `Review:`, the date range picker, and the `Tags:` include/exclude chips — to narrow the slice.
+Choose `Total Failures` when you want summary counts, `Classification Overrides` when you want review changes, or `Issues Created` when you want follow-up visibility. Use the filters across the top — `All teams`, `All tiers`, `All versions`, any admin-defined tag facet dropdowns (with live per-option match counts; OR within a facet, AND across facets), `All statuses`, `Review:`, the date range picker, and the `Tags:` include/exclude chips — to narrow the slice.
 
 > **Note:** If you leave the status filter empty, report summaries start with completed jobs only.
 

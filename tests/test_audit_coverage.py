@@ -497,6 +497,10 @@ def test_exemptions_are_not_stale() -> None:
         # Both directions of the review toggle (#566).
         "review.marked",
         "review.delete",
+        # Admin-defined tag facets (#658).
+        "tag_facet.create",
+        "tag_facet.update",
+        "tag_facet.delete",
     ],
 )
 def test_contract_action_is_implemented(action: str) -> None:

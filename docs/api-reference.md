@@ -329,6 +329,11 @@ Date bounds use the `date_from` and `date_to` query names. The legacy `from` and
 | PUT | `/api/jobs/metadata/bulk` | admin |
 | GET | `/api/jobs/metadata/rules` | viewer |
 | POST | `/api/jobs/metadata/rules/preview` | viewer |
+| GET | `/api/filters/facets` | viewer |
+
+`GET /api/filters/facets` returns admin-defined tag facets (`tag_facets` Server Setting) enriched with per-option match counts (`count`, distinct analysis runs matching any tag in the option) and `missing_tags` (tags no longer present in `job_metadata_labels`).
+
+On both `/api/dashboard/filtered` (`label=...`) and `/api/reports/*` (`tags=...`), requested tags belonging to the same configured facet combine with **OR**, while selections across different facets and non-facet tags combine with **AND**.
 
 ### Notifications and AI discovery
 

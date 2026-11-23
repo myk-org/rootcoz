@@ -247,6 +247,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     | `POLL_INTERVAL_MINUTES` | `2` | integer > 0 | no | no | yes |
     | `MAX_WAIT_MINUTES` | `0` | integer ≥ 0 | no | no | yes |
     | `METADATA_RULES_FILE` | empty | string | no | **yes** | yes (restart) |
+    | `TAG_FACETS` | `[]` | JSON array | no | no | yes |
     | `LOG_LEVEL` | empty (`INFO`) | string | no | **yes** | yes (restart) |
     | `LOG_MAX_BYTES` | `0` (derive) | integer ≥ 0 | no | no | yes |
     | `LOG_BACKUP_COUNT` | `0` (derive) | integer ≥ 0 | no | no | yes |
@@ -266,6 +267,8 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     `CHAT_CLONE_DEPTH` is the number of commits cloned per repository when a chat workspace is prepared, for the tests repository and every additional repository alike. **1 is the default on purpose:** the chat AI reads the working tree — `read`, `ls`, `find`, `grep`, the code graph — and never git history, so extra commits are transferred and stored once per repository and paid again on every re-clone, while nothing reads them. Raise it only if a chat session genuinely needs `git log` or `git show` from the agent's shell; a value of 50 on a 17-repository job is tens of times the clone cost for history nothing opens. The CLI takes the same value: `rootcoz admin settings set chat_clone_depth 1`, with `rootcoz admin settings history --key chat_clone_depth` for the audit trail of who changed it.
 
     `METADATA_RULES_FILE` points at a YAML or JSON file of name-based metadata rules. Rules load once and cache for the process lifetime, so edits need a restart. A broken rules file logs a warning and yields no rules rather than failing the server.
+
+    `TAG_FACETS` defines admin-configured filter facets over existing job metadata tags (JSON array of `{id, name, options: [{label, tags}]}`). Applies at runtime without restart. Startup tolerates an env default on an empty database without failing; saves via the API or CLI validate limits and verify every referenced tag exists in `job_metadata_labels`.
 
     `REPO_CLONE_TIMEOUT_SECONDS` is the wall-clock ceiling, in seconds, for **one** repository clone — the whole ladder (a by-id fetch or a full clone, the SSL retry, the checkout) shares it, so it cannot multiply into an hour per repository. When the deadline passes the clone is killed and fails with the reason `Clone timed out`, and the job continues without that repository. 900 s is deliberately generous: the issue that introduced this setting measured a single branch fetch taking over 300 s on a large repository, so a hard-coded ceiling would sit within a factor of two of real traffic and give an operator a failure they could not raise.
 
@@ -450,6 +453,7 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `POLL_INTERVAL_MINUTES` | `poll_interval_minutes` | Server | runtime |
 | `MAX_WAIT_MINUTES` | `max_wait_minutes` | Server | runtime |
 | `METADATA_RULES_FILE` | `metadata_rules_file` | Server | restart |
+| `TAG_FACETS` | `tag_facets` | Analysis | live |
 | `LOG_LEVEL` | `log_level` | Server | restart |
 | `LOG_MAX_BYTES` | `log_max_bytes` | Server | runtime |
 | `LOG_BACKUP_COUNT` | `log_backup_count` | Server | runtime |

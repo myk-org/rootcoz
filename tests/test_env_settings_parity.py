@@ -1501,6 +1501,7 @@ _EXPECTED_CATEGORIES: dict[str, set[str]] = {
         "enable_auto_review",
         "max_concurrent_analyses",
         "metadata_rules_file",
+        "tag_facets",
         # The only setting both sources read (Jenkins and Prow).
         "get_job_artifacts",
     },
@@ -1660,7 +1661,7 @@ def test_settings_categories_match_the_agreed_tabs():
     placed = [key for fields in _EXPECTED_CATEGORIES.values() for key in fields]
     assert len(placed) == len(set(placed)), "a setting sits in two tabs"
     assert set(placed) == set(Settings.model_fields)
-    assert len(placed) == 120
+    assert len(placed) == 121
 
 
 def test_every_setting_has_a_description():

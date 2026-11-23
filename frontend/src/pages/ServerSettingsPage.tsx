@@ -58,7 +58,9 @@ import { isAnalysisAiAvailable, analysisAiUnavailablePart, type AnalysisAiUnavai
 import { ServerProvidersCard } from '@/components/shared/ServerProvidersCard'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
-import type { AiModelsResponse, ServerStatusDisk } from '@/types'
+import { TagFacetsEditor } from '@/components/shared/TagFacetsEditor'
+import { parseTagFacetsJson, serializeTagFacets } from '@/lib/tagFacets'
+import type { AiModelsResponse, ServerStatusDisk, TagFacet } from '@/types'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -738,14 +740,21 @@ export function ServerSettingsPage() {
   const modelListingProvider = aiProviderKeys.includes(normalizeProvider(effectiveAiProvider)) ? effectiveAiProvider : ''
   const { models: aiModels, refresh: refreshModels, refreshing: refreshingModels } = useProviderModels(modelListingProvider)
 
-  // Additional repos structured editor — same draft contract as the peers.
+  // Additional repos & tag facets structured editors — same draft contract as peers.
   const [reposDraft, setReposDraft] = useState<RepoWithId[] | null>(null)
+  const [tagFacetsDraft, setTagFacetsDraft] = useState<TagFacet[] | null>(null)
 
   const settingValue = (key: string) => state.settings.find(s => s.key === key)?.value ?? ''
   const savedPeerRows = parsePeerConfigString(settingValue('peer_ai_configs'))
   const savedRepoRows = parseAdditionalReposString(settingValue('additional_repos'))
+  const savedTagFacets = useMemo(
+    () => parseTagFacetsJson(settingValue('tag_facets')),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.settings],
+  )
   const peers = peerDraft ?? savedPeerRows
   const repos = reposDraft ?? savedRepoRows
+  const tagFacets = tagFacetsDraft ?? savedTagFacets
   // Save/Cancel exist exactly while a draft can be saved: any change to the
   // rows. Comparing the serialised rows keeps a revert-to-stored draft clean;
   // comparing lengths keeps an added-but-still-empty row dirty, because it can
@@ -757,6 +766,10 @@ export function ServerSettingsPage() {
   const reposDirty = reposDraft !== null && (
     reposDraft.length !== savedRepoRows.length ||
     serializeAdditionalRepos(reposDraft) !== serializeAdditionalRepos(savedRepoRows)
+  )
+  const tagFacetsDirty = tagFacetsDraft !== null && (
+    tagFacetsDraft.length !== savedTagFacets.length ||
+    serializeTagFacets(tagFacetsDraft) !== serializeTagFacets(savedTagFacets)
   )
   const setRepos = (action: React.SetStateAction<RepoWithId[]>) =>
     setReposDraft(prev => (typeof action === 'function' ? action(prev ?? savedRepoRows) : action))
@@ -941,6 +954,7 @@ export function ServerSettingsPage() {
       if (key === 'active_server_providers') setServerProvidersDraft(null)
       if (key === 'peer_ai_configs') clearPeerDraft()
       if (key === 'additional_repos') setReposDraft(null)
+      if (key === 'tag_facets') setTagFacetsDraft(null)
     } catch {
       // silently fail – data will refetch anyway
     } finally {
@@ -1040,6 +1054,7 @@ export function ServerSettingsPage() {
       dispatch({ type: 'CANCEL_EDIT', keys: importedKeys })
       if (importedKeys.includes('peer_ai_configs')) clearPeerDraft()
       if (importedKeys.includes('additional_repos')) setReposDraft(null)
+      if (importedKeys.includes('tag_facets')) setTagFacetsDraft(null)
       // Revealed values are pre-import plaintext — clear them so the fresh
       // (masked) values show and editors never pre-fill a stale secret.
       dispatch({ type: 'CLEAR_REVEALED', keys: importedKeys })
@@ -1122,6 +1137,13 @@ export function ServerSettingsPage() {
     const reposStr = serializeAdditionalRepos(repos)
     const error = await saveSettingValue('additional_repos', reposStr)
     if (!error) setReposDraft(null)
+  }
+
+  // ---- Tag facets structured editor (#658) ----
+  async function handleSaveTagFacets() {
+    const payload = serializeTagFacets(tagFacets)
+    const error = await saveSettingValue('tag_facets', payload)
+    if (!error) setTagFacetsDraft(null)
   }
 
   // ---- Active server providers editor ----
@@ -1674,6 +1696,50 @@ export function ServerSettingsPage() {
                       {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
                     </Button>
                     <Button size="sm" variant="outline" onClick={() => setReposDraft(null)} className="h-7 text-xs">Cancel</Button>
+                  </>
+                )}
+                {setting.source === 'db' && (
+                  <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                    <RotateCcw className="mr-1 h-3 w-3" /> Reset
+                  </Button>
+                )}
+              </div>
+            )}
+            {setting.source === 'db' && setting.updated_by && (
+              <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
+            )}
+            {setting.source === 'db' && (
+              <HistoryToggle
+                settingKey={setting.key}
+                sensitive={setting.sensitive}
+                historyKey={state.historyKey}
+                history={state.history}
+                historyLoading={state.historyLoading}
+                onShowHistory={() => handleShowHistory(setting.key)}
+              />
+            )}
+          </div>
+        )
+      }
+
+      // ---- TAG_FACETS: structured inline editor (#658) ----
+      if (setting.key === 'tag_facets') {
+        return (
+          <div key={setting.key} className="py-3 space-y-2">
+            <SettingRowHeader setting={setting} saveToDbNode={saveToDbNode(setting)} />
+            <TagFacetsEditor
+              facets={tagFacets}
+              onChange={setTagFacetsDraft}
+              disabled={state.saving}
+            />
+            {(tagFacetsDirty || setting.source === 'db') && (
+              <div className="flex items-center gap-2 pt-1">
+                {tagFacetsDirty && (
+                  <>
+                    <Button size="sm" onClick={handleSaveTagFacets} disabled={state.saving} className="h-7 text-xs">
+                      {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setTagFacetsDraft(null)} className="h-7 text-xs">Cancel</Button>
                   </>
                 )}
                 {setting.source === 'db' && (

@@ -78,6 +78,12 @@ user_tokens_app = typer.Typer(
 admin_app = typer.Typer(help="Admin management commands.", no_args_is_help=True)
 admin_users_app = typer.Typer(help="Manage admin users.", no_args_is_help=True)
 admin_settings_app = typer.Typer(help="Manage server settings.", no_args_is_help=True)
+admin_tag_facets_app = typer.Typer(
+    help="Manage admin-defined tag facets.", no_args_is_help=True
+)
+filters_app = typer.Typer(
+    help="Inspect filter dimensions and tag facets.", no_args_is_help=True
+)
 admin_models_app = typer.Typer(help="Manage AI models.", no_args_is_help=True)
 admin_server_providers_app = typer.Typer(
     help="Manage server AI provider keys.", no_args_is_help=True
@@ -101,6 +107,7 @@ app.add_typer(metadata_app, name="metadata")
 app.add_typer(failure_app, name="failure")
 app.add_typer(chat_app, name="chat")
 app.add_typer(reports_app, name="reports")
+app.add_typer(filters_app, name="filters")
 app.add_typer(config_app, name="config")
 config_app.add_typer(filter_presets_app, name="filter-presets")
 app.add_typer(auth_app, name="auth")
@@ -110,6 +117,7 @@ user_app.add_typer(user_tokens_app, name="tokens")
 app.add_typer(admin_app, name="admin")
 admin_app.add_typer(admin_users_app, name="users")
 admin_app.add_typer(admin_settings_app, name="settings")
+admin_app.add_typer(admin_tag_facets_app, name="tag-facets")
 admin_app.add_typer(admin_models_app, name="models")
 admin_app.add_typer(admin_server_providers_app, name="server-providers")
 
@@ -4674,6 +4682,119 @@ def admin_settings_test(
         # The endpoint always returns HTTP 200 — a nonzero exit is the only
         # machine-readable failure signal for scripts.
         raise typer.Exit(code=1)
+
+
+# -- Tag Facets (Filters & Admin) --------------------------------------------
+
+
+def _format_filter_facets_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten GET /api/filters/facets response for table rendering."""
+    rows: list[dict[str, Any]] = []
+    for facet in data.get("facets", []):
+        options = facet.get("options", [])
+        option_parts = []
+        missing_all: list[str] = []
+        for opt in options:
+            option_parts.append(f"{opt.get('label', '')} ({opt.get('count', 0)})")
+            missing_all.extend(opt.get("missing_tags") or [])
+        rows.append(
+            {
+                "id": facet.get("id", ""),
+                "name": facet.get("name", ""),
+                "options": ", ".join(option_parts),
+                "missing_tags": ", ".join(dict.fromkeys(missing_all)),
+            }
+        )
+    return rows
+
+
+def _emit_filter_facets(json_output: bool) -> None:
+    """Fetch and render filter facets (shared by filters & admin commands)."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.get_filter_facets(),
+        emit_output=False,
+    )
+    if _state.get("json", False):
+        return
+    rows = _format_filter_facets_rows(data)
+    if not rows:
+        typer.echo("No tag facets configured.")
+        return
+    print_output(
+        rows,
+        columns=["id", "name", "options", "missing_tags"],
+        labels={
+            "id": "ID",
+            "name": "NAME",
+            "options": "OPTIONS",
+            "missing_tags": "MISSING TAGS",
+        },
+        as_json=False,
+    )
+
+
+@filters_app.command("facets")
+def filters_facets(
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List admin-defined tag facets with per-option match counts."""
+    _emit_filter_facets(json_output)
+
+
+@admin_tag_facets_app.command("list")
+def admin_tag_facets_list(
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List configured tag facets with per-option counts and missing tags."""
+    _emit_filter_facets(json_output)
+
+
+@admin_tag_facets_app.command("set")
+def admin_tag_facets_set(
+    facets_spec: str = typer.Argument(
+        help="JSON array of facets, or '@path/to/facets.json' to read from a file."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Replace configured tag facets (validates schema and live tags)."""
+    raw_text = facets_spec
+    if facets_spec.startswith("@"):
+        file_path = Path(facets_spec[1:])
+        try:
+            raw_text = file_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            typer.echo(f"Error reading {file_path}: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+    try:
+        parsed = json_mod.loads(raw_text)
+    except json_mod.JSONDecodeError as exc:
+        typer.echo(f"Invalid JSON for tag facets: {exc.msg}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not isinstance(parsed, list):
+        typer.echo("Tag facets must be a JSON array.", err=True)
+        raise typer.Exit(code=1)
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_set_tag_facets(parsed),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Updated tag_facets ({len(parsed)} facet(s)).")
+
+
+@admin_tag_facets_app.command("reset")
+def admin_tag_facets_reset(
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Reset tag_facets DB override back to env/default."""
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_reset_tag_facets(),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo("Reset: tag_facets")
 
 
 # -- AI Models (Admin) --------------------------------------------------------

@@ -10717,3 +10717,85 @@ class TestServerIsTheGlobalOption:
         result = runner.invoke(app, ["--server-url", _TEST_SERVER, "results", "list"])
         assert result.exit_code == 2
         assert "No such option" in result.output
+
+
+class TestTagFacetsCLI:
+    def test_filters_facets_table_and_json(self, mock_client):
+        mock_client.get_filter_facets.return_value = {
+            "facets": [
+                {
+                    "id": "platform",
+                    "name": "Platform",
+                    "options": [
+                        {
+                            "label": "AWS",
+                            "tags": ["aws"],
+                            "count": 12,
+                            "missing_tags": [],
+                        },
+                        {
+                            "label": "Old",
+                            "tags": ["legacy"],
+                            "count": 0,
+                            "missing_tags": ["legacy"],
+                        },
+                    ],
+                }
+            ]
+        }
+        res = runner.invoke(app, ["filters", "facets"])
+        assert res.exit_code == 0, res.output
+        assert "Platform" in res.output
+        assert "AWS (12)" in res.output
+        assert "legacy" in res.output
+
+        res_json = runner.invoke(app, ["filters", "facets", "--json"])
+        assert res_json.exit_code == 0, res_json.output
+        parsed = json.loads(res_json.output)
+        assert parsed["facets"][0]["id"] == "platform"
+
+    def test_admin_tag_facets_list_empty(self, mock_client):
+        mock_client.get_filter_facets.return_value = {"facets": []}
+        res = runner.invoke(app, ["admin", "tag-facets", "list"])
+        assert res.exit_code == 0, res.output
+        assert "No tag facets configured." in res.output
+
+    def test_admin_tag_facets_set_inline_and_file(self, mock_client, tmp_path):
+        facets = [
+            {
+                "id": "platform",
+                "name": "Platform",
+                "options": [{"label": "AWS", "tags": ["aws"]}],
+            }
+        ]
+        mock_client.admin_set_tag_facets.return_value = {"updated": ["tag_facets"]}
+        res = runner.invoke(app, ["admin", "tag-facets", "set", json.dumps(facets)])
+        assert res.exit_code == 0, res.output
+        mock_client.admin_set_tag_facets.assert_called_once_with(facets)
+
+        facets_file = tmp_path / "facets.json"
+        facets_file.write_text(json.dumps(facets), encoding="utf-8")
+        mock_client.admin_set_tag_facets.reset_mock()
+        res_file = runner.invoke(app, ["admin", "tag-facets", "set", f"@{facets_file}"])
+        assert res_file.exit_code == 0, res_file.output
+        mock_client.admin_set_tag_facets.assert_called_once_with(facets)
+
+    def test_admin_tag_facets_set_invalid_json_and_binary_file_fail(
+        self, mock_client, tmp_path
+    ):
+        res = runner.invoke(app, ["admin", "tag-facets", "set", "{not-json"])
+        assert res.exit_code == 1
+        mock_client.admin_set_tag_facets.assert_not_called()
+
+        bad_utf8 = tmp_path / "binary.json"
+        bad_utf8.write_bytes(b"\xff\xfe\x00")
+        res_bin = runner.invoke(app, ["admin", "tag-facets", "set", f"@{bad_utf8}"])
+        assert res_bin.exit_code == 1
+        assert "Error reading" in res_bin.output
+        mock_client.admin_set_tag_facets.assert_not_called()
+
+    def test_admin_tag_facets_reset(self, mock_client):
+        mock_client.admin_reset_tag_facets.return_value = {"reset": "tag_facets"}
+        res = runner.invoke(app, ["admin", "tag-facets", "reset"])
+        assert res.exit_code == 0, res.output
+        mock_client.admin_reset_tag_facets.assert_called_once()

@@ -703,6 +703,32 @@ export interface JobMetadata {
   labels: string[]
 }
 
+export interface TagFacetOption {
+  label: string
+  tags: string[]
+}
+
+export interface TagFacet {
+  id: string
+  name: string
+  options: TagFacetOption[]
+}
+
+export interface FilterFacetOption extends TagFacetOption {
+  count: number
+  missing_tags: string[]
+}
+
+export interface FilterFacet {
+  id: string
+  name: string
+  options: FilterFacetOption[]
+}
+
+export interface FilterFacetsResponse {
+  facets: FilterFacet[]
+}
+
 export interface DashboardJobWithMetadata extends DashboardJob {
   metadata?: JobMetadata | null
 }
