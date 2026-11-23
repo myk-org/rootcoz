@@ -136,13 +136,13 @@ async def test_deactivated_provider_mid_chat_gets_deactivation_message(
         "get_ai_session_source_with_generation",
         AsyncMock(return_value=("server", None)),
     )
-    token = ai_client.chat_session_source.set("server")
-    try:
-        result = await call_ai_under_test(
-            "prompt", session_id="s1", ai_provider="cursor", ai_model="cursor-model"
-        )
-    finally:
-        ai_client.chat_session_source.reset(token)
+    result = await call_ai_under_test(
+        "prompt",
+        session_id="s1",
+        ai_provider="cursor",
+        ai_model="cursor-model",
+        pinned_credential_source="server",
+    )
     assert result.success is False
     assert "deactivated" in result.text
     assert "administrator grant" not in result.text

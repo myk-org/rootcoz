@@ -131,7 +131,7 @@ async def test_start_and_send_use_selected_source_not_job_or_settings(
 
     async def create(**kwargs):
         assert (kwargs["ai_provider"], kwargs["ai_model"]) == ("openai", "chosen")
-        assert ai_client.chat_session_source.get() == "user"
+        assert kwargs["pinned_credential_source"] == "user"
         await storage.save_ai_session_source("sid", "alice", "openai", "user")
         return "sid"
 

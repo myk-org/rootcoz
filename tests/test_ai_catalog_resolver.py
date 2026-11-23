@@ -14,7 +14,6 @@ from rootcoz.ai_catalog import (
     ResolvedAiSelection,
     ScopedCatalog,
     check_server_provider_grant,
-    current_pinned_credential_source,
     load_scoped_catalog,
     resolve_ai_selection,
     resolve_provider_model_values,
@@ -190,17 +189,14 @@ class TestLoadScopedCatalog:
 
         monkeypatch.setattr(ai_client, "models_for_api_key", discover)
 
-        # Seed sentinel values in ambient ContextVars and verify NONE are mutated.
+        # Seed sentinel value in ambient ContextVar and verify it is NOT mutated.
         tok_user = ai_client.ai_username.set("sentinel-user")
-        tok_source = ai_client.chat_session_source.set("server")
         try:
             catalog = await load_scoped_catalog("alice")
 
-            # Ambient ContextVars untouched!
+            # Ambient ContextVar untouched!
             assert ai_client.ai_username.get() == "sentinel-user"
-            assert ai_client.chat_session_source.get() == "server"
         finally:
-            ai_client.chat_session_source.reset(tok_source)
             ai_client.ai_username.reset(tok_user)
 
         # Deactivated provider excluded.
@@ -483,25 +479,19 @@ class TestGrantAndContextScoping:
 
     def test_scoped_ai_context_sets_and_restores_on_exit_and_exception(self):
         tok_user = ai_client.ai_username.set("outer-user")
-        tok_source = ai_client.chat_session_source.set("user")
         try:
-            with scoped_ai_context("inner-user", credential_source="server"):
+            with scoped_ai_context("inner-user"):
                 assert ai_client.ai_username.get() == "inner-user"
-                assert current_pinned_credential_source() == "server"
             assert ai_client.ai_username.get() == "outer-user"
-            assert current_pinned_credential_source() == "user"
 
             with (
                 pytest.raises(RuntimeError, match="boom"),
-                scoped_ai_context("err-user", credential_source="server"),
+                scoped_ai_context("err-user"),
             ):
                 assert ai_client.ai_username.get() == "err-user"
-                assert current_pinned_credential_source() == "server"
                 raise RuntimeError("boom")
             assert ai_client.ai_username.get() == "outer-user"
-            assert current_pinned_credential_source() == "user"
         finally:
-            ai_client.chat_session_source.reset(tok_source)
             ai_client.ai_username.reset(tok_user)
 
     def test_validate_pinned_source(self):
@@ -533,29 +523,23 @@ class TestGrantAndContextScoping:
 
 def test_main_and_chat_have_no_direct_credential_source_contextvar_references():
     """Credential-source ContextVars and dual-path test-patch branches must not exist."""
+    import re
+
     repo_root = Path(__file__).resolve().parents[1]
-    forbidden_in_all_src = (
-        "_selected_credential_source",
-        "model_listing_status",
-        "_rejected_user_keys",
-        "_DEFAULT_VALIDATE_",
-        "_DEFAULT_RESOLVE_",
-        "_DEFAULT_SCOPED_",
-        "_DEFAULT_REQUIRE_",
-        "_DEFAULT_NORMALIZE_",
+    forbidden_identifiers = (
+        r"\b_selected_credential_source\b",
+        r"\bchat_session_source\b",
+        r"\bmodel_listing_status\b",
+        r"\b_rejected_user_keys\b",
+        r"_DEFAULT_VALIDATE_",
+        r"_DEFAULT_RESOLVE_",
+        r"_DEFAULT_SCOPED_",
+        r"_DEFAULT_REQUIRE_",
+        r"_DEFAULT_NORMALIZE_",
     )
     for py_file in (repo_root / "src" / "rootcoz").rglob("*.py"):
         source_text = py_file.read_text(encoding="utf-8")
-        for token in forbidden_in_all_src:
-            assert token not in source_text, (
-                f"{py_file.relative_to(repo_root)} must not reference {token!r}"
+        for pattern in forbidden_identifiers:
+            assert not re.search(pattern, source_text), (
+                f"{py_file.relative_to(repo_root)} must not reference {pattern!r}"
             )
-    for rel_path in (
-        "src/rootcoz/main.py",
-        "src/rootcoz/engine/chat.py",
-        "src/rootcoz/engine/chat_runtime.py",
-    ):
-        source_text = (repo_root / rel_path).read_text(encoding="utf-8")
-        assert "chat_session_source" not in source_text, (
-            f"{rel_path} must not reference 'chat_session_source'; route through rootcoz.ai_catalog"
-        )

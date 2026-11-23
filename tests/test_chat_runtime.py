@@ -210,7 +210,7 @@ async def test_unified_process_turn_happy_path_and_context_reset(
 
     async def fake_ai(**kwargs):
         observed_ctx.append(
-            (ai_client.ai_username.get(), ai_client.chat_session_source.get())
+            (ai_client.ai_username.get(), kwargs["pinned_credential_source"])
         )
         kwargs["on_delta"]("Hello ")
         kwargs["on_delta"]("world!")
@@ -222,7 +222,6 @@ async def test_unified_process_turn_happy_path_and_context_reset(
 
     received_frames: list[dict] = []
     orig_user = ai_client.ai_username.set("outer-user")
-    orig_source = ai_client.chat_session_source.set("server")
     try:
         async with runtime.subscribe_chat_stream(conversation_id, "alice") as sub:
             await runtime.process_turn(
@@ -242,10 +241,8 @@ async def test_unified_process_turn_happy_path_and_context_reset(
 
         assert observed_ctx == [("alice", "user")]
         assert ai_client.ai_username.get() == "outer-user"
-        assert ai_client.chat_session_source.get() == "server"
     finally:
         ai_client.ai_username.reset(orig_user)
-        ai_client.chat_session_source.reset(orig_source)
 
     rows = await storage.get_chat_messages(conversation_id, username="alice")
     assistant = next(r for r in rows if r["id"] == assistant_msg_id)

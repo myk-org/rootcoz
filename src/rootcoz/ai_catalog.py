@@ -4,7 +4,7 @@ This module is the single architectural owner of:
 - User-scoped model catalog assembly (:class:`ScopedCatalog`, :func:`load_scoped_catalog`)
 - Explicit provider/model + credential-source resolution (:class:`ResolvedAiSelection`, :func:`resolve_ai_selection`)
 - Explicit server-provider and free-model grant enforcement (:func:`check_server_provider_grant`)
-- Ambient AI execution ContextVar scoping (:func:`scoped_ai_context`, :func:`current_pinned_credential_source`)
+- Scoped AI initiator user context (:func:`scoped_ai_context`) and explicit pinned-source validation (:func:`validate_pinned_source`)
 
 All production callers pass explicit value objects instead of reading or writing
 side-channel ContextVar state.
@@ -96,44 +96,22 @@ class ResolvedAiSelection:
 
 
 @contextmanager
-def scoped_ai_context(
-    username: str | None = None,
-    *,
-    credential_source: str | None = None,
-) -> Iterator[None]:
-    """Bind ambient AI execution ContextVars for the duration of a block.
-
-    Always resets every token it sets in ``finally``, even on exception.
-    """
+def scoped_ai_context(username: str | None = None) -> Iterator[None]:
+    """Bind ``ai_username`` for the duration of a block and always reset it."""
     user_token = ai_client.ai_username.set(username) if username is not None else None
-    source_token = (
-        ai_client.chat_session_source.set(credential_source)
-        if credential_source is not None
-        else None
-    )
     try:
         yield
     finally:
-        if source_token is not None:
-            ai_client.chat_session_source.reset(source_token)
         if user_token is not None:
             ai_client.ai_username.reset(user_token)
-
-
-def current_pinned_credential_source() -> str:
-    """Return the pinned credential source for the active chat context, if any."""
-    return ai_client.chat_session_source.get()
 
 
 def validate_pinned_source(
     selection: ResolvedAiSelection,
     pinned_source: str | None = None,
 ) -> None:
-    """Raise ``ValueError`` when *selection* disagrees with the pinned chat source."""
-    pinned = (
-        current_pinned_credential_source() if pinned_source is None else pinned_source
-    )
-    if pinned and selection.credential_source != pinned:
+    """Raise ``ValueError`` when *selection* disagrees with *pinned_source*."""
+    if pinned_source and selection.credential_source != pinned_source:
         raise ValueError("Chat credential source changed during Start")
 
 

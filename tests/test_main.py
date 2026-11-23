@@ -19652,18 +19652,17 @@ async def test_admin_chat_init_uses_selected_source(monkeypatch, tmp_path):
     seen = []
 
     async def init(**kwargs):
-        seen.append((ai_client.ai_username.get(), ai_client.chat_session_source.get()))
+        seen.append((ai_client.ai_username.get(), kwargs["pinned_credential_source"]))
         return "session"
 
     monkeypatch.setattr(chat, "init_admin_chat_session", init)
     request = SimpleNamespace(state=SimpleNamespace(username="alice", is_admin=True))
-    original_source = ai_client.chat_session_source.set("user")
+    original_user = ai_client.ai_username.set("previous")
     try:
         body = ChatInitRequest(ai_provider="openai", ai_model="test-model")
         assert (await main.init_admin_chat(request, body))["session_id"] == "session"
         assert seen == [("alice", "server")]
-        # The per-session source is scoped to the init call only.
-        assert ai_client.chat_session_source.get() == "user"
+        assert ai_client.ai_username.get() == "previous"
         monkeypatch.setattr(
             chat,
             "init_admin_chat_session",
@@ -19672,9 +19671,9 @@ async def test_admin_chat_init_uses_selected_source(monkeypatch, tmp_path):
         await storage.delete_chat_messages(main.ADMIN_CHAT_JOB_ID, username="alice")
         with pytest.raises(RuntimeError, match="unavailable"):
             await main.init_admin_chat(request, body)
-        assert ai_client.chat_session_source.get() == "user"
+        assert ai_client.ai_username.get() == "previous"
     finally:
-        ai_client.chat_session_source.reset(original_source)
+        ai_client.ai_username.reset(original_user)
 
 
 @pytest.mark.asyncio
@@ -19731,13 +19730,12 @@ async def test_admin_chat_processing_uses_session_source_and_resets_context(
     seen = []
 
     async def run(**kwargs):
-        seen.append((ai_client.ai_username.get(), ai_client.chat_session_source.get()))
+        seen.append((ai_client.ai_username.get(), kwargs["pinned_credential_source"]))
         if fails:
             raise RuntimeError("unavailable")
         return True, "reply", "session"
 
     monkeypatch.setattr(chat, "admin_chat_with_ai", run)
-    original_source = ai_client.chat_session_source.set("user")
     original_user = ai_client.ai_username.set("previous")
     try:
         await main._process_admin_chat_message(
@@ -19751,10 +19749,8 @@ async def test_admin_chat_processing_uses_session_source_and_resets_context(
         )
         assert seen == [("alice", "server")]
         assert ai_client.ai_username.get() == "previous"
-        assert ai_client.chat_session_source.get() == "user"
     finally:
         ai_client.ai_username.reset(original_user)
-        ai_client.chat_session_source.reset(original_source)
 
 
 class TestResolveChatAiConfig:

@@ -78,7 +78,6 @@ _cold_catalog_attempt: asyncio.Task[list[dict[str, Any]] | None] | None = None
 
 # Only explicitly initiated AI tasks set this; unrelated request tasks never inherit credentials.
 ai_username: ContextVar[str] = ContextVar("ai_username", default="")
-chat_session_source: ContextVar[str] = ContextVar("chat_session_source", default="")
 _selected_key_generation: ContextVar[tuple[str, str, str, int] | None] = ContextVar(
     "selected_key_generation", default=None
 )
@@ -2811,7 +2810,11 @@ async def _fail_closed_on_rotation(
 
 
 async def call_ai(
-    *args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any
+    *args: Any,
+    ai_provider: str = "",
+    ai_model: str = "",
+    pinned_credential_source: str | None = None,
+    **kwargs: Any,
 ) -> AIResult:
     """Call Pi-sidecar with a validated, unchanged catalog pair."""
     on_delta: Callable[[str], None] | None = kwargs.pop("on_delta", None)
@@ -2863,7 +2866,7 @@ async def call_ai(
                 error="AI session unavailable",
             )
         if source == "unknown" or (
-            chat_session_source.get() and source != chat_session_source.get()
+            pinned_credential_source and source != pinned_credential_source
         ):
             return AIResult(
                 success=False,
@@ -2872,7 +2875,7 @@ async def call_ai(
             )
     else:
         source = "user" if user_key is not None else "server"
-        if chat_session_source.get() and source != chat_session_source.get():
+        if pinned_credential_source and source != pinned_credential_source:
             logger.info("Chat AI call rejected: selected credential source unavailable")
             return AIResult(
                 success=False,
@@ -2964,7 +2967,7 @@ async def call_ai(
                 text="AI session unavailable",
                 error="AI session unavailable",
             )
-    if source == "server" and result.success and chat_session_source.get():
+    if source == "server" and result.success and pinned_credential_source:
         try:
             await ai_catalog.check_server_provider_grant(username, provider, model)
         except InactiveServerProviderError as exc:

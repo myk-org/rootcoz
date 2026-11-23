@@ -27,15 +27,17 @@ async def test_resumed_session_rejects_source_change(monkeypatch, tmp_path):
     call = AsyncMock()
     monkeypatch.setattr(ai_client, "_call_with_safe_error", call)
     user = ai_client.ai_username.set("alice")
-    source = ai_client.chat_session_source.set("user")
     try:
         result = await real_call_ai(
-            "hello", ai_provider="openai", ai_model="m", session_id="sid"
+            "hello",
+            ai_provider="openai",
+            ai_model="m",
+            session_id="sid",
+            pinned_credential_source="user",
         )
         assert not result.success
         call.assert_not_awaited()
     finally:
-        ai_client.chat_session_source.reset(source)
         ai_client.ai_username.reset(user)
 
 
@@ -68,7 +70,6 @@ async def test_lost_user_session_never_retries_on_server_after_key_removed(
 
     monkeypatch.setattr(ai_client, "_call_with_safe_error", safe_call)
     user = ai_client.ai_username.set("alice")
-    source = ai_client.chat_session_source.set("user")
     try:
         success, text, _ = await chat._chat_with_ai_impl(
             message="hi",
@@ -77,12 +78,12 @@ async def test_lost_user_session_never_retries_on_server_after_key_removed(
             ai_model="m",
             build_prompt_fn=lambda: "prompt",
             session_id="sid",
+            pinned_credential_source="user",
         )
         assert not success
         assert "SERVER REPLY" not in text
         assert len(calls) == 1
     finally:
-        ai_client.chat_session_source.reset(source)
         ai_client.ai_username.reset(user)
 
 
@@ -97,13 +98,16 @@ async def test_new_chat_call_rejects_source_switch_even_direct(monkeypatch):
     sidecar = AsyncMock(return_value=AIResult(success=True, text="SERVER REPLY"))
     monkeypatch.setattr(ai_client, "_call_with_safe_error", sidecar)
     user = ai_client.ai_username.set("alice")
-    source = ai_client.chat_session_source.set("user")
     try:
-        result = await real_call_ai("hi", ai_provider="openai", ai_model="m")
+        result = await real_call_ai(
+            "hi",
+            ai_provider="openai",
+            ai_model="m",
+            pinned_credential_source="user",
+        )
         assert not result.success
         sidecar.assert_not_awaited()
     finally:
-        ai_client.chat_session_source.reset(source)
         ai_client.ai_username.reset(user)
 
 
@@ -126,13 +130,16 @@ async def test_direct_server_chat_call_does_not_return_reply_after_grant_revoked
 
     monkeypatch.setattr(ai_client, "_call_with_safe_error", revoke)
     user = ai_client.ai_username.set("alice")
-    source = ai_client.chat_session_source.set("server")
     try:
-        result = await real_call_ai("hi", ai_provider="openai", ai_model="m")
+        result = await real_call_ai(
+            "hi",
+            ai_provider="openai",
+            ai_model="m",
+            pinned_credential_source="server",
+        )
         assert not result.success
         assert "SECRET REPLY" not in result.text
     finally:
-        ai_client.chat_session_source.reset(source)
         ai_client.ai_username.reset(user)
 
 

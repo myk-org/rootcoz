@@ -127,7 +127,7 @@ class Rig:
 
         async def create_session(**kwargs):
             self.session_observed = dict(kwargs)
-            self.session_observed["source"] = ai_client.chat_session_source.get()
+            self.session_observed["source"] = kwargs.get("pinned_credential_source")
             if self.session_error is not None:
                 raise self.session_error
             if self.session_id:
