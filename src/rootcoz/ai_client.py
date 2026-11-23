@@ -36,7 +36,7 @@ from pi_sidecar_client import (
 )
 from pi_sidecar_client import list_models as _list_models_raw
 
-from rootcoz import get_child_logger
+from rootcoz import ai_catalog, get_child_logger
 from rootcoz.url_utils import redact_urls_in_text
 from rootcoz.utils import _ANSI_SEQUENCE_RE, single_line_diagnostic
 
@@ -545,36 +545,10 @@ async def require_server_provider_grant(provider: str = "", model: str = "") -> 
     A user without the full server grant may still run one admin-declared
     free provider+model pair when they hold the free-providers grant.
     """
-    if provider and not is_server_provider_active(provider):
-        logger.debug(
-            "Server credentials for provider=%s deactivated by active_server_providers",
-            provider,
-        )
-        _raise_inactive_server_provider(provider)
-    if provider and model:
-        # Admin-deselected models are not runnable on server credentials,
-        # regardless of grant — the selection is the server pool (#347).
-        await require_selected_server_pair(provider, model)
-    from rootcoz.storage import (
-        can_user_use_free_providers,
-        can_user_use_server_providers,
-    )
+    await ai_catalog.enforce_server_provider_grant(ai_username.get(), provider, model)
 
-    username = ai_username.get()
-    try:
-        allowed = bool(username) and await can_user_use_server_providers(username)
-    except Exception as exc:
-        raise ValueError("Server provider access unavailable") from exc
-    if allowed:
-        return
-    if provider and model:
-        try:
-            granted = bool(username) and await can_user_use_free_providers(username)
-        except Exception as exc:
-            raise ValueError("Server provider access unavailable") from exc
-        if granted and await is_free_ai_pair(provider, model):
-            return
-    raise ValueError("Server provider access requires an administrator grant")
+
+_DEFAULT_REQUIRE_SERVER_PROVIDER_GRANT = require_server_provider_grant
 
 
 async def is_free_ai_pair(provider: str, model: str) -> bool:
@@ -1666,333 +1640,21 @@ def _listing_entry_usable(entry: dict[str, Any]) -> bool:
 
 async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     """Return models usable by the active user or server, with source per pair."""
-    catalog = await _get_model_catalog()
-    status: dict[str, dict[str, bool | int]] = {}
-    model_listing_status.set(status)
-    rejected_keys: set[str] = set()
-    _rejected_user_keys.set(frozenset())
-    from rootcoz.storage import can_user_use_server_providers
+    catalog = await ai_catalog.load_scoped_catalog(ai_username.get())
+    model_listing_status.set(catalog.provider_status)
+    _rejected_user_keys.set(catalog.rejected_user_keys)
+    return catalog.providers
 
-    try:
-        allowed = (
-            await can_user_use_server_providers(ai_username.get())
-            if ai_username.get()
-            else False
-        )
-    except sqlite3.Error, OSError, RuntimeError, ValueError, KeyError, TypeError:
-        allowed = False
-    pairs: dict[tuple[str, str], dict[str, Any]] = {}
-    active = _active_server_provider_entries()
-    if active is not None:
-        logger.debug("active_server_providers filtering active: %s", sorted(active))
-    # Admin-managed server models (#347): a managed provider (stored
-    # selection or stored server key) exposes only its selected models on
-    # server credentials; a never-managed provider keeps its full catalog
-    # (legacy behavior, e.g. ambient-auth providers).
-    selection = await _load_server_pool_selection()
-    if selection is None:
-        selection = (set(), set())
-    selected_providers, selected_pairs = selection
-    # Key-scoped listings captured at add/rotate (#350): for a keyed provider
-    # the stored listing replaces the static catalog as the server pool's
-    # model set — a restricted key must not expose models it cannot use, and
-    # may offer models the catalog lacks. Providers with no rows (listing
-    # unsupported, discovery failed, or pre-#350 rows) keep the catalog.
-    key_scoped: dict[str, dict[str, dict[str, Any]]] = {}
-    # Stored spelling per lowercase join key (#350 r2): fallback entries for
-    # providers the catalog no longer lists must keep the stored casing —
-    # pi-config looks up session providers by their exact id, so emitting
-    # ``mygateway`` for a stored ``MyGateway`` breaks session creation.
-    key_scoped_ids: dict[str, str] = {}
-    # Declared ids per flagged provider: the picker mark's manifest half (§#423).
-    # Computed once per call, and empty when the manifest is not readable.
-    declared_session_models = _manifest_session_models()
-    try:
-        from rootcoz.storage import list_server_provider_key_models
 
-        for row in await list_server_provider_key_models():
-            key_scoped.setdefault(row["provider"].lower(), {})[row["model"]] = row
-            key_scoped_ids.setdefault(row["provider"].lower(), row["provider"])
-    except sqlite3.Error, OSError:
-        logger.warning("Unable to load key-scoped server provider models")
-
-    def _key_scoped_entries(
-        provider: str, scoped_rows: dict[str, dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """Server-pool entries for one provider's captured key-scoped listing.
-
-        The empty-string sentinel row (a supported listing with zero
-        #350-accessible models) yields no entries — the provider exposes
-        nothing on server credentials rather than falling back to the
-        catalog. Entries with declared-but-broken capability limits are
-        skipped, the same rule the user-key path applies.
-        """
-        entries = [
-            {
-                "id": model,
-                "name": row.get("name") or model,
-                "provider": provider,
-                "source": "api",
-                "capabilities": row.get("capabilities") or {},
-            }
-            for model, row in sorted(scoped_rows.items())
-            if model and _listing_entry_usable(row)
-        ]
-        for entry in entries:
-            _mark_session_support(provider, entry, declared_session_models)
-        return entries
-
-    seen_catalog_providers: set[str] = set()
-    for provider, entries in build_friendly_catalog(catalog).items():
-        seen_catalog_providers.add(provider.lower())
-        if active is not None and not is_server_provider_active(provider):
-            # Server credential source withdrawn; user-key discovery below
-            # can still surface this provider's models with 'user' only.
-            continue
-        has_selection = provider.lower() in selected_providers
-        scoped_rows = key_scoped.get(provider.lower())
-        if scoped_rows is not None:
-            entries = _key_scoped_entries(provider, scoped_rows)
-        for entry in entries:
-            if has_selection and (provider.lower(), entry["id"]) not in selected_pairs:
-                # Admin deselected this model from server exposure; user-key
-                # discovery below can still surface it with 'user' only.
-                continue
-            pairs[(provider, entry["id"])] = {
-                **entry,
-                "credential_sources": ["server"],
-                "can_use_server_providers": allowed,
-                "verified": True,
-            }
-    # A captured listing for a provider the static catalog no longer lists
-    # still defines its server pool — the admin API offers those models, so
-    # discovery must not silently drop the provider (#350 r1).
-    # The stored spelling is the provider id (#350 r2): the catalog join
-    # key is lowercase, but the emitted entries must carry the exact id
-    # pi-config resolves sessions with.
-    for provider_lower, scoped_rows in key_scoped.items():
-        if provider_lower in seen_catalog_providers:
-            continue
-        provider = key_scoped_ids.get(provider_lower, provider_lower)
-        if active is not None and not is_server_provider_active(provider):
-            continue
-        has_selection = provider_lower in selected_providers
-        for entry in _key_scoped_entries(provider, scoped_rows):
-            if has_selection and (provider_lower, entry["id"]) not in selected_pairs:
-                continue
-            pairs[(provider, entry["id"])] = {
-                **entry,
-                "credential_sources": ["server"],
-                "can_use_server_providers": allowed,
-                "verified": True,
-            }
-    if ai_username.get():
-        from rootcoz.storage import get_user_ai_credentials
-
-        credentials = await get_user_ai_credentials(ai_username.get())
-        supported = await supported_key_providers() if credentials else []
-        for provider, key in credentials.items():
-            if provider not in supported:
-                continue
-            try:
-                discovery = await models_for_api_key(provider, key)
-            except (
-                httpx.HTTPError,
-                ValueError,
-                KeyError,
-                TypeError,
-                RuntimeError,
-            ) as exc:
-                status[provider] = {
-                    "has_api_key": True,
-                    "modelListingSupported": True,
-                    "unavailable": True,
-                }
-                if auth_failure_status(exc):
-                    # The user's own key is the problem; the server pool for
-                    # this provider is still usable (#592).
-                    rejected_keys.add(provider)
-                    _rejected_user_keys.set(frozenset(rejected_keys))
-                    logger.warning(
-                        "Stored API key for provider=%s was rejected by the provider",
-                        provider,
-                    )
-                else:
-                    logger.warning(
-                        "Key-scoped model discovery unavailable for provider=%s",
-                        provider,
-                    )
-                continue
-            listing = discovery["modelListingSupported"]
-            status[provider] = {"has_api_key": True, "modelListingSupported": listing}
-            # Without a listing the only IDs we can offer come from the frozen
-            # snapshot, so tag them as such. `api` would claim these came from
-            # a live source and hide how old they are.
-            entries = (
-                discovery["models"]
-                if listing
-                else [
-                    {
-                        "provider": provider,
-                        "id": model,
-                        "name": model,
-                        "source": _SNAPSHOT_SOURCE,
-                        "verified": False,
-                    }
-                    for model in _PI_MODEL_SUGGESTIONS.get(provider, ())
-                ]
-            )
-            if not listing:
-                pairs.setdefault((provider, ""), {})  # Preserve manual-only provider.
-            # Distinct accepted IDs: the catalog keys on (provider, id), so a
-            # discovery response repeating an ID must not inflate the count.
-            usable: set[tuple[str, str]] = set()
-            for entry in entries:
-                pair = (provider, entry["id"])
-                # pi-sidecar reports no capabilities for key-scoped discovery, so
-                # absence must stay usable. A limit that is declared but partial,
-                # non-integer, or beyond the safe range still breaks token math.
-                unusable = not _listing_entry_usable(entry)
-                if listing and not (pair in pairs or not unusable):
-                    continue
-                if pair in pairs:
-                    pairs[pair]["credential_sources"].insert(0, "user")
-                    pairs[pair]["verified"] = True
-                    target = pairs[pair]
-                else:
-                    pairs[pair] = {
-                        "provider": provider,
-                        "id": entry["id"],
-                        "name": entry.get("name") or entry["id"],
-                        "source": "api" if listing else _SNAPSHOT_SOURCE,
-                        "credential_sources": ["user"],
-                        "can_use_server_providers": allowed,
-                        "verified": listing,
-                    }
-                    target = pairs[pair]
-                if listing:
-                    # The user's own listing ranks first, so its mark replaces
-                    # the server capture's for this pair — and its entry is the
-                    # one that carries the limits. Snapshot suggestions keep the
-                    # manually-enterable path unmarked.
-                    _mark_session_support(
-                        provider, entry, declared_session_models, mark_on=target
-                    )
-                usable.add(pair)
-            # Report what the key actually yielded, so a key that stored fine but
-            # surfaced no usable model is visible instead of silently looking ready.
-            status[provider]["model_count"] = len(usable)
-    free_pairs: set[tuple[str, str]] = set()
-    try:
-        from rootcoz.storage import list_free_ai_models
-
-        free_pairs = {
-            (row["provider"].lower(), row["model"])
-            for row in await list_free_ai_models()
-        }
-    except sqlite3.Error, OSError:
-        logger.warning("Unable to load free model pairs")
-    result: dict[str, list[dict[str, Any]]] = {}
-    for (provider, model), entry in pairs.items():
-        # Admin-declared free pairs are flagged regardless of credential
-        # source so every consumer (badge, filters) sees one flag.
-        if (provider.lower(), model) in free_pairs:
-            entry["free"] = True
-        bucket = result.setdefault(provider, [])
-        if model:
-            bucket.append(entry)
-    return result
+_DEFAULT_SCOPED_MODELS = scoped_models
 
 
 async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     """Validate an exact pair, retaining only unambiguous legacy routes."""
-    provider, model = normalize_provider(provider), (model or "").strip()
-    if ai_username.get():
-        scoped = await scoped_models()
-        status = model_listing_status.get() or {}
-        provider = _catalog_provider_spelling(
-            (*scoped.keys(), *status.keys()), provider
-        )
-        # Key discovery failed for this provider: the caller's own key cannot
-        # serve the pair, but a server-pool entry still can — the grant, free
-        # and serving rules below decide, so do not fail closed here (#592).
-        unavailable = bool(status.get(provider, {}).get("unavailable"))
-        rejected_key = provider in _rejected_user_keys.get()
-        for entry in scoped.get(provider, []):
-            if entry["id"] == model and (
-                entry["verified"] or "server" in entry["credential_sources"]
-            ):
-                # scoped_models ranks the caller's own key ahead of the
-                # server pool, so the first source is the one to use.
-                source = entry["credential_sources"][0]
-                if unavailable and source != "server":
-                    continue
-                if source == "server":
-                    await require_server_provider_grant(provider, model)
-                _selected_credential_source.set(source)
-                return provider, model
-        if rejected_key:
-            raise RejectedUserKeyError(
-                f"Your stored key for provider '{provider}' was rejected by the"
-                f" provider and the server pool does not serve {provider}/{model}:"
-                " update or remove the key, then retry"
-            )
-        if unavailable:
-            raise ValueError(
-                "Key-scoped model discovery unavailable; retry or select server credentials"
-            )
-        if provider in status and status[provider]["modelListingSupported"]:
-            raise ValueError(
-                f"Unknown Pi-sidecar provider/model pair: {provider}/{model}"
-            )
-        # Manual IDs require an affirmative no-listing response for this key.
-        if (
-            model
-            and provider in status
-            and not status[provider]["modelListingSupported"]
-        ):
-            _selected_credential_source.set("user")
-            return provider, model
-        # scoped_models withdrew this pair's server source — the
-        # administrator deactivated the provider or deselected the model —
-        # so nothing above could match it: say why.
-        if provider in build_friendly_catalog(await _get_model_catalog()):
-            if not is_server_provider_active(provider):
-                _raise_inactive_server_provider(provider)
-            await require_selected_server_pair(provider, model)
-        raise ValueError(f"Unknown Pi-sidecar provider/model pair: {provider}/{model}")
-    catalog = await _get_model_catalog()
-    provider = _catalog_provider_spelling(
-        {entry.get("provider") for entry in catalog}, provider
-    )
-    pairs = {(entry.get("provider"), entry.get("id")) for entry in catalog}
-    if (provider, model) in pairs:
-        await require_server_provider_grant(provider, model)
-        _selected_credential_source.set("server")
-        return provider, model
+    return (await ai_catalog.resolve_ai_selection(provider, model)).as_pair()
 
-    # A stale catalog may not yet contain a newly discovered pair. Refresh once;
-    # a warm catalog remains usable if that refresh is temporarily unavailable.
-    catalog = await _get_model_catalog(refresh=True)
-    provider = _catalog_provider_spelling(
-        {entry.get("provider") for entry in catalog}, provider
-    )
-    pairs = {(entry.get("provider"), entry.get("id")) for entry in catalog}
-    if (provider, model) in pairs:
-        await require_server_provider_grant(provider, model)
-        _selected_credential_source.set("server")
-        return provider, model
 
-    # Legacy friendly IDs have one explicit destination each.  Mapping only when
-    # precisely one catalog provider has this model prevents google/Vertex guesses.
-    targets = _LEGACY_PROVIDER_TARGETS.get(provider)
-    providers_for_model = {p for p, m in pairs if p and m == model}
-    matches = [p for p in providers_for_model if targets and p.lower() in targets]
-    if len(providers_for_model) == 1 and len(matches) == 1:
-        await require_server_provider_grant(matches[0], model)
-        _selected_credential_source.set("server")
-        return matches[0], model
-    raise ValueError(f"Unknown Pi-sidecar provider/model pair: {provider}/{model}")
+_DEFAULT_RESOLVE_CATALOG_PAIR = resolve_catalog_pair
 
 
 class SessionCreationRefused(RuntimeError):
@@ -3178,7 +2840,14 @@ async def call_ai(
     """Call Pi-sidecar with a validated, unchanged catalog pair."""
     on_delta: Callable[[str], None] | None = kwargs.pop("on_delta", None)
     accept_turn: Callable[[str], bool] | None = kwargs.pop("accept_turn", None)
-    provider, model = await resolve_catalog_pair(ai_provider, ai_model)
+    selection = await ai_catalog.resolve_selection_via(
+        resolve_catalog_pair,
+        ai_provider,
+        ai_model,
+        default_fn=_DEFAULT_RESOLVE_CATALOG_PAIR,
+        unspecified_source="user",
+    )
+    provider, model = selection.as_pair()
     # user key drives the credential source; a server key (#347) only
     # replaces the deployment's env/ambient credentials inside the session.
     user_key = None
@@ -3187,7 +2856,7 @@ async def call_ai(
     # rotation during this turn is detectable (see `_fail_closed_on_rotation`).
     pre_server_gen: int | None = None
     if not kwargs.get("session_id"):
-        if _selected_credential_source.get() != "server":
+        if selection.credential_source != "server":
             user_key = await session_key(provider)
         if user_key is None:
             server_key, pre_server_gen = await server_provider_key_with_generation(
@@ -3354,10 +3023,17 @@ async def call_ai_once(
 ) -> AIResult:
     """Call Pi-sidecar once with a validated, unchanged catalog pair."""
     accept_turn: Callable[[str], bool] | None = kwargs.pop("accept_turn", None)
-    provider, model = await resolve_catalog_pair(ai_provider, ai_model)
+    selection = await ai_catalog.resolve_selection_via(
+        resolve_catalog_pair,
+        ai_provider,
+        ai_model,
+        default_fn=_DEFAULT_RESOLVE_CATALOG_PAIR,
+        unspecified_source="user",
+    )
+    provider, model = selection.as_pair()
     user_key = None
     pre_server_gen: int | None = None
-    if _selected_credential_source.get() != "server":
+    if selection.credential_source != "server":
         user_key = await session_key(provider)
     server_key = None
     if user_key is None:

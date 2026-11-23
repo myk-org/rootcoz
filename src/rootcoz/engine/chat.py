@@ -14,8 +14,9 @@ from typing import Any, Literal
 
 from pi_sidecar_client import get_sidecar_client
 
-from rootcoz import get_child_logger
+from rootcoz import ai_catalog, get_child_logger
 from rootcoz.ai_client import (
+    _DEFAULT_RESOLVE_CATALOG_PAIR,
     CHAT_BUILTIN_TOOLS,
     SessionCreationRefused,
     _sanitize_diagnostic,
@@ -1884,16 +1885,15 @@ async def _create_chat_session(
     )
     try:
         client = get_sidecar_client()
-        sidecar_provider, sidecar_model = await resolve_catalog_pair(
-            ai_provider, ai_model
+        selection = await ai_catalog.resolve_selection_via(
+            resolve_catalog_pair,
+            ai_provider,
+            ai_model,
+            default_fn=_DEFAULT_RESOLVE_CATALOG_PAIR,
+            unspecified_source="",
         )
-        from rootcoz.ai_client import _selected_credential_source, chat_session_source
-
-        if (
-            chat_session_source.get()
-            and _selected_credential_source.get() != chat_session_source.get()
-        ):
-            raise ValueError("Chat credential source changed during Start")
+        sidecar_provider, sidecar_model = selection.as_pair()
+        ai_catalog.validate_pinned_source(selection)
         create_kwargs: dict[str, Any] = {
             "provider": sidecar_provider,
             "model": sidecar_model,
@@ -1908,20 +1908,22 @@ async def _create_chat_session(
 
         key = (
             await session_key(sidecar_provider)
-            if _selected_credential_source.get() == "user"
+            if selection.credential_source == "user"
             else None
         )
-        if _selected_credential_source.get() == "user" and key is None:
+        if selection.credential_source == "user" and key is None:
             raise ValueError("User AI credential unavailable; Start a new chat")
         if key is not None:
             create_kwargs["api_key"] = key
         else:
             from rootcoz.ai_client import (
-                require_server_provider_grant,
+                ai_username,
                 server_provider_key_with_generation,
             )
 
-            await require_server_provider_grant(sidecar_provider, sidecar_model)
+            await ai_catalog.check_server_provider_grant(
+                ai_username.get(), sidecar_provider, sidecar_model
+            )
             # A stored server provider key (#347) reaches chat sessions too:
             # pass it as the session apiKey while keeping the server
             # credential-source classification (create_session_safely records
@@ -2085,17 +2087,14 @@ async def _chat_with_ai_impl(
     result = await call_ai(prompt, accept_turn=_chat_turn_usable, **call_kwargs)
 
     # A revoked or switched chat source must never be rebuilt under another identity.
-    from rootcoz.ai_client import chat_session_source
+    pinned_source = ai_catalog.current_pinned_credential_source()
 
     if (
         not result.success
         and session_id
         and "not found" in result.text.lower()
         and result.text != "AI session unavailable"
-        and (
-            not chat_session_source.get()
-            or result.credential_source == chat_session_source.get()
-        )
+        and (not pinned_source or result.credential_source == pinned_source)
     ):
         logger.warning("%s: session lost, rebuilding with full context", log_prefix)
         await result.record_usage(

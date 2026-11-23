@@ -6,7 +6,7 @@ import { AuthProvider } from '@/lib/AuthProvider'
 import { ApiError } from '@/lib/api'
 import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
 import { ReAnalyzeDialog } from '@/pages/report/ReAnalyzeDialog'
-import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
+import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 import type { AnalysisResult } from '@/types'
 
 const get = vi.fn()

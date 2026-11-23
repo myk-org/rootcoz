@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   analysisAiUnavailablePart, completeAiPairOverride, isAnalysisAiAvailable, usableModels, visibleModels,
-} from '../analysisAi'
+} from '../providerCatalog'
 import type { AiModel } from '@/types'
 
 describe('completeAiPairOverride', () => {

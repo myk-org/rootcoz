@@ -3,6 +3,7 @@ import { api, ApiError } from './api'
 import { getUsername, setUsername, getIsAdmin, setIsAdmin, setRole, clearTokens, clearUsername } from './cookies'
 import type { AuthUser } from '@/types'
 import { AuthContext } from './auth'
+import * as providerCatalog from './providerCatalog'
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [username, setUsernameState] = useState(getUsername())
@@ -63,8 +64,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const previousGrant = serverGrant.current
       applyAuthUser(me)
       if (previousGrant !== null && previousGrant !== serverGrant.current) {
-        const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
-        if (isCurrent()) resetProviderCatalogCache()
+        providerCatalog.resetProviderCatalogCache()
       }
     } catch (err) {
       if (!isCurrent()) return
@@ -129,9 +129,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Beginning login invalidated the initial refresh that would clear loading.
     if (loading) pendingRefresh.current = true
     try {
-      const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
-      if (!isCurrent()) return
-      resetProviderCatalogCache()
+      providerCatalog.resetProviderCatalogCache()
       const result = await api.post<AuthUser>(
         '/api/auth/login',
         { username: loginUsername, api_key: apiKey }
@@ -168,10 +166,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // ignore
       }
       if (!isCurrent()) return
-      const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
-      if (!isCurrent()) return
       guard.advance()
-      resetProviderCatalogCache()
+      providerCatalog.resetProviderCatalogCache()
       clearPrivileges()
       clearTokens()
       clearUsername()

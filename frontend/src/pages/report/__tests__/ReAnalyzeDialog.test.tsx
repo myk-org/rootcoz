@@ -17,16 +17,20 @@ vi.mock('react-router-dom', () => ({ useNavigate: () => vi.fn() }))
 vi.mock('@/lib/auth', () => ({
   useAuth: () => ({ canUseServerProviders: true, canUseFreeProviders: false }),
 }))
-vi.mock('@/lib/useProviderOptions', () => ({
-  useProviderCatalog: () => ({
-    providers: {
-      claude: [{ id: 'claude-sonnet-4', name: 'Sonnet 4', provider: 'claude', credential_sources: ['user'], verified: true }],
-      openai: [{ id: 'gpt-5', name: 'GPT-5', provider: 'openai', credential_sources: ['user'], verified: true }],
-      gemini: [{ id: 'gemini-3', name: 'Gemini 3', provider: 'gemini', credential_sources: ['user'], verified: true }],
-    },
-    providerStatus: {},
-  }),
-}))
+vi.mock('@/lib/providerCatalog', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/providerCatalog')>()
+  return {
+    ...actual,
+    useProviderCatalog: () => ({
+      providers: {
+        claude: [{ id: 'claude-sonnet-4', name: 'Sonnet 4', provider: 'claude', credential_sources: ['user'], verified: true }],
+        openai: [{ id: 'gpt-5', name: 'GPT-5', provider: 'openai', credential_sources: ['user'], verified: true }],
+        gemini: [{ id: 'gemini-3', name: 'Gemini 3', provider: 'gemini', credential_sources: ['user'], verified: true }],
+      },
+      providerStatus: {},
+    }),
+  }
+})
 // Real availability logic so deferPrimary behavior is exercised.
 vi.mock('@/components/shared/AnalysisAiPicker', () => ({
   AnalysisProviderSelect: ({ value, label, onChange }: { value: string; label?: string; onChange?: (v: string) => void }) => (

@@ -1,4 +1,4 @@
-import { disambiguateProviderLabels, formatProviderModelLabel, normalizeProvider } from '@/lib/aiProviders'
+import { disambiguateProviderLabels, formatProviderModelLabel, normalizeProvider } from '@/lib/providerCatalog'
 import type { PeerDebate } from '@/types'
 
 /** Unique peer AI labels for header badges — excludes the main AI.

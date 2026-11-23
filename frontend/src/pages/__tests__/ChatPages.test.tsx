@@ -3,7 +3,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
 import { ChatPage } from '@/pages/ChatPage'
 import { AdminChatPage } from '@/pages/AdminChatPage'
-import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
+import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 
 const get = vi.fn()
 const post = vi.fn().mockResolvedValue({})

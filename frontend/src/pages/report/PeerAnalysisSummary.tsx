@@ -7,7 +7,7 @@ import { groupPeerRounds } from '@/lib/peerDebate'
 import { resolvedSignature } from '@/lib/grouping'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ChevronDown, ChevronRight, Users } from 'lucide-react'
-import { useProviderLabels } from '@/lib/useProviderLabels'
+import { useProviderLabels } from '@/lib/providerCatalog'
 import { getPeerAiLabels } from './peerAiLabels'
 
 interface FailureWithDebate {

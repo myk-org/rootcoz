@@ -3,7 +3,7 @@ import type { FailureAnalysis, PeerDebate } from '@/types'
 import type { RepoUrl } from '@/lib/autoLink'
 import { Badge } from '@/components/ui/badge'
 import { PeerRoundEntry } from '@/components/shared/PeerRoundEntry'
-import { useProviderLabels } from '@/lib/useProviderLabels'
+import { useProviderLabels } from '@/lib/providerCatalog'
 import { groupPeerRounds } from '@/lib/peerDebate'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 

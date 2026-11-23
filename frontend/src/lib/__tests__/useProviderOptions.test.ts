@@ -6,7 +6,7 @@ import {
   useEnabledProviders,
   useProviderCatalog,
   useProviderOptions,
-} from '@/lib/useProviderOptions'
+} from '@/lib/providerCatalog'
 
 const getMock = vi.fn()
 

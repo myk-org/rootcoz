@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ProviderSelect } from '@/components/shared/ProviderSelect'
-import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
+import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 
 const get = vi.fn()
 vi.mock('@/lib/api', () => ({ api: { get: (...args: unknown[]) => get(...args) } }))

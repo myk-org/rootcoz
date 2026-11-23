@@ -32,7 +32,7 @@ import { ReAnalyzeDialog } from './ReAnalyzeDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { UuidCopyButton } from '@/components/shared/UuidCopyButton'
-import { formatProviderModelLabel } from '@/lib/aiProviders'
+import { formatProviderModelLabel } from '@/lib/providerCatalog'
 import { useAuth } from '@/lib/auth'
 import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw, Link2, X } from 'lucide-react'
 

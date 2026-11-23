@@ -20,14 +20,21 @@ const catalogMocks = vi.hoisted(() => ({
   providerStatus: {} as Record<string, ProviderStatus>,
 }))
 
-vi.mock('@/lib/useProviderOptions', () => ({
-  resetProviderCatalogCache: vi.fn(),
-  useProviderCatalog: () => ({ providers: {
-    'openai/custom': [{ id: 'catalog-model', name: 'Catalog model' }],
-    other: [],
-    enmaas: [{ id: 'catalog-model', name: 'Catalog model' }],
-  }, providerStatus: catalogMocks.providerStatus }),
-}))
+vi.mock('@/lib/providerCatalog', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/providerCatalog')>()
+  return {
+    ...actual,
+    resetProviderCatalogCache: vi.fn(),
+    useProviderCatalog: () => ({
+      providers: {
+        'openai/custom': [{ id: 'catalog-model', name: 'Catalog model' }],
+        other: [],
+        enmaas: [{ id: 'catalog-model', name: 'Catalog model' }],
+      },
+      providerStatus: catalogMocks.providerStatus,
+    }),
+  }
+})
 
 const get = vi.mocked(api.get)
 const put = vi.mocked(api.put)

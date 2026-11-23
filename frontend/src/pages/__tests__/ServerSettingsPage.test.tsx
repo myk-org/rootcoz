@@ -27,12 +27,6 @@ vi.mock('@/lib/auth', () => ({
     canUseFreeProviders: false,
   }),
 }))
-vi.mock('@/hooks/useProviderModels', () => ({
-  useProviderModels: (provider: string) => {
-    modelListingCalls.push(provider)
-    return { models: [], refresh: vi.fn(), refreshing: false }
-  },
-}))
 /** Providers the page asked for a model listing — never one the catalog lacks (#591). */
 let modelListingCalls: string[] = []
 /** Mutable catalog, so a test can serve (or not serve) the stored default. */
@@ -45,9 +39,17 @@ let catalog: {
 } = {
   providers: {}, providerStatus: {}, providerKeys: [],
 }
-vi.mock('@/lib/useProviderOptions', () => ({
-  useProviderCatalog: () => catalog,
-}))
+vi.mock('@/lib/providerCatalog', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/providerCatalog')>()
+  return {
+    ...actual,
+    useProviderModels: (provider: string) => {
+      modelListingCalls.push(provider)
+      return { models: [], refresh: vi.fn(), refreshing: false }
+    },
+    useProviderCatalog: () => catalog,
+  }
+})
 vi.mock('@/components/shared/ServerProvidersCard', () => ({
   ServerProvidersCard: () => <div data-testid="server-providers-card" />,
 }))

@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, expect, it, vi } from 'vitest'
 import { AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { ChatUI } from '@/components/shared/ChatUI'
-import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
+import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 
 /** The picker reason the backend attaches to an unsessionable pair. */
 const REASON =

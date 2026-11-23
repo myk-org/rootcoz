@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type ComponentProps, type FormEvent } from 'react'
 import { api, ApiError, extractApiDetail } from '@/lib/api'
-import { resetProviderCatalogCache, useProviderCatalog } from '@/lib/useProviderOptions'
-import { normalizeProvider } from '@/lib/aiProviders'
+import { normalizeProvider, resetProviderCatalogCache, useProviderCatalog } from '@/lib/providerCatalog'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'

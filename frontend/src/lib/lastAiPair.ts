@@ -1,4 +1,4 @@
-import { normalizeProvider } from '@/lib/aiProviders'
+import { normalizeProvider } from '@/lib/providerCatalog'
 
 /** A user-chosen AI pair. An empty provider+model means "the server default". */
 export type AiPair = { provider: string; model: string }
