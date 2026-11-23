@@ -283,6 +283,9 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | `settings reset KEY` | — | Drop the DB override and fall back to env or default. |
 | `settings export` | `--include-sensitive`, `--output`/`-o` | Write the DB-stored settings to a JSON document (stdout without `--output`). Secrets are excluded unless `--include-sensitive`; without it, embedded credentials (repo `@token`s, URL userinfo) are stripped from the export. An `--output` file is written with owner-only `0600` permissions. |
 | `settings import` | `--input`/`-i` (required), `--dry-run` | Apply an export document. Validated and atomic (single transaction); prints a per-setting diff with credentials masked. `--dry-run` validates and shows the diff without applying. |
+| `tag-facets list` | `--json` | List configured tag facets with per-option match counts and any missing tags (`GET /api/filters/facets`). Viewer-accessible equivalent: `rootcoz filters facets`. |
+| `tag-facets set SPEC` | `--json` | Replace `tag_facets` from an inline JSON array or `@path/to/facets.json` (validates schema and live job tags). |
+| `tag-facets reset` | `--json` | Drop the `tag_facets` DB override and fall back to env/default. |
 | `models refresh` | — | Re-read the model list from the sidecar. |
 | `models free-list` | — | List admin-declared free provider+model pairs. |
 | `models free-add` | `--provider`, `--model` | Declare one provider+model pair as free (validated against the catalog). |

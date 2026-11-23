@@ -12,9 +12,10 @@ export interface MetadataOptions {
 const EMPTY_OPTIONS: MetadataOptions = { teams: [], tiers: [], versions: [], allLabels: [] }
 
 /** Fetches distinct metadata values from the API. */
-export function useMetadataOptions(): { options: MetadataOptions; loadError: boolean } {
+export function useMetadataOptions(): { options: MetadataOptions; loadError: boolean; loaded: boolean } {
   const [options, setOptions] = useState<MetadataOptions>(EMPTY_OPTIONS)
   const [loadError, setLoadError] = useState(false)
+  const [loaded, setLoaded] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -43,11 +44,15 @@ export function useMetadataOptions(): { options: MetadataOptions; loadError: boo
         versions: [...versions].sort(),
         allLabels: [...allLabels].sort(),
       })
+      setLoaded(true)
     }).catch(() => {
-      if (!cancelled) setLoadError(true)
+      if (!cancelled) {
+        setLoadError(true)
+        setLoaded(true)
+      }
     })
     return () => { cancelled = true }
   }, [])
 
-  return { options, loadError }
+  return { options, loadError, loaded }
 }

@@ -3,6 +3,7 @@
 import base64
 import contextlib
 import errno
+import json
 import logging
 import os
 import re
@@ -2018,6 +2019,22 @@ class RootCozClient:
     def get_default_server_settings(self) -> dict[str, Any]:
         """Get non-sensitive server settings. GET /api/default-server-settings"""
         return self._request("GET", "/api/default-server-settings")
+
+    # -- Filter facets ---------------------------------------------------------
+
+    def get_filter_facets(self) -> dict[str, Any]:
+        """Get admin-defined tag facets with per-option counts. GET /api/filters/facets"""
+        return self._request("GET", "/api/filters/facets")
+
+    def admin_set_tag_facets(self, facets: list[dict[str, Any]]) -> dict[str, Any]:
+        """Set admin-defined tag facets. PUT /api/admin/settings (tag_facets)"""
+        return self.admin_set_setting(
+            "tag_facets", json.dumps(facets, separators=(",", ":"))
+        )
+
+    def admin_reset_tag_facets(self) -> dict[str, Any]:
+        """Reset tag_facets DB override to env/default. DELETE /api/admin/settings/tag_facets"""
+        return self.admin_reset_setting("tag_facets")
 
     # -- Filter presets --------------------------------------------------------
 

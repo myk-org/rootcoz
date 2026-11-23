@@ -4280,3 +4280,60 @@ class TestIssueAttachmentsClient:
         else:
             assert "filed" not in detail_lower
             assert "duplicate" not in detail_lower
+
+
+class TestRootCozClientTagFacets:
+    def test_get_filter_facets(self):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["method"] = request.method
+            seen["path"] = request.url.path
+            return httpx.Response(
+                200,
+                json={
+                    "facets": [
+                        {
+                            "id": "platform",
+                            "name": "Platform",
+                            "options": [
+                                {
+                                    "label": "AWS",
+                                    "tags": ["aws"],
+                                    "count": 4,
+                                    "missing_tags": [],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+
+        client = _make_client(handler)
+        data = client.get_filter_facets()
+        assert seen == {"method": "GET", "path": "/api/filters/facets"}
+        assert data["facets"][0]["id"] == "platform"
+
+    def test_admin_set_and_reset_tag_facets(self):
+        calls: list[tuple[str, str, bytes]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append((request.method, request.url.path, request.content))
+            return httpx.Response(200, json={"updated": ["tag_facets"]})
+
+        client = _make_client(handler)
+        facets = [
+            {
+                "id": "platform",
+                "name": "Platform",
+                "options": [{"label": "AWS", "tags": ["aws"]}],
+            }
+        ]
+        client.admin_set_tag_facets(facets)
+        client.admin_reset_tag_facets()
+        assert calls[0][0] == "PUT"
+        assert calls[0][1] == "/api/admin/settings"
+        sent = json.loads(calls[0][2])
+        assert json.loads(sent["settings"]["tag_facets"]) == facets
+        assert calls[1][0] == "DELETE"
+        assert calls[1][1] == "/api/admin/settings/tag_facets"

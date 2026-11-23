@@ -382,6 +382,14 @@ from rootcoz.storage import (
     stamp_build_url,
     update_status,
 )
+from rootcoz.tag_facets import (
+    FilterFacetsResponse,
+    TagFacet,
+    collect_facet_tags,
+    diff_tag_facets,
+    parse_tag_facets,
+    serialize_tag_facets,
+)
 from rootcoz.temp_paths import (
     CleanupOutcome,
     DeleteResult,
@@ -672,6 +680,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "enable_auto_review",  # runtime toggle, no restart required
         "max_concurrent_analyses",
         "metadata_rules_file",
+        "tag_facets",
         # The only setting BOTH sources read (jenkins_source, prow_source),
         # so neither source may own it.
         "get_job_artifacts",
@@ -863,6 +872,7 @@ _SETTING_LABEL_OVERRIDES: dict[str, str] = {
     "login_lockout_enabled": "Enable login lockout",
     "login_lockout_threshold": "Failed logins before lockout",
     "audit_auth_failure_max_per_minute": "Audit rows kept per minute",
+    "tag_facets": "Tag facets",
 }
 
 # Tokens the humaniser keeps uppercase — "Ai model" is not an English label.
@@ -23281,6 +23291,35 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
     if site_url and (site_error := jira_site_url_error(str(site_url))):
         raise HTTPException(status_code=422, detail=site_error)
 
+    # Admin-defined tag facets (#658): validate schema and verify every
+    # referenced tag currently exists in job_metadata_labels on save.
+    if "tag_facets" in settings_updates:
+        raw_facets = settings_updates["tag_facets"]
+        if raw_facets is None or (
+            isinstance(raw_facets, str) and not raw_facets.strip()
+        ):
+            settings_updates["tag_facets"] = "[]"
+        else:
+            try:
+                parsed_facets = parse_tag_facets(raw_facets, strict=True)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"tag_facets: {exc}"
+                ) from exc
+            referenced_tags = collect_facet_tags(parsed_facets)
+            if referenced_tags:
+                live_labels = await storage.get_live_job_labels()
+                unknown_tags = sorted(referenced_tags - live_labels)
+                if unknown_tags:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "tag_facets: unknown tag(s) not present in job "
+                            f"metadata: {', '.join(unknown_tags)}"
+                        ),
+                    )
+            settings_updates["tag_facets"] = serialize_tag_facets(parsed_facets)
+
     for key, value in settings_updates.items():
         if key not in valid_keys:
             continue
@@ -23403,6 +23442,40 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
     return errors
 
 
+_TAG_FACET_AUDIT_ACTIONS: dict[str, str] = {
+    "create": "tag_facet.create",
+    "update": "tag_facet.update",
+    "delete": "tag_facet.delete",
+}
+
+
+async def _record_tag_facet_audit_rows(
+    before: Sequence[TagFacet],
+    after: Sequence[TagFacet],
+    *,
+    actor: str,
+    request: Request,
+) -> None:
+    """Write one audit row per created/updated/deleted tag facet (never the blob)."""
+    for change in diff_tag_facets(before, after):
+        op = change["op"]
+        facet_id = change["facet_id"]
+        changed_fields = change["changed_fields"]
+        fields_note = f" ({', '.join(changed_fields)})" if changed_fields else ""
+        await record_audit(
+            action=_TAG_FACET_AUDIT_ACTIONS[op],
+            actor=actor,
+            message=f"Tag facet '{facet_id}' {op}d{fields_note} by {actor}",
+            target_type="tag_facet",
+            target_id=facet_id,
+            details={
+                "facet_id": facet_id,
+                "changed_fields": changed_fields,
+            },
+            request=request,
+        )
+
+
 @app.put("/api/admin/settings", operation_id="updateAdminSettings")
 async def update_admin_settings(request: Request) -> JSONResponse:
     """Update one or more server settings. Body: {"settings": {"key": "value", ...}}"""
@@ -23420,6 +23493,9 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         )
 
     username = request.state.username or "admin"
+    facets_before = (
+        get_settings().parsed_tag_facets if "tag_facets" in settings_updates else None
+    )
     warnings = await _save_settings_to_db(settings_updates, username)
     changed_keys = list(settings_updates.keys())
 
@@ -23443,6 +23519,13 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         },
         request=request,
     )
+    if facets_before is not None:
+        await _record_tag_facet_audit_rows(
+            facets_before,
+            get_settings().parsed_tag_facets,
+            actor=username,
+            request=request,
+        )
 
     content: dict[str, Any] = {"updated": changed_keys}
     if warnings:
@@ -23713,6 +23796,9 @@ async def import_server_settings(request: Request) -> JSONResponse:
         return JSONResponse(content=content)
 
     username = request.state.username or "admin"
+    facets_before = (
+        get_settings().parsed_tag_facets if "tag_facets" in applied else None
+    )
     # Only keys the diff marked as applied are written — unchanged keys
     # (including sanitized-equal ones whose credentials the target keeps)
     # must not be overwritten (#361 Qodo r2).
@@ -23748,6 +23834,13 @@ async def import_server_settings(request: Request) -> JSONResponse:
         },
         request=request,
     )
+    if facets_before is not None:
+        await _record_tag_facet_audit_rows(
+            facets_before,
+            get_settings().parsed_tag_facets,
+            actor=username,
+            request=request,
+        )
     return JSONResponse(content=content)
 
 
@@ -23997,6 +24090,7 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
             status_code=400, detail=f"Server-only setting (env var only): {key}"
         )
 
+    facets_before = get_settings().parsed_tag_facets if key == "tag_facets" else None
     deleted = await storage.delete_server_setting(
         key, deleted_by=request.state.username or "admin"
     )
@@ -24038,6 +24132,13 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
         details=_audit_setting_details(key),
         request=request,
     )
+    if facets_before is not None:
+        await _record_tag_facet_audit_rows(
+            facets_before,
+            get_settings().parsed_tag_facets,
+            actor=request.state.username or "admin",
+            request=request,
+        )
 
     return JSONResponse(content=content)
 
@@ -24701,6 +24802,17 @@ def _unpack_metadata_filters(
         exclude_label,
     )
     return team, tier, version, label, exclude_label
+
+
+@app.get(
+    "/api/filters/facets",
+    operation_id="getFilterFacets",
+    response_model=FilterFacetsResponse,
+)
+async def get_filter_facets() -> dict[str, Any]:
+    """Return admin-defined tag facets with per-option match counts and missing tags."""
+    facets = await storage.get_filter_facets_with_counts()
+    return {"facets": facets}
 
 
 @app.get("/api/jobs/metadata", operation_id="listJobsMetadata")

@@ -55,6 +55,7 @@ import {
 } from '@/lib/jobFilters'
 import { MetadataLabelChips } from '@/components/shared/MetadataFilterBar'
 import { useMetadataOptions } from '@/components/shared/useMetadataOptions'
+import { useFilterFacets } from '@/components/shared/useFilterFacets'
 import { useSubmitters } from '@/components/shared/useSubmitters'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
 import { WhatsNewDialog } from '@/components/shared/WhatsNewDialog'
@@ -386,6 +387,18 @@ export function DashboardPage() {
       return next
     }, { replace: true })
   }, [setSearchParams])
+  const setLabels = useCallback((nextLabels: string[]) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      const includeSet = new Set(nextLabels)
+      const remainingExclude = next.getAll('exclude_label').filter((l) => !includeSet.has(l))
+      next.delete('label')
+      next.delete('exclude_label')
+      for (const l of nextLabels) next.append('label', l)
+      for (const l of remainingExclude) next.append('exclude_label', l)
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
   const clearSearch = useCallback(() => {
     cancelPendingSearchDebounce()
     setSearch('')
@@ -429,6 +442,7 @@ export function DashboardPage() {
   }), [search, debouncedSearch, metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels, selectedStatuses, reviewStatus, analysisState, submittedBy, dateFrom, dateTo, testName, testNameMode])
   const hasActiveFilters = useMemo(() => hasActiveJobFilters(activeFilterValues), [activeFilterValues])
   const { options: metadataOptions } = useMetadataOptions()
+  const { facets: filterFacets } = useFilterFacets()
   const setDateRange = useCallback((from: string, to: string) => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
@@ -745,6 +759,7 @@ export function DashboardPage() {
           reviewStatus={{ value: reviewStatus, onChange: setReviewStatus }}
           analysisState={{ value: analysisState, onChange: setAnalysisState }}
           dateRange={{ from: dateFrom, to: dateTo, onChange: setDateRange }}
+          facets={{ items: filterFacets, selectedLabels: metaLabels, onLabelsChange: setLabels }}
           clearAll={{ hasFilters: hasActiveFilters, onClear: clearAllFilters }}
           testName={{ name: testName, mode: testNameMode, onChange: setTestName }}
         />

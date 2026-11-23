@@ -1,5 +1,6 @@
 """Configuration settings from environment variables."""
 
+import json
 import os
 import re
 import sys
@@ -18,6 +19,7 @@ from pydantic_settings import (
 from rootcoz import get_child_logger
 from rootcoz.ai_client import normalize_provider
 from rootcoz.metadata_rules import load_metadata_rules
+from rootcoz.tag_facets import TagFacet, parse_tag_facets
 from rootcoz.url_utils import (
     _parse_valid_url,
     has_whitespace_or_control,
@@ -1209,6 +1211,28 @@ class Settings(BaseSettings):
         description="Path to a YAML/JSON file defining name-based metadata rules for auto-assignment",
     )
 
+    # Admin-defined tag facets (#658): JSON list grouping job tags into named
+    # filter dropdowns on Dashboard and Reports. Tag-existence checks run on
+    # PUT/import saves — never at startup so an env default boots cleanly on
+    # an empty database.
+    tag_facets: str = Field(
+        default="[]",
+        description=(
+            "JSON array of admin-defined tag facets grouping existing job tags "
+            "into named filter dropdowns (e.g. Platform, Storage class)"
+        ),
+    )
+
+    @field_validator("tag_facets", mode="before")
+    @classmethod
+    def _normalize_tag_facets(cls, value: Any) -> str:
+        if value is None:
+            return "[]"
+        if isinstance(value, list):
+            return json.dumps(value, separators=(",", ":"))
+        text = str(value).strip()
+        return text if text else "[]"
+
     # Log level for rootcoz loggers (restart-required: applied at startup).
     # Empty = LOG_LEVEL env / library default.
     log_level: str = Field(
@@ -1765,6 +1789,11 @@ class Settings(BaseSettings):
 
         object.__setattr__(self, "_metadata_rules_cache", rules)
         return rules
+
+    @property
+    def parsed_tag_facets(self) -> list[TagFacet]:
+        """Parse configured ``tag_facets`` safely (startup-safe, never raises)."""
+        return parse_tag_facets(self.tag_facets, strict=False)
 
     @property
     def reportportal_enabled(self) -> bool:

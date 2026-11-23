@@ -19,6 +19,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { MetadataLabelChips } from '@/components/shared/MetadataFilterBar'
 import { JobFilterBar } from '@/components/shared/JobFilterBar'
 import { useMetadataOptions } from '@/components/shared/useMetadataOptions'
+import { useFilterFacets } from '@/components/shared/useFilterFacets'
 import { useSubmitters } from '@/components/shared/useSubmitters'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
 import { Pagination } from '@/components/shared/Pagination'
@@ -160,6 +161,7 @@ type ReportsAction =
   | { type: 'TOGGLE_STATUS'; value: string }
   | { type: 'CLEAR_STATUSES' }
   | { type: 'TOGGLE_LABEL'; label: string; action: 'include' | 'exclude' | 'off' }
+  | { type: 'SET_LABELS'; labels: string[] }
   | { type: 'SET_REVIEW_STATUS'; value: ReviewStatusValue }
   | { type: 'SET_ANALYSIS_STATE'; value: AnalysisStateFilter }
   | { type: 'SET_SUBMITTERS'; values: string[] }
@@ -294,6 +296,14 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
         ...state,
         labels: action.action === 'include' ? [...curLabels, action.label] : curLabels,
         excludeLabels: action.action === 'exclude' ? [...curExclude, action.label] : curExclude,
+      }
+    }
+    case 'SET_LABELS': {
+      const includeSet = new Set(action.labels)
+      return {
+        ...state,
+        labels: action.labels,
+        excludeLabels: state.excludeLabels.filter(l => !includeSet.has(l)),
       }
     }
     case 'SET_REVIEW_STATUS':
@@ -667,6 +677,7 @@ export function ReportsPage() {
   const { activeTab, loading, error, search, teams, tiers, versions, dateFrom, dateTo, statuses, reviewStatus, analysisState, testName, testNameMode, submitters, labels, excludeLabels, totalsData, overridesData, issuesData, totalsExpanded, overridesExpandedGroups } = state
 
   const { options: metadataOptions } = useMetadataOptions()
+  const { facets: filterFacets } = useFilterFacets()
   const { submitters: submitterOptions, loading: submittersLoading } = useSubmitters()
 
   // The URL submitters are read before the spellings arrive, so they are folded
@@ -856,6 +867,11 @@ export function ReportsPage() {
             from: dateFrom,
             to: dateTo,
             onChange: (from, to) => dispatch({ type: 'SET_DATE_RANGE', from, to }),
+          }}
+          facets={{
+            items: filterFacets,
+            selectedLabels: labels,
+            onLabelsChange: (next) => dispatch({ type: 'SET_LABELS', labels: next }),
           }}
           clearAll={{
             hasFilters: hasActiveFilters,

@@ -40,7 +40,7 @@ import aiosqlite
 
 from rootcoz import get_child_logger
 from rootcoz.comment_enrichment import detect_mentions
-from rootcoz.config import SQLITE_INT_MAX
+from rootcoz.config import SQLITE_INT_MAX, get_settings
 from rootcoz.encryption import (
     decrypt_value,
     decrypt_value_or_none,
@@ -54,6 +54,11 @@ from rootcoz.models import (
     HistoryClassificationLiteral,
     OverrideClassificationLiteral,
     PatternLiteral,
+)
+from rootcoz.tag_facets import (
+    TagFacet,
+    collect_facet_tags,
+    partition_labels_by_facets,
 )
 from rootcoz.url_utils import sanitize_http_href
 
@@ -11412,19 +11417,21 @@ async def list_jobs_with_metadata(
     tier: str | list[str] = "",
     version: str | list[str] = "",
     labels: list[str] | None = None,
+    tag_facets: Sequence[TagFacet] | None = None,
 ) -> list[dict[str, Any]]:
     """List all job metadata entries, optionally filtered.
 
-    Filters combine with AND logic. Multiple labels require all to match.
-    Each of *team*, *tier*, and *version* may be a single string **or** a
-    list of strings.  When a list is given the filter matches any value in
-    the list (OR within that field).
+    Filters combine with AND logic. Labels belonging to the same configured
+    tag facet combine with OR; distinct facets and non-facet labels combine
+    with AND. Each of *team*, *tier*, and *version* may be a single string
+    **or** a list of strings (OR within that field).
 
     Args:
         team: Filter by team (exact match or list of values).
         tier: Filter by tier (exact match or list of values).
         version: Filter by version (exact match or list of values).
-        labels: Filter by labels (all must be present).
+        labels: Filter by labels (facet-grouped OR within, AND across).
+        tag_facets: Optional facet definitions override (defaults to active settings).
 
     Returns:
         List of metadata dicts.
@@ -11454,13 +11461,91 @@ async def list_jobs_with_metadata(
 
     result = [_job_metadata_row_to_dict(row) for row in rows]
 
-    # Filter by labels in Python (JSON array matching)
+    # Filter by labels using shared facet-grouped OR-within / AND-across logic
     if labels:
-        result = [
-            r for r in result if all(lbl in r.get("labels", []) for lbl in labels)
-        ]
+        active_facets = (
+            tag_facets if tag_facets is not None else get_settings().parsed_tag_facets
+        )
+        label_groups = partition_labels_by_facets(labels, active_facets)
+        if label_groups:
+            filtered_rows: list[dict[str, Any]] = []
+            for row_dict in result:
+                row_labels = set(row_dict.get("labels") or ())
+                if all(
+                    any(lbl in row_labels for lbl in group) for group in label_groups
+                ):
+                    filtered_rows.append(row_dict)
+            result = filtered_rows
 
     return result
+
+
+async def get_live_job_labels() -> set[str]:
+    """Return every distinct label currently present in ``job_metadata_labels``."""
+    async with _connect_db() as db:
+        cursor = await db.execute("SELECT DISTINCT label FROM job_metadata_labels")
+        rows = await cursor.fetchall()
+    return {row[0] for row in rows if row[0]}
+
+
+async def get_filter_facets_with_counts(
+    facets: Sequence[TagFacet] | None = None,
+) -> list[dict[str, Any]]:
+    """Return configured tag facets enriched with per-option match counts and missing tags.
+
+    Counts distinct analysis runs (``results.job_id``) whose ``job_name`` carries
+    at least one of the option's tags (OR semantics). Also flags tags that no
+    longer exist in ``job_metadata_labels`` without mutating the configuration.
+    """
+    active_facets = (
+        list(facets) if facets is not None else get_settings().parsed_tag_facets
+    )
+    if not active_facets:
+        return []
+
+    referenced_tags = sorted(collect_facet_tags(active_facets))
+    label_to_job_ids: dict[str, set[str]] = {}
+
+    async with _connect_db() as db:
+        cursor = await db.execute("SELECT DISTINCT label FROM job_metadata_labels")
+        live_labels = {row[0] for row in await cursor.fetchall() if row[0]}
+
+        if referenced_tags:
+            placeholders = ", ".join("?" for _ in referenced_tags)
+            cursor = await db.execute(
+                f"SELECT jml.label, r.job_id "
+                f"FROM results r "
+                f"JOIN job_metadata_labels jml ON jml.job_name = r.job_name "
+                f"WHERE jml.label IN ({placeholders})",
+                referenced_tags,
+            )
+            for label, job_id in await cursor.fetchall():
+                label_to_job_ids.setdefault(label, set()).add(job_id)
+
+    enriched: list[dict[str, Any]] = []
+    for facet in active_facets:
+        options_out: list[dict[str, Any]] = []
+        for opt in facet.options:
+            matched_ids: set[str] = set()
+            for tag in opt.tags:
+                matched_ids.update(label_to_job_ids.get(tag, ()))
+            missing = [tag for tag in opt.tags if tag not in live_labels]
+            options_out.append(
+                {
+                    "label": opt.label,
+                    "tags": list(opt.tags),
+                    "count": len(matched_ids),
+                    "missing_tags": missing,
+                }
+            )
+        enriched.append(
+            {
+                "id": facet.id,
+                "name": facet.name,
+                "options": options_out,
+            }
+        )
+    return enriched
 
 
 async def bulk_set_metadata(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -12991,16 +13076,23 @@ def _build_tags_filter(
     job_name_col: str,
     conditions: list[str],
     params: list[Any],
+    *,
+    tag_facets: Sequence[TagFacet] | None = None,
 ) -> None:
-    """Append tag-filtering conditions in-place.
+    """Append facet-grouped tag-filtering conditions in-place.
 
-    Tags are stored in ``job_metadata_labels`` (one row per label).
-    Matches any of the requested tags (OR semantics).
+    Tags in the same configured facet combine with OR; distinct facets and
+    non-facet tags combine with AND. Uses the same ``partition_labels_by_facets``
+    helper as Dashboard filtering.
     """
     if not tags:
         return
-    conditions.append(f"{job_name_col} IN ({_build_labels_subquery(tags)})")
-    params.extend(tags)
+    active_facets = (
+        tag_facets if tag_facets is not None else get_settings().parsed_tag_facets
+    )
+    for group in partition_labels_by_facets(tags, active_facets):
+        conditions.append(f"{job_name_col} IN ({_build_labels_subquery(group)})")
+        params.extend(group)
 
 
 def _build_exclude_tags_filter(
