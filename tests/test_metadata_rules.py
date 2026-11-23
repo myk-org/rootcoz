@@ -453,6 +453,103 @@ class TestAutoAssignJobMetadata:
             )
             assert result is None
 
+    async def test_explicit_only_no_rules_creates_row_and_records_request_source(
+        self, setup_test_db: Path
+    ) -> None:
+        """Request-only explicit metadata populates all columns when no rules exist."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            result = await storage.auto_assign_job_metadata(
+                "unmatched-pipeline-job",
+                [],
+                explicit={"team": "storage-platform", "tier": "2", "version": "5.1"},
+            )
+            assert result is not None
+            assert result["team"] == "storage-platform"
+            assert result["tier"] == "2"
+            assert result["version"] == "5.1"
+            assert result["sources"] == {
+                "team": "request",
+                "tier": "request",
+                "version": "request",
+            }
+            stored = await storage.get_job_metadata("unmatched-pipeline-job")
+            assert stored is not None
+            assert stored["team"] == "storage-platform"
+            assert stored["tier"] == "2"
+            assert stored["version"] == "5.1"
+
+    async def test_explicit_wins_per_field_and_rules_fill_omitted(
+        self, setup_test_db: Path
+    ) -> None:
+        """Precedence is per-field: request -> rules -> empty."""
+        rules = [
+            {
+                "pattern": "test-*-storage-*",
+                "team": "rule-storage",
+                "tier": "t2",
+                "version": "5.0",
+                "labels": ["pytest"],
+            }
+        ]
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            result = await storage.auto_assign_job_metadata(
+                "test-cnv-storage-nfs",
+                rules,
+                extra_labels=["gating"],
+                explicit={"team": "storage-platform", "tier": "", "version": None},
+            )
+            assert result is not None
+            assert result["team"] == "storage-platform"
+            assert result["tier"] == "t2"
+            assert result["version"] == "5.0"
+            assert result["labels"] == ["pytest", "gating"]
+            assert result["sources"] == {
+                "team": "request",
+                "tier": "rules",
+                "version": "rules",
+                "labels": "request+rules",
+            }
+
+    async def test_existing_non_null_preserved_over_explicit_and_rules(
+        self, setup_test_db: Path
+    ) -> None:
+        """Manual PUT .../metadata stays sticky; only NULL columns are filled."""
+        rules = [
+            {
+                "pattern": "test-*-storage-*",
+                "team": "rule-team",
+                "tier": "rule-tier",
+                "version": "5.0",
+            }
+        ]
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.set_job_metadata("test-cnv-storage-nfs", team="manual-team")
+            result = await storage.auto_assign_job_metadata(
+                "test-cnv-storage-nfs",
+                rules,
+                explicit={"team": "req-team", "tier": "2"},
+            )
+            assert result is not None
+            assert result["team"] == "manual-team"
+            assert result["tier"] == "2"
+            assert result["version"] == "5.0"
+            assert result["sources"] == {"tier": "request", "version": "rules"}
+
+            # Second call with different explicit values changes nothing -> None
+            second = await storage.auto_assign_job_metadata(
+                "test-cnv-storage-nfs",
+                rules,
+                explicit={"team": "other", "tier": "9", "version": "9.9"},
+            )
+            assert second is None
+            stored = await storage.get_job_metadata("test-cnv-storage-nfs")
+            assert stored is not None
+            assert (stored["team"], stored["tier"], stored["version"]) == (
+                "manual-team",
+                "2",
+                "5.0",
+            )
+
 
 # --- API endpoint tests ---
 
@@ -798,3 +895,310 @@ class TestSettingsMetadataRules:
 
             s = Settings()
             assert s.metadata_rules == []
+
+
+class TestAnalyzeAndSubmitMetadataAPI:
+    """End-to-end API + audit tests for request team/tier/version (#657)."""
+
+    @staticmethod
+    def _wait_for_completion(client, job_id: str) -> dict:
+        import time
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            resp = client.get(f"/results/{job_id}")
+            assert resp.status_code in (200, 202), resp.text
+            data = resp.json()
+            if data.get("status") in ("completed", "failed"):
+                return data
+            time.sleep(0.02)
+        raise AssertionError(f"Job {job_id} did not complete in time")
+
+    @staticmethod
+    def _init_sync_db(db_path: Path) -> None:
+        import asyncio
+
+        with patch.object(storage, "DB_PATH", db_path):
+            asyncio.run(storage.init_db())
+
+    @classmethod
+    def _api_client(cls, db_path: Path, *, metadata_rules_file: str = ""):
+        from contextlib import contextmanager
+
+        from fastapi.testclient import TestClient
+
+        from rootcoz import main as rootcoz_main
+        from rootcoz.config import Settings
+
+        @contextmanager
+        def _ctx():
+            cls._init_sync_db(db_path)
+            settings = Settings(
+                admin_key="test-admin-key-16chars",  # pragma: allowlist secret
+                metadata_rules_file=metadata_rules_file,
+                secure_cookies=False,
+            )
+            rootcoz_main.app.dependency_overrides[rootcoz_main.get_settings] = lambda: (
+                settings
+            )
+            try:
+                with (
+                    patch.object(storage, "DB_PATH", db_path),
+                    patch.object(rootcoz_main, "get_settings", return_value=settings),
+                    TestClient(rootcoz_main.app, headers=_RULES_AUTH_HEADERS) as client,
+                ):
+                    yield client
+            finally:
+                rootcoz_main.app.dependency_overrides.pop(
+                    rootcoz_main.get_settings, None
+                )
+
+        return _ctx()
+
+    def test_submit_request_only_populates_dashboard_filters_and_audits(
+        self, temp_db_path: Path
+    ) -> None:
+        import asyncio
+
+        with self._api_client(temp_db_path) as client:
+            resp = client.post(
+                "/submit",
+                json={
+                    "type": "file",
+                    "job_name": "ci-unmatched-storage-job",
+                    "raw_xml": (
+                        '<testsuite name="ci-unmatched-storage-job">'
+                        '<testcase name="test_one"><failure>boom</failure></testcase>'
+                        "</testsuite>"
+                    ),
+                    "team": "storage-platform",
+                    "tier": "2",
+                    "version": "5.1",
+                    "labels": ["gating"],
+                },
+            )
+            assert resp.status_code == 202, resp.text
+            job_id = resp.json()["job_id"]
+            done = self._wait_for_completion(client, job_id)
+            assert done["status"] == "completed"
+
+            filtered = client.get(
+                "/api/dashboard/filtered",
+                params={
+                    "team": "storage-platform",
+                    "tier": "2",
+                    "version": "5.1",
+                },
+            )
+            assert filtered.status_code == 200, filtered.text
+            jobs = filtered.json()["jobs"]
+            assert any(j["job_id"] == job_id for j in jobs)
+
+            audit = asyncio.run(storage.list_audit_events(action="job.metadata_set"))[
+                "events"
+            ]
+            assert len(audit) == 1
+            ev = audit[0]
+            assert ev["outcome"] == "success"
+            assert ev["target_type"] == "job"
+            assert ev["target_id"] == "ci-unmatched-storage-job"
+            assert ev["details"]["trigger"] == "ingest"
+            assert ev["details"]["job_id"] == job_id
+            assert ev["details"]["sources"] == {
+                "team": "request",
+                "tier": "request",
+                "version": "request",
+                "labels": "request",
+            }
+
+            # Second submit with different team preserves existing non-NULL team
+            resp2 = client.post(
+                "/submit",
+                json={
+                    "type": "file",
+                    "job_name": "ci-unmatched-storage-job",
+                    "raw_xml": (
+                        '<testsuite name="ci-unmatched-storage-job">'
+                        '<testcase name="test_two"><failure>boom</failure></testcase>'
+                        "</testsuite>"
+                    ),
+                    "team": "other-team",
+                    "tier": "9",
+                    "version": "9.9",
+                },
+            )
+            assert resp2.status_code == 202, resp2.text
+            done2 = self._wait_for_completion(client, resp2.json()["job_id"])
+            assert done2["status"] == "completed"
+
+            stored = asyncio.run(storage.get_job_metadata("ci-unmatched-storage-job"))
+            assert stored is not None
+            assert (stored["team"], stored["tier"], stored["version"]) == (
+                "storage-platform",
+                "2",
+                "5.1",
+            )
+            # No extra audit row when nothing changed
+            audit_after = asyncio.run(
+                storage.list_audit_events(action="job.metadata_set")
+            )["events"]
+            assert len(audit_after) == 1
+
+    def test_submit_rules_only_regression_and_mixed_precedence_audit(
+        self, temp_db_path: Path, tmp_path: Path
+    ) -> None:
+        import asyncio
+
+        rules_file = tmp_path / "metadata-rules.yaml"
+        rules_file.write_text(
+            "metadata_rules:\n"
+            "  - pattern: 'test-cnv-*'\n"
+            "    team: rule-team\n"
+            "    tier: t1\n"
+            "    version: '5.0'\n"
+            "    labels: [pytest]\n",
+            encoding="utf-8",
+        )
+        with self._api_client(
+            temp_db_path, metadata_rules_file=str(rules_file)
+        ) as client:
+            # 1) Rules-only submission (regression check)
+            r1 = client.post(
+                "/submit",
+                json={
+                    "type": "raw",
+                    "name": "test-cnv-rules-only",
+                    "failures": [{"test_name": "t1", "error_message": "e"}],
+                },
+            )
+            assert r1.status_code == 202, r1.text
+            self._wait_for_completion(client, r1.json()["job_id"])
+
+            m1 = asyncio.run(storage.get_job_metadata("test-cnv-rules-only"))
+            assert m1 is not None
+            assert (m1["team"], m1["tier"], m1["version"]) == (
+                "rule-team",
+                "t1",
+                "5.0",
+            )
+
+            # 2) Mixed: request overrides team, empty string tier falls back to rules
+            r2 = client.post(
+                "/submit",
+                json={
+                    "type": "raw",
+                    "name": "test-cnv-mixed",
+                    "team": "override-team",
+                    "tier": "   ",
+                    "failures": [{"test_name": "t2", "error_message": "e"}],
+                },
+            )
+            assert r2.status_code == 202, r2.text
+            self._wait_for_completion(client, r2.json()["job_id"])
+
+            m2 = asyncio.run(storage.get_job_metadata("test-cnv-mixed"))
+            assert m2 is not None
+            assert (m2["team"], m2["tier"], m2["version"]) == (
+                "override-team",
+                "t1",
+                "5.0",
+            )
+
+            events = asyncio.run(storage.list_audit_events(action="job.metadata_set"))[
+                "events"
+            ]
+            by_job = {e["target_id"]: e for e in events}
+            assert by_job["test-cnv-rules-only"]["details"]["sources"] == {
+                "team": "rules",
+                "tier": "rules",
+                "version": "rules",
+                "labels": "rules",
+            }
+            assert by_job["test-cnv-mixed"]["details"]["sources"] == {
+                "team": "request",
+                "tier": "rules",
+                "version": "rules",
+                "labels": "rules",
+            }
+
+    @pytest.mark.parametrize("endpoint", ["/submit", "/analyze"])
+    @pytest.mark.parametrize(
+        "bad_payload",
+        [
+            {"team": "a" * 65},
+            {"tier": "b" * 33},
+            {"version": "c" * 65},
+            {"team": "bad\x00team"},
+            {"tier": "2\ninjected"},
+        ],
+    )
+    def test_invalid_metadata_returns_422_at_boundary(
+        self, temp_db_path: Path, endpoint: str, bad_payload: dict[str, str]
+    ) -> None:
+        with self._api_client(temp_db_path) as client:
+            resp = client.post(
+                endpoint,
+                json={
+                    "type": "raw",
+                    "failures": [{"test_name": "t1", "error_message": "e"}],
+                    **bad_payload,
+                },
+            )
+            assert resp.status_code == 422, resp.text
+
+    async def test_auto_assign_metadata_failure_is_audited_and_best_effort(
+        self, setup_test_db: Path
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        from rootcoz import main as rootcoz_main
+
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch.object(
+                storage,
+                "auto_assign_job_metadata",
+                AsyncMock(side_effect=RuntimeError("db locked")),
+            ),
+        ):
+            await rootcoz_main._auto_assign_metadata(
+                "failing-job",
+                [],
+                explicit={"team": "storage"},
+                actor="alice",
+                job_id="job-123",
+            )
+            events = (await storage.list_audit_events(action="job.metadata_set"))[
+                "events"
+            ]
+            assert len(events) == 1
+            assert events[0]["outcome"] == "failure"
+            assert events[0]["actor"] == "alice"
+            assert events[0]["target_id"] == "failing-job"
+            assert events[0]["details"] == {
+                "trigger": "ingest",
+                "reason": "internal_error",
+                "job_id": "job-123",
+            }
+
+    def test_reconstruct_from_params_round_trips_metadata_scalars(self) -> None:
+        from rootcoz import main as rootcoz_main
+
+        result_data = {
+            "job_name": "my-job",
+            "build_number": 7,
+            "request_params": {
+                "analysis_type": "jenkins",
+                "job_name": "my-job",
+                "build_number": 7,
+                "team": "storage-platform",
+                "tier": "2",
+                "version": "5.1",
+                "labels": ["gating"],
+            },
+        }
+        body, _ = rootcoz_main._reconstruct_from_params(result_data)
+        assert body.team == "storage-platform"
+        assert body.tier == "2"
+        assert body.version == "5.1"
+        assert body.labels == ["gating"]

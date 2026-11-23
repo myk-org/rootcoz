@@ -114,6 +114,47 @@ def _normalize_labels(labels: object) -> list[str]:
     return _normalize_string_list(labels, field_name="labels")
 
 
+MAX_METADATA_TEAM_LENGTH = 64
+MAX_METADATA_TIER_LENGTH = 32
+MAX_METADATA_VERSION_LENGTH = 64
+
+_METADATA_SCALAR_LIMITS: dict[str, int] = {
+    "team": MAX_METADATA_TEAM_LENGTH,
+    "tier": MAX_METADATA_TIER_LENGTH,
+    "version": MAX_METADATA_VERSION_LENGTH,
+}
+
+
+def _validate_metadata_scalar(
+    value: str | None, *, field_name: str, max_length: int
+) -> str | None:
+    """Trim and validate an optional job metadata scalar (team/tier/version).
+
+    Empty or whitespace-only strings normalize to ``None`` (unset).
+    Rejects control/non-printable characters and values exceeding *max_length*.
+    Never echoes the raw untrusted value in error messages.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        # Standard ASCII whitespace ("", "   ", " \t ") means unset; non-whitespace
+        # control characters stripped by str.strip() (e.g. \x1c-\x1f, \x0b, \x0c)
+        # are still rejected.
+        if any(ord(ch) < 32 and ch not in ("\t", "\n", "\r") for ch in value):
+            raise ValueError(
+                f"{field_name} must not contain control or non-printable characters"
+            )
+        return None
+    if not value.isprintable():
+        raise ValueError(
+            f"{field_name} must not contain control or non-printable characters"
+        )
+    if len(stripped) > max_length:
+        raise ValueError(f"{field_name} must be at most {max_length} characters")
+    return stripped
+
+
 def _coerce_ai_provider(v: object) -> object:
     """Normalize provider spelling; Pi-sidecar validates catalog membership."""
     if not isinstance(v, str):
@@ -353,6 +394,30 @@ class BaseAnalysisRequest(BaseModel):
             "Omit to inherit the server default; send [] to disable."
         ),
     )
+    team: str | None = Field(
+        default=None,
+        description=(
+            "Owning team for job_metadata.team (at most 64 chars, trimmed; "
+            "empty string treated as omitted). Takes precedence over "
+            "metadata-rules.yaml when the stored column is NULL."
+        ),
+    )
+    tier: str | None = Field(
+        default=None,
+        description=(
+            "Service tier for job_metadata.tier (at most 32 chars, trimmed; "
+            "empty string treated as omitted). Takes precedence over "
+            "metadata-rules.yaml when the stored column is NULL."
+        ),
+    )
+    version: str | None = Field(
+        default=None,
+        description=(
+            "Version or release label for job_metadata.version (at most 64 chars, "
+            "trimmed; empty string treated as omitted). Takes precedence over "
+            "metadata-rules.yaml when the stored column is NULL."
+        ),
+    )
     labels: list[str] = Field(
         default_factory=list,
         description=(
@@ -384,6 +449,18 @@ class BaseAnalysisRequest(BaseModel):
             return None
         stripped = v.strip()
         return stripped or None
+
+    @field_validator("team", "tier", "version")
+    @classmethod
+    def _validate_metadata_scalar_field(
+        cls, v: str | None, info: ValidationInfo
+    ) -> str | None:
+        field_name = info.field_name or ""
+        return _validate_metadata_scalar(
+            v,
+            field_name=field_name,
+            max_length=_METADATA_SCALAR_LIMITS[field_name],
+        )
 
     @field_validator("labels", mode="before")
     @classmethod

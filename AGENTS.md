@@ -529,6 +529,7 @@ Request-only fields on `UnifiedAnalyzeRequest` (per-build, no server-level defau
 - `gcs_prefix` — GCS path prefix, unique per Prow build (e.g. `pr-logs/pull/org_repo/pr/job/build_id`). When empty, auto-resolves via prowjob.json or pr-logs/directory pointer.
 - `raw_xml` — raw JUnit XML content for file source
 - `failures` — raw failure list for raw source
+- `team`, `tier`, `version` — optional per-job filter metadata on `BaseAnalysisRequest` (`team` ≤ 64, `tier` ≤ 32, `version` ≤ 64, trimmed, empty ⇒ unset, invalid ⇒ `422`); per-field precedence is request → `metadata-rules.yaml` → empty, never overwriting an existing non-NULL stored column, audited via `job.metadata_set` with `trigger: "ingest"` and per-field `sources` (`request` vs `rules`)
 
 ### Sensitive Data Handling
 

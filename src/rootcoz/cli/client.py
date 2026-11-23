@@ -1067,6 +1067,31 @@ class RootCozClient:
 
     # -- Analysis -------------------------------------------------------------
 
+    @staticmethod
+    def _apply_optional_analysis_fields(
+        body: dict[str, Any],
+        *,
+        name: str = "",
+        tags: list[str] | None = None,
+        labels: list[str] | None = None,
+        team: str = "",
+        tier: str = "",
+        version: str = "",
+    ) -> None:
+        """Attach optional display/metadata fields to an analyze/submit payload."""
+        if name:
+            body["name"] = name
+        if tags:
+            body["tags"] = tags
+        if labels:
+            body["labels"] = labels
+        if team:
+            body["team"] = team
+        if tier:
+            body["tier"] = tier
+        if version:
+            body["version"] = version
+
     def analyze(
         self,
         job_name: str = "",
@@ -1075,6 +1100,9 @@ class RootCozClient:
         name: str = "",
         tags: list[str] | None = None,
         labels: list[str] | None = None,
+        team: str = "",
+        tier: str = "",
+        version: str = "",
         endpoint: str = "/analyze",
         **kwargs: Any,
     ) -> dict[str, Any]:
@@ -1090,6 +1118,9 @@ class RootCozClient:
             tags: Optional list of tags for categorization.
             labels: Optional job-side labels to merge into
                 ``job_metadata.labels``.
+            team: Optional owning team for ``job_metadata.team``.
+            tier: Optional service tier for ``job_metadata.tier``.
+            version: Optional version label for ``job_metadata.version``.
             endpoint: Path to POST (``/analyze`` or ``/submit``).
             **kwargs: Additional fields (type, prow_job_name, build_id, etc.).
 
@@ -1105,12 +1136,15 @@ class RootCozClient:
                 raise ValueError("build_number must be positive for Jenkins analysis")
             body["job_name"] = job_name
             body["build_number"] = build_number
-        if name:
-            body["name"] = name
-        if tags:
-            body["tags"] = tags
-        if labels:
-            body["labels"] = labels
+        self._apply_optional_analysis_fields(
+            body,
+            name=name,
+            tags=tags,
+            labels=labels,
+            team=team,
+            tier=tier,
+            version=version,
+        )
         return self._request(
             "POST",
             endpoint,
@@ -1126,6 +1160,9 @@ class RootCozClient:
         name: str = "",
         tags: list[str] | None = None,
         labels: list[str] | None = None,
+        team: str = "",
+        tier: str = "",
+        version: str = "",
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Queue CI ingest without AI. POST /submit"""
@@ -1135,6 +1172,9 @@ class RootCozClient:
             name=name,
             tags=tags,
             labels=labels,
+            team=team,
+            tier=tier,
+            version=version,
             endpoint="/submit",
             **kwargs,
         )
@@ -1147,6 +1187,9 @@ class RootCozClient:
         job_name: str = "",
         tags: list[str] | None = None,
         labels: list[str] | None = None,
+        team: str = "",
+        tier: str = "",
+        version: str = "",
         endpoint: str = "/analyze",
         **kwargs: Any,
     ) -> dict[str, Any]:
@@ -1159,6 +1202,9 @@ class RootCozClient:
             tags: Optional list of tags for categorization.
             labels: Optional job-side labels to merge into
                 ``job_metadata.labels``.
+            team: Optional owning team for ``job_metadata.team``.
+            tier: Optional service tier for ``job_metadata.tier``.
+            version: Optional version label for ``job_metadata.version``.
             endpoint: Path to POST (``/analyze`` or ``/submit``).
             **kwargs: Additional fields for the UnifiedAnalyzeRequest body.
 
@@ -1168,14 +1214,17 @@ class RootCozClient:
         body: dict[str, Any] = {**kwargs}
         body["type"] = "file"
         body["raw_xml"] = raw_xml
-        if name:
-            body["name"] = name
         if job_name:
             body["job_name"] = job_name
-        if tags:
-            body["tags"] = tags
-        if labels:
-            body["labels"] = labels
+        self._apply_optional_analysis_fields(
+            body,
+            name=name,
+            tags=tags,
+            labels=labels,
+            team=team,
+            tier=tier,
+            version=version,
+        )
         return self._request(
             "POST",
             endpoint,
@@ -1191,6 +1240,9 @@ class RootCozClient:
         job_name: str = "",
         tags: list[str] | None = None,
         labels: list[str] | None = None,
+        team: str = "",
+        tier: str = "",
+        version: str = "",
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Queue JUnit XML ingest without AI. POST /submit with type=file"""
@@ -1200,6 +1252,9 @@ class RootCozClient:
             job_name=job_name,
             tags=tags,
             labels=labels,
+            team=team,
+            tier=tier,
+            version=version,
             endpoint="/submit",
             **kwargs,
         )

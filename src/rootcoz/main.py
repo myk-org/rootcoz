@@ -2649,6 +2649,9 @@ _ANALYSIS_SETTINGS_FIELDS = (
     "github_token",
     "ai_call_timeout",
     "max_concurrent_ai_calls",
+    "team",
+    "tier",
+    "version",
     "labels",
 )
 
@@ -2740,6 +2743,9 @@ def _reconstruct_from_params(
             else None
         ),
         "tests_repo_token": params.get("tests_repo_token", None),
+        "team": params.get("team") or None,
+        "tier": params.get("tier") or None,
+        "version": params.get("version") or None,
         "labels": params.get("labels", params.get("metadata_labels", [])),
     }
     for jenkins_field in (
@@ -6203,25 +6209,89 @@ async def _enrich_result_with_tests_repo_matches(
 _AI_SESSION_TTL_HOURS = 8  # Short-lived for AI internal API calls
 
 
+def _extract_explicit_metadata(
+    body: BaseAnalysisRequest,
+) -> dict[str, str] | None:
+    """Extract non-empty request-supplied scalar metadata (team/tier/version)."""
+    explicit = {
+        key: value
+        for key, value in (
+            ("team", body.team),
+            ("tier", body.tier),
+            ("version", body.version),
+        )
+        if value
+    }
+    return explicit or None
+
+
 async def _auto_assign_metadata(
     display_name: str,
     metadata_rules: list[dict[str, Any]] | None,
     extra_labels: list[str] | None = None,
+    *,
+    explicit: dict[str, str] | None = None,
+    actor: str = "",
+    is_admin: bool = False,
+    job_id: str = "",
 ) -> None:
-    """Best-effort metadata auto-assignment and optional label merge."""
+    """Best-effort metadata auto-assignment, label merge, and ingest audit."""
     rules = metadata_rules or []
     extras = extra_labels or []
-    if not rules and not extras:
+    explicit_clean = {k: v for k, v in (explicit or {}).items() if v}
+    if not rules and not extras and not explicit_clean:
         return
     try:
-        await storage.auto_assign_job_metadata(
-            display_name, rules, extra_labels=extras or None
+        assigned = await storage.auto_assign_job_metadata(
+            display_name,
+            rules,
+            extra_labels=extras or None,
+            explicit=explicit_clean or None,
         )
     except Exception:
         logger.warning(
             "Failed to auto-assign metadata for job '%s'",
             display_name,
             exc_info=True,
+        )
+        failure_details: dict[str, Any] = {
+            "trigger": "ingest",
+            "reason": "internal_error",
+        }
+        if job_id:
+            failure_details["job_id"] = job_id
+        await record_audit(
+            action="job.metadata_set",
+            actor=actor or "system",
+            actor_role=None if actor else "system",
+            is_admin=is_admin,
+            message=f"Ingest failed to assign metadata for job '{display_name}'",
+            target_type="job",
+            target_id=display_name,
+            outcome="failure",
+            details=failure_details,
+        )
+        return
+    sources = (assigned or {}).get("sources") or {}
+    if sources:
+        summary = ", ".join(f"{k}={v}" for k, v in sorted(sources.items()))
+        details: dict[str, Any] = {
+            "trigger": "ingest",
+            "keys": sorted(sources),
+            "sources": sources,
+        }
+        if job_id:
+            details["job_id"] = job_id
+        await record_audit(
+            action="job.metadata_set",
+            actor=actor or "system",
+            actor_role=None if actor else "system",
+            is_admin=is_admin,
+            message=f"Ingest assigned metadata for job '{display_name}' ({summary})",
+            target_type="job",
+            target_id=display_name,
+            outcome="success",
+            details=details,
         )
 
 
@@ -6604,7 +6674,11 @@ def _apply_base_analysis_overrides(
     # Always persist peer_analysis_max_rounds so non-default values survive
     # re-analyze round-trips.
     params["peer_analysis_max_rounds"] = merged.peer_analysis_max_rounds
-    # Persist labels for resume/re-analyze round-trips
+    # Persist job metadata overrides & labels for resume/re-analyze round-trips
+    for meta_key in ("team", "tier", "version"):
+        meta_val = getattr(body, meta_key, None)
+        if meta_val:
+            params[meta_key] = meta_val
     if body.labels:
         params["labels"] = body.labels
 
@@ -6833,6 +6907,9 @@ async def _finish_ci_ingest(
     metadata_rules: Any,
     ingest_only: bool,
     source: CISource | None,
+    explicit_metadata: dict[str, str] | None = None,
+    actor: str = "",
+    is_admin: bool = False,
 ) -> None:
     """Persist fetched CI results and stop before AI when ingest_only."""
     _all_entries = source_result.test_entry_dicts()
@@ -6881,15 +6958,19 @@ async def _finish_ci_ingest(
         result_data.get("passed_count", passed_count),
         result_data.get("skipped_count", skipped_count),
     )
-    await update_status(job_id, "completed", result_data)
-    notify_active_count_changed()
-    notify_dashboard_changed()
-    notify_job_status_changed(job_id)
     await _auto_assign_metadata(
         metadata_job_name,
         metadata_rules,
         extra_labels=extra_labels,
+        explicit=explicit_metadata,
+        actor=actor,
+        is_admin=is_admin,
+        job_id=job_id,
     )
+    await update_status(job_id, "completed", result_data)
+    notify_active_count_changed()
+    notify_dashboard_changed()
+    notify_job_status_changed(job_id)
 
 
 def _resolve_additional_repos_validated(
@@ -7338,6 +7419,9 @@ async def _analyze_failures_or_exit(
     child_job_analyses: list[ChildJobAnalysis] | None = None,
     child_test_scopes: list[tuple[str, int, list[dict[str, Any]]]] | None = None,
     extra_labels: list[str] | None = None,
+    explicit_metadata: dict[str, str] | None = None,
+    actor: str = "",
+    is_admin: bool = False,
 ) -> tuple[list[Any], list[Any], int, list[CrossFailurePattern]] | None:
     """Resolve console-only / no-failure / junit analysis paths.
 
@@ -7433,13 +7517,19 @@ async def _analyze_failures_or_exit(
         await _persist_test_entries_and_cache_counts(
             job_id, source_result, child_test_scopes, result_data
         )
+        await _auto_assign_metadata(
+            metadata_job_name,
+            merged.metadata_rules,
+            extra_labels=extra_labels,
+            explicit=explicit_metadata,
+            actor=actor,
+            is_admin=is_admin,
+            job_id=job_id,
+        )
         await update_status(job_id, "completed", result_data)
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
-        await _auto_assign_metadata(
-            metadata_job_name, merged.metadata_rules, extra_labels=extra_labels
-        )
         return None
 
     # Normal path: structured test failures
@@ -7693,6 +7783,7 @@ async def _process_ci_source_analysis(
     source_result = None  # set after source.fetch(); used by _stamp_source_warnings
     metadata_job_name = display_name  # updated from source_result.identity after fetch
     extra_labels = body.labels or None
+    explicit_metadata = _extract_explicit_metadata(body)
 
     try:
         logger.info(
@@ -7765,6 +7856,9 @@ async def _process_ci_source_analysis(
                 metadata_rules=merged.metadata_rules,
                 ingest_only=ingest_only,
                 source=source,
+                explicit_metadata=explicit_metadata,
+                actor=username,
+                is_admin=is_admin,
             )
             return
 
@@ -8117,16 +8211,20 @@ async def _process_ci_source_analysis(
                         job_id,
                         exc_info=True,
                     )
+                await _auto_assign_metadata(
+                    metadata_job_name,
+                    merged.metadata_rules,
+                    extra_labels=extra_labels,
+                    explicit=explicit_metadata,
+                    actor=username,
+                    is_admin=is_admin,
+                    job_id=job_id,
+                )
                 await update_status(job_id, "completed", result_data)
                 notify_active_count_changed()
                 notify_dashboard_changed()
                 notify_job_status_changed(job_id)
                 notify_token_usage_changed()
-                await _auto_assign_metadata(
-                    metadata_job_name,
-                    merged.metadata_rules,
-                    extra_labels=extra_labels,
-                )
                 await storage.make_classifications_visible(job_id)
                 return
 
@@ -8151,6 +8249,9 @@ async def _process_ci_source_analysis(
             child_job_analyses=child_job_analyses,
             child_test_scopes=child_test_scopes,
             extra_labels=extra_labels,
+            explicit_metadata=explicit_metadata,
+            actor=username,
+            is_admin=is_admin,
         )
         if analysis_result_tuple is None:
             return
@@ -8316,18 +8417,23 @@ async def _process_ci_source_analysis(
                 exc_info=True,
             )
 
+        # Auto-assign job metadata from request fields / rules / labels before
+        # flipping status to completed so dashboard filters see it immediately.
+        await _auto_assign_metadata(
+            metadata_job_name,
+            merged.metadata_rules,
+            extra_labels=extra_labels,
+            explicit=explicit_metadata,
+            actor=username,
+            is_admin=is_admin,
+            job_id=job_id,
+        )
+
         await update_status(job_id, analysis_status, result_data)
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
         notify_token_usage_changed()
-
-        # Auto-assign job metadata from name pattern rules / request labels
-        await _auto_assign_metadata(
-            metadata_job_name,
-            merged.metadata_rules,
-            extra_labels=extra_labels,
-        )
 
         # Reveal classifications created during analysis
         await storage.make_classifications_visible(job_id)

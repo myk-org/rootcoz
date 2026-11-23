@@ -474,6 +474,20 @@ class TestRootCozClientAnalyze:
         result = client.analyze("my-job", 1, labels=["Nightly", "CNV"])
         assert result["status"] == "queued"
 
+    def test_analyze_with_metadata_scalars(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body["team"] == "storage-platform"
+            assert body["tier"] == "2"
+            assert body["version"] == "5.1"
+            return httpx.Response(202, json={"status": "queued", "job_id": "meta-1"})
+
+        client = _make_client(handler)
+        result = client.analyze(
+            "my-job", 1, team="storage-platform", tier="2", version="5.1"
+        )
+        assert result["job_id"] == "meta-1"
+
     def test_submit_posts_submit_path(self):
         def handler(request):
             assert request.url.path == "/submit"
@@ -482,6 +496,21 @@ class TestRootCozClientAnalyze:
         client = _make_client(handler)
         result = client.submit("my-job", 42)
         assert result["job_id"] == "s-1"
+
+    def test_submit_with_metadata_scalars(self):
+        def handler(request):
+            assert request.url.path == "/submit"
+            body = json.loads(request.content)
+            assert body["team"] == "storage-platform"
+            assert body["tier"] == "2"
+            assert body["version"] == "5.1"
+            return httpx.Response(202, json={"status": "queued", "job_id": "s-meta"})
+
+        client = _make_client(handler)
+        result = client.submit(
+            "my-job", 42, team="storage-platform", tier="2", version="5.1"
+        )
+        assert result["job_id"] == "s-meta"
 
     def test_analyze_submitted(self):
         def handler(request):
@@ -1396,6 +1425,26 @@ class TestRootCozClientAnalyzeFile:
         client = _make_client(handler)
         result = client.submit_file("<testsuites/>", job_name="my-junit-suite")
         assert result["status"] == "queued"
+
+    def test_analyze_and_submit_file_with_metadata_scalars(self):
+        seen: list[tuple[str, dict]] = []
+
+        def handler(request):
+            seen.append((request.url.path, json.loads(request.content)))
+            return httpx.Response(202, json={"status": "queued", "job_id": "fm-1"})
+
+        client = _make_client(handler)
+        client.analyze_file(
+            "<testsuites/>", team="storage-platform", tier="2", version="5.1"
+        )
+        client.submit_file(
+            "<testsuites/>", team="storage-platform", tier="2", version="5.1"
+        )
+        assert [p for p, _ in seen] == ["/analyze", "/submit"]
+        for _, body in seen:
+            assert body["team"] == "storage-platform"
+            assert body["tier"] == "2"
+            assert body["version"] == "5.1"
 
 
 class TestRootCozClientAnalyzeProw:

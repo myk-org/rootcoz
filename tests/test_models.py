@@ -1601,3 +1601,106 @@ class TestFileJobNameValidation:
             type="jenkins", job_name="folder/my-job", build_number=42
         )
         assert req.job_name == "folder/my-job"
+
+
+class TestAnalysisRequestMetadataScalars:
+    """Tests for team/tier/version validation on BaseAnalysisRequest (#657)."""
+
+    def test_valid_values_trimmed_and_accepted(self) -> None:
+        from rootcoz.models import UnifiedAnalyzeRequest
+
+        req = UnifiedAnalyzeRequest(
+            type="raw",
+            failures=[{"test_name": "t1", "error_message": "boom"}],
+            team="  storage-platform  ",
+            tier=" 2 ",
+            version=" 5.1 ",
+        )
+        assert req.team == "storage-platform"
+        assert req.tier == "2"
+        assert req.version == "5.1"
+
+    def test_exact_max_lengths_accepted(self) -> None:
+        from rootcoz.models import UnifiedAnalyzeRequest
+
+        req = UnifiedAnalyzeRequest(
+            type="raw",
+            failures=[{"test_name": "t1", "error_message": "boom"}],
+            team="a" * 64,
+            tier="b" * 32,
+            version="c" * 64,
+        )
+        assert req.team == "a" * 64
+        assert req.tier == "b" * 32
+        assert req.version == "c" * 64
+
+    @pytest.mark.parametrize("blank", ["", "   ", " \t "])
+    def test_empty_and_whitespace_strings_normalize_to_none(self, blank: str) -> None:
+        from rootcoz.models import UnifiedAnalyzeRequest
+
+        req = UnifiedAnalyzeRequest(
+            type="raw",
+            failures=[{"test_name": "t1", "error_message": "boom"}],
+            team=blank,
+            tier=blank,
+            version=blank,
+        )
+        assert req.team is None
+        assert req.tier is None
+        assert req.version is None
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("team", "a" * 65),
+            ("tier", "b" * 33),
+            ("version", "c" * 65),
+        ],
+    )
+    def test_over_length_values_rejected(self, field: str, value: str) -> None:
+        from rootcoz.models import UnifiedAnalyzeRequest
+
+        with pytest.raises(ValidationError):
+            UnifiedAnalyzeRequest(
+                type="raw",
+                failures=[{"test_name": "t1", "error_message": "boom"}],
+                **{field: value},
+            )
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "team\x00name",
+            "team\nname",
+            "team\r\n",
+            "team\tname",
+            "team\x1b[31m",
+            "team\x7f",
+            "\x00",
+            "\x1f",
+        ],
+    )
+    @pytest.mark.parametrize("field", ["team", "tier", "version"])
+    def test_control_characters_rejected_without_echo(
+        self, field: str, bad: str
+    ) -> None:
+        from rootcoz.models import UnifiedAnalyzeRequest
+
+        with pytest.raises(ValidationError) as exc_info:
+            UnifiedAnalyzeRequest(
+                type="raw",
+                failures=[{"test_name": "t1", "error_message": "boom"}],
+                **{field: bad},
+            )
+        assert "control or non-printable" in str(exc_info.value)
+
+    @pytest.mark.parametrize("field", ["team", "tier", "version"])
+    def test_non_string_rejected(self, field: str) -> None:
+        from rootcoz.models import UnifiedAnalyzeRequest
+
+        with pytest.raises(ValidationError):
+            UnifiedAnalyzeRequest(
+                type="raw",
+                failures=[{"test_name": "t1", "error_message": "boom"}],
+                **{field: 123},  # type: ignore[arg-type]
+            )

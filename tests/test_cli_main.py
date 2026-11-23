@@ -1463,6 +1463,85 @@ class TestAnalyzeCommand:
         mock_client.submit.assert_called_once()
         assert not mock_client.analyze.called
 
+    def test_analyze_passes_team_tier_version(self, mock_client):
+        mock_client.analyze.return_value = {
+            "status": "queued",
+            "job_id": "meta-a1",
+            "message": "Analysis job queued.",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "42",
+                "--team",
+                "storage-platform",
+                "--tier",
+                "2",
+                "--version",
+                "5.1",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_client.analyze.call_args
+        assert kwargs["team"] == "storage-platform"
+        assert kwargs["tier"] == "2"
+        assert kwargs["version"] == "5.1"
+
+    def test_submit_passes_team_tier_version_for_raw_and_file(
+        self, mock_client, tmp_path
+    ):
+        mock_client.submit.return_value = {"status": "queued", "job_id": "meta-s1"}
+        res_raw = runner.invoke(
+            app,
+            [
+                "submit",
+                "--source",
+                "raw",
+                "--failures",
+                '[{"test_name": "t1", "error_message": "e"}]',
+                "--team",
+                "storage-platform",
+                "--tier",
+                "2",
+                "--version",
+                "5.1",
+            ],
+        )
+        assert res_raw.exit_code == 0, res_raw.output
+        _, raw_kwargs = mock_client.submit.call_args
+        assert raw_kwargs["team"] == "storage-platform"
+        assert raw_kwargs["tier"] == "2"
+        assert raw_kwargs["version"] == "5.1"
+
+        xml_path = tmp_path / "junit.xml"
+        xml_path.write_text("<testsuites/>", encoding="utf-8")
+        mock_client.submit_file.return_value = {"status": "queued", "job_id": "meta-f1"}
+        res_file = runner.invoke(
+            app,
+            [
+                "submit",
+                "--source",
+                "file",
+                "--file",
+                str(xml_path),
+                "--team",
+                "storage-platform",
+                "--tier",
+                "2",
+                "--version",
+                "5.1",
+            ],
+        )
+        assert res_file.exit_code == 0, res_file.output
+        _, file_kwargs = mock_client.submit_file.call_args
+        assert file_kwargs["team"] == "storage-platform"
+        assert file_kwargs["tier"] == "2"
+        assert file_kwargs["version"] == "5.1"
+
 
 class TestResultsAnalyzeCommand:
     def test_results_analyze(self, mock_client):

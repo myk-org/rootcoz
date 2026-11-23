@@ -1976,6 +1976,30 @@ def analyze(
     ),
     tags: list[str] = _TAG_OPTION,
     label: list[str] = _ANALYZE_LABEL_OPTION,
+    team: str = typer.Option(
+        "",
+        "--team",
+        help=(
+            "Owning team for job metadata (<=64 chars; takes precedence over "
+            "metadata-rules.yaml when unset)."
+        ),
+    ),
+    tier: str = typer.Option(
+        "",
+        "--tier",
+        help=(
+            "Service tier for job metadata (<=32 chars; takes precedence over "
+            "metadata-rules.yaml when unset)."
+        ),
+    ),
+    version: str = typer.Option(
+        "",
+        "--version",
+        help=(
+            "Version label for job metadata (<=64 chars; takes precedence over "
+            "metadata-rules.yaml when unset)."
+        ),
+    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Submit an analysis job (Jenkins, JUnit XML file, Prow CI, or raw failures)."""
@@ -2088,6 +2112,9 @@ def analyze(
             "github_token": github_token,
             "raw_prompt": raw_prompt,
             "issue_prompt": issue_prompt,
+            "team": team,
+            "tier": tier,
+            "version": version,
         },
         int_fields={
             "jira_max_results": jira_max_results,

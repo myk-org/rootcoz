@@ -106,11 +106,13 @@ This queues a JUnit XML analysis from the terminal and prints the job ID to poll
 
 - **Change the analysis context for one run.** `Tests Repo URL` and `Ref / Branch`, `Additional Repositories`, `Raw Prompt`, `Peer Analysis`, `Jira Integration`, and `AI Call Timeout` are all per-submission overrides that take precedence over server settings. See [Configuring Analysis Context](configure-analysis-context.html) for details.
 
+- **Declare filter metadata per submission.** `POST /analyze`, `POST /submit`, and `rootcoz analyze` / `rootcoz submit` accept optional `team` (`--team`, ≤ 64 chars), `tier` (`--tier`, ≤ 32 chars), and `version` (`--version`, ≤ 64 chars) fields so a CI pipeline can populate dashboard filter metadata directly without maintaining a `metadata-rules.yaml` regex per job name. Precedence is per field: **request → `metadata-rules.yaml` → empty**, and an existing non-NULL stored column is never overwritten by ingest so manual corrections via `PUT /api/jobs/{job_name}/metadata` stay sticky. Empty strings are treated as omitted, and invalid or over-length values are rejected with `422`.
+
 - **Submit from the terminal.** `rootcoz analyze` and `rootcoz submit` take the same flags, and `--source` selects between `jenkins`, `file`, and `prow`. The CLI reads the same server for defaults, so anything you set in the form is set in your CLI profile. Use `submit` when you want the results stored without running AI.
 
   ```bash
-  rootcoz analyze --source jenkins --job-name folder/job-name --build-number 123
-  rootcoz submit --source jenkins --job-name folder/job-name --build-number 123
+  rootcoz analyze --source jenkins --job-name folder/job-name --build-number 123 --team storage-platform --tier 2 --version 5.1
+  rootcoz submit --source jenkins --job-name folder/job-name --build-number 123 --team storage-platform --tier 2 --version 5.1
   ```
 
   See [CLI Command Reference](cli-reference.html) for the full flag list and [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html) for scripted workflows.
