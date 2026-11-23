@@ -146,7 +146,7 @@ def _validate_metadata_scalar(
                 f"{field_name} must not contain control or non-printable characters"
             )
         return None
-    if not value.isprintable():
+    if not stripped.isprintable():
         raise ValueError(
             f"{field_name} must not contain control or non-printable characters"
         )

@@ -11574,7 +11574,7 @@ async def auto_assign_job_metadata(
             sources: dict[str, str] = {}
             for field in _METADATA_SCALAR_FIELDS:
                 existing_val = existing.get(field)
-                if existing_val:
+                if existing_val is not None:
                     scalars[field] = existing_val
                 elif field in explicit_clean:
                     scalars[field] = explicit_clean[field]

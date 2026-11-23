@@ -550,6 +550,31 @@ class TestAutoAssignJobMetadata:
                 "5.0",
             )
 
+    async def test_manually_blank_non_null_column_is_preserved(
+        self, setup_test_db: Path
+    ) -> None:
+        """A manually saved empty string is non-NULL and must not be replaced by ingest."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.set_job_metadata("blank-meta-job", team="")
+            result = await storage.auto_assign_job_metadata(
+                "blank-meta-job",
+                [{"pattern": "blank-*", "team": "rule-team", "tier": "t1"}],
+                explicit={"team": "req-team", "version": "5.1"},
+            )
+            assert result is not None
+            assert result["team"] == ""
+            assert result["tier"] == "t1"
+            assert result["version"] == "5.1"
+            assert result["sources"] == {"tier": "rules", "version": "request"}
+
+            # Explicit-only write targeting the already non-NULL blank team is a no-op
+            noop = await storage.auto_assign_job_metadata(
+                "blank-meta-job",
+                [],
+                explicit={"team": "req-team"},
+            )
+            assert noop is None
+
 
 # --- API endpoint tests ---
 
@@ -1000,6 +1025,9 @@ class TestAnalyzeAndSubmitMetadataAPI:
             assert len(audit) == 1
             ev = audit[0]
             assert ev["outcome"] == "success"
+            assert ev["actor"] == "admin"
+            assert ev["actor_role"] == "admin"
+            assert ev["is_admin"] is True
             assert ev["target_type"] == "job"
             assert ev["target_id"] == "ci-unmatched-storage-job"
             assert ev["details"]["trigger"] == "ingest"
@@ -1180,6 +1208,46 @@ class TestAnalyzeAndSubmitMetadataAPI:
                 "reason": "internal_error",
                 "job_id": "job-123",
             }
+
+    async def test_auto_assign_metadata_resolves_actor_role_and_admin(
+        self, setup_test_db: Path
+    ) -> None:
+        """Ingest audit resolves live role/is_admin for DB users and bootstrap admin."""
+        from rootcoz import main as rootcoz_main
+
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.create_user("op_user", role="operator")
+            await storage.create_user("del_admin", role="admin")
+
+            await rootcoz_main._auto_assign_metadata(
+                "job-op", [], explicit={"team": "t-op"}, actor="op_user", job_id="j1"
+            )
+            await rootcoz_main._auto_assign_metadata(
+                "job-ad", [], explicit={"team": "t-ad"}, actor="del_admin", job_id="j2"
+            )
+            await rootcoz_main._auto_assign_metadata(
+                "job-sys", [], explicit={"team": "t-sys"}, actor="", job_id="j3"
+            )
+
+            events = (await storage.list_audit_events(action="job.metadata_set"))[
+                "events"
+            ]
+            by_target = {e["target_id"]: e for e in events}
+            assert (
+                by_target["job-op"]["actor"],
+                by_target["job-op"]["actor_role"],
+                by_target["job-op"]["is_admin"],
+            ) == ("op_user", "operator", False)
+            assert (
+                by_target["job-ad"]["actor"],
+                by_target["job-ad"]["actor_role"],
+                by_target["job-ad"]["is_admin"],
+            ) == ("del_admin", "admin", True)
+            assert (
+                by_target["job-sys"]["actor"],
+                by_target["job-sys"]["actor_role"],
+                by_target["job-sys"]["is_admin"],
+            ) == ("system", "system", False)
 
     def test_reconstruct_from_params_round_trips_metadata_scalars(self) -> None:
         from rootcoz import main as rootcoz_main

@@ -1612,9 +1612,9 @@ class TestAnalysisRequestMetadataScalars:
         req = UnifiedAnalyzeRequest(
             type="raw",
             failures=[{"test_name": "t1", "error_message": "boom"}],
-            team="  storage-platform  ",
-            tier=" 2 ",
-            version=" 5.1 ",
+            team="  storage-platform\n",
+            tier="\t2\r\n",
+            version=" 5.1\n",
         )
         assert req.team == "storage-platform"
         assert req.tier == "2"
@@ -1672,7 +1672,7 @@ class TestAnalysisRequestMetadataScalars:
         [
             "team\x00name",
             "team\nname",
-            "team\r\n",
+            "team\rname",
             "team\tname",
             "team\x1b[31m",
             "team\x7f",

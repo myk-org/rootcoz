@@ -6225,6 +6225,29 @@ def _extract_explicit_metadata(
     return explicit or None
 
 
+async def _resolve_audit_actor_meta(
+    actor: str,
+) -> tuple[str, str | None, bool]:
+    """Resolve ``(actor, actor_role, is_admin)`` for background audit events.
+
+    Background tasks have no HTTP ``request`` from which ``record_audit`` can
+    inherit role/admin state, and startup resume does not pass ``is_admin``.
+    Resolving from storage keeps live and resumed audit rows consistent.
+    """
+    if not actor:
+        return "system", "system", False
+    if actor == "admin":
+        return "admin", "admin", True
+    try:
+        user = await storage.get_user_by_username(actor)
+    except sqlite3.Error, OSError:
+        return actor, None, False
+    if not user:
+        return actor, None, False
+    role = user.get("role") or None
+    return actor, role, role == "admin"
+
+
 async def _auto_assign_metadata(
     display_name: str,
     metadata_rules: list[dict[str, Any]] | None,
@@ -6232,7 +6255,6 @@ async def _auto_assign_metadata(
     *,
     explicit: dict[str, str] | None = None,
     actor: str = "",
-    is_admin: bool = False,
     job_id: str = "",
 ) -> None:
     """Best-effort metadata auto-assignment, label merge, and ingest audit."""
@@ -6254,6 +6276,7 @@ async def _auto_assign_metadata(
             display_name,
             exc_info=True,
         )
+        resolved_actor, actor_role, is_admin = await _resolve_audit_actor_meta(actor)
         failure_details: dict[str, Any] = {
             "trigger": "ingest",
             "reason": "internal_error",
@@ -6262,8 +6285,8 @@ async def _auto_assign_metadata(
             failure_details["job_id"] = job_id
         await record_audit(
             action="job.metadata_set",
-            actor=actor or "system",
-            actor_role=None if actor else "system",
+            actor=resolved_actor,
+            actor_role=actor_role,
             is_admin=is_admin,
             message=f"Ingest failed to assign metadata for job '{display_name}'",
             target_type="job",
@@ -6274,6 +6297,7 @@ async def _auto_assign_metadata(
         return
     sources = (assigned or {}).get("sources") or {}
     if sources:
+        resolved_actor, actor_role, is_admin = await _resolve_audit_actor_meta(actor)
         summary = ", ".join(f"{k}={v}" for k, v in sorted(sources.items()))
         details: dict[str, Any] = {
             "trigger": "ingest",
@@ -6284,8 +6308,8 @@ async def _auto_assign_metadata(
             details["job_id"] = job_id
         await record_audit(
             action="job.metadata_set",
-            actor=actor or "system",
-            actor_role=None if actor else "system",
+            actor=resolved_actor,
+            actor_role=actor_role,
             is_admin=is_admin,
             message=f"Ingest assigned metadata for job '{display_name}' ({summary})",
             target_type="job",
@@ -6909,7 +6933,6 @@ async def _finish_ci_ingest(
     source: CISource | None,
     explicit_metadata: dict[str, str] | None = None,
     actor: str = "",
-    is_admin: bool = False,
 ) -> None:
     """Persist fetched CI results and stop before AI when ingest_only."""
     _all_entries = source_result.test_entry_dicts()
@@ -6964,7 +6987,6 @@ async def _finish_ci_ingest(
         extra_labels=extra_labels,
         explicit=explicit_metadata,
         actor=actor,
-        is_admin=is_admin,
         job_id=job_id,
     )
     await update_status(job_id, "completed", result_data)
@@ -7421,7 +7443,6 @@ async def _analyze_failures_or_exit(
     extra_labels: list[str] | None = None,
     explicit_metadata: dict[str, str] | None = None,
     actor: str = "",
-    is_admin: bool = False,
 ) -> tuple[list[Any], list[Any], int, list[CrossFailurePattern]] | None:
     """Resolve console-only / no-failure / junit analysis paths.
 
@@ -7523,7 +7544,6 @@ async def _analyze_failures_or_exit(
             extra_labels=extra_labels,
             explicit=explicit_metadata,
             actor=actor,
-            is_admin=is_admin,
             job_id=job_id,
         )
         await update_status(job_id, "completed", result_data)
@@ -7858,7 +7878,6 @@ async def _process_ci_source_analysis(
                 source=source,
                 explicit_metadata=explicit_metadata,
                 actor=username,
-                is_admin=is_admin,
             )
             return
 
@@ -8217,7 +8236,6 @@ async def _process_ci_source_analysis(
                     extra_labels=extra_labels,
                     explicit=explicit_metadata,
                     actor=username,
-                    is_admin=is_admin,
                     job_id=job_id,
                 )
                 await update_status(job_id, "completed", result_data)
@@ -8251,7 +8269,6 @@ async def _process_ci_source_analysis(
             extra_labels=extra_labels,
             explicit_metadata=explicit_metadata,
             actor=username,
-            is_admin=is_admin,
         )
         if analysis_result_tuple is None:
             return
@@ -8425,7 +8442,6 @@ async def _process_ci_source_analysis(
             extra_labels=extra_labels,
             explicit=explicit_metadata,
             actor=username,
-            is_admin=is_admin,
             job_id=job_id,
         )
 
