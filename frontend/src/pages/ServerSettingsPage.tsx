@@ -8,6 +8,7 @@ import { formatBytes, formatUptime } from '@/lib/format'
 import { formatTimestamp } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
+import { SSO_PROVIDER_LABELS, ssoProviderLabel, ssoProviderOfKey } from '@/lib/ssoProviders'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -1833,6 +1834,53 @@ export function ServerSettingsPage() {
       )
     }
 
+    // One row: the shared key, the addressable data attribute and the highlight
+    // mark live here, so neither the flat list nor the SSO sub-sections can
+    // render a row nothing can address.
+    function renderSettingRowInRow(setting: ServerSetting) {
+      return (
+        <div
+          key={setting.key}
+          data-setting-key={setting.key}
+          // A mark that costs no layout: no border, no size change.
+          className={highlighted === setting.key ? 'rounded-md bg-signal-blue/10' : undefined}
+        >
+          {renderSettingRow(setting)}
+        </div>
+      )
+    }
+
+    // The SSO tab reads as two things: the deployment's own sign-in policy and the
+    // credentials of each provider. The policy comes first on its own, then one
+    // block per provider that has rows — split by the key (`sso_<provider>_…`), so
+    // a provider that gains a setting needs no change here.
+    function renderSsoSections(settings: ServerSetting[]) {
+      const generic = settings.filter((s) => ssoProviderOfKey(s.key) === null)
+      return (
+        <>
+          {generic.length > 0 && (
+            <div className="divide-y divide-border-default">
+              {generic.map(renderSettingRowInRow)}
+            </div>
+          )}
+          {Object.keys(SSO_PROVIDER_LABELS).map((provider) => {
+            const rows = settings.filter((s) => ssoProviderOfKey(s.key) === provider)
+            if (rows.length === 0) return null
+            return (
+              <div key={provider} className="mt-4" data-sso-provider={provider}>
+                <h4 className="mb-2 text-xs font-semibold tracking-wide text-text-tertiary uppercase">
+                  {ssoProviderLabel(provider)}
+                </h4>
+                <div className="divide-y divide-border-default">
+                  {rows.map(renderSettingRowInRow)}
+                </div>
+              </div>
+            )
+          })}
+        </>
+      )
+    }
+
     return (
       <Card key={category}>
         <div className="flex w-full items-center justify-between gap-2 px-4 py-3">
@@ -1932,18 +1980,13 @@ export function ServerSettingsPage() {
                 cloudId={state.settings.find(s => s.key === 'atlassian_oauth_cloud_id')?.value ?? ''}
               />
             )}
-            <div className="divide-y divide-border-default">
-              {rowSettings.map((setting) => (
-                <div
-                  key={setting.key}
-                  data-setting-key={setting.key}
-                  // A mark that costs no layout: no border, no size change.
-                  className={highlighted === setting.key ? 'rounded-md bg-signal-blue/10' : undefined}
-                >
-                  {renderSettingRow(setting)}
+            {category === 'SSO'
+              ? renderSsoSections(rowSettings)
+              : (
+                <div className="divide-y divide-border-default">
+                  {rowSettings.map(renderSettingRowInRow)}
                 </div>
-              ))}
-            </div>
+              )}
             {category === 'Analysis' && <ServerProvidersCard />}
             {showsTranscriptsUsage(category, rowSettings)
               && (

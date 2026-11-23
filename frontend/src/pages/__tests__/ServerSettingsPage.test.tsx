@@ -3416,3 +3416,87 @@ describe('ServerSettingsPage shipped tab taxonomy (#585 E2E)', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('Connection successful')
   })
 })
+
+
+describe('SSO tab grouping', () => {
+  /**
+   * The deployment's own sign-in policy first, then a block per provider. The
+   * split is derived from the key (`sso_<provider>_…`), so this also pins that a
+   * new provider field needs no frontend change to land in the right block.
+   */
+  const ssoSettings = () => [
+    mk('sso_allowed_domains', 'SSO', 'redhat.com'),
+    mk('sso_state_ttl_seconds', 'SSO', '600'),
+    mk('sso_device_code_ttl_seconds', 'SSO', '600'),
+    mk('sso_device_poll_interval_seconds', 'SSO', '5'),
+    mk('sso_google_client_id', 'SSO', 'gid'),
+    mk('sso_google_client_secret', 'SSO', 'gsecret', { sensitive: true }),
+    mk('sso_github_client_id', 'SSO', 'hid'),
+    mk('sso_openshift_issuer', 'SSO', 'https://oauth.example'),
+    mk('sso_openshift_api_url', 'SSO', 'https://api.example:6443'),
+    mk('sso_redhat_issuer', 'SSO', 'https://sso.example/auth/realms/x'),
+    mk('sso_redhat_client_id', 'SSO', 'rid'),
+  ]
+
+  async function openSsoTab() {
+    get.mockResolvedValue([...baseSettings(), ...ssoSettings()] as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'SSO' }))
+    await waitForRow('sso_allowed_domains')
+  }
+
+  it('puts the generic settings above every provider section', async () => {
+    await openSsoTab()
+
+    const generic = row('sso_allowed_domains')!
+    const googleHeading = screen.getByRole('heading', { name: 'Google' })
+    // Document order: the policy block precedes the first provider heading.
+    expect(generic.compareDocumentPosition(googleHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    // Every generic field is above the first provider heading too.
+    for (const key of [
+      'sso_state_ttl_seconds',
+      'sso_device_code_ttl_seconds',
+      'sso_device_poll_interval_seconds',
+    ]) {
+      expect(
+        row(key)!.compareDocumentPosition(googleHeading) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy()
+      // …and none of them sits inside a provider block.
+      expect(row(key)!.closest('[data-sso-provider]')).toBeNull()
+    }
+  })
+
+  it('renders one section per provider, each holding only its own fields', async () => {
+    await openSsoTab()
+
+    for (const heading of ['Google', 'GitHub', 'OpenShift', 'Red Hat SSO']) {
+      expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument()
+    }
+
+    // Google's block holds Google's fields and not GitHub's or Red Hat's.
+    const googleSection = document.querySelector('[data-sso-provider="google"]')
+    expect(googleSection).not.toBeNull()
+    expect(googleSection!.contains(row('sso_google_client_secret'))).toBe(true)
+    expect(googleSection!.contains(row('sso_github_client_id'))).toBe(false)
+    expect(googleSection!.contains(row('sso_redhat_issuer'))).toBe(false)
+
+    const redhatSection = document.querySelector('[data-sso-provider="redhat"]')
+    expect(redhatSection).not.toBeNull()
+    expect(redhatSection!.contains(row('sso_redhat_client_id'))).toBe(true)
+    expect(redhatSection!.contains(row('sso_openshift_issuer'))).toBe(false)
+  })
+
+  it('renders no heading for a provider with no settings', async () => {
+    // GitHub is dropped from the fixture: its heading must not appear empty.
+    get.mockResolvedValue(
+      [...baseSettings(), ...ssoSettings().filter((s) => !s.key.startsWith('sso_github_'))] as never,
+    )
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'SSO' }))
+    await waitForRow('sso_allowed_domains')
+
+    expect(screen.queryByRole('heading', { name: 'GitHub' })).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Google' })).toBeInTheDocument()
+  })
+})

@@ -8,6 +8,7 @@ import {
   type SsoProvidersResponse,
 } from '@/lib/ssoProviders'
 import { stripQueryParams } from '@/lib/navigation'
+import { ssoProviderLabel as label } from '@/lib/ssoProviders'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 
@@ -23,16 +24,6 @@ interface IdentitiesResponse {
   unlinkable: boolean
 }
 
-const PROVIDER_LABELS: Record<string, string> = {
-  google: 'Google',
-  github: 'GitHub',
-  openshift: 'OpenShift',
-  redhat: 'Red Hat SSO',
-}
-
-function label(provider: string): string {
-  return PROVIDER_LABELS[provider] ?? provider
-}
 
 /** `null` identities cannot tell "never loaded" from "load failed", so the list
  *  has its own state: a failed load must not read as still loading. */
