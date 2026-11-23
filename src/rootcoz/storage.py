@@ -11502,62 +11502,61 @@ async def get_filter_facets_with_counts(
     if not active_facets:
         return []
 
-    single_tags = sorted(
-        {
-            opt.tags[0]
-            for facet in active_facets
-            for opt in facet.options
-            if len(opt.tags) == 1
-        }
-    )
-    multi_tag_sets = sorted(
+    # Deduplicate distinct tag sets across all options and aggregate every
+    # option's COUNT(DISTINCT r.job_id) in SQL using a VALUES CTE (chunked
+    # well below SQLite's parameter limit) — constant queries, zero N+1.
+    unique_tag_sets = sorted(
         {
             tuple(sorted(opt.tags))
             for facet in active_facets
             for opt in facet.options
-            if len(opt.tags) > 1
+            if opt.tags
         }
     )
-    single_tag_counts: dict[str, int] = {}
-    multi_tag_counts: dict[tuple[str, ...], int] = {}
+    tag_set_counts: dict[tuple[str, ...], int] = {}
 
     async with _connect_db() as db:
         cursor = await db.execute("SELECT DISTINCT label FROM job_metadata_labels")
         live_labels = {row[0] for row in await cursor.fetchall() if row[0]}
 
-        if single_tags:
-            placeholders = ", ".join("?" for _ in single_tags)
-            cursor = await db.execute(
-                "SELECT jml.label, COUNT(DISTINCT r.job_id) "
-                "FROM results r "
-                "JOIN job_metadata_labels jml ON jml.job_name = r.job_name "
-                f"WHERE jml.label IN ({placeholders}) "
-                "GROUP BY jml.label",
-                single_tags,
-            )
-            for label, count in await cursor.fetchall():
-                single_tag_counts[label] = int(count)
+        # Batch tag sets so each query stays under 400 (opt_idx, label) pairs
+        # while keeping every option's tags intact within a single batch.
+        batch: list[tuple[int, str]] = []
+        batch_limit = 400
 
-        for tag_tuple in multi_tag_sets:
-            placeholders = ", ".join("?" for _ in tag_tuple)
-            cursor = await db.execute(
-                "SELECT COUNT(DISTINCT r.job_id) "
-                "FROM results r "
-                "JOIN job_metadata_labels jml ON jml.job_name = r.job_name "
-                f"WHERE jml.label IN ({placeholders})",
-                list(tag_tuple),
+        async def _flush_batch() -> None:
+            if not batch:
+                return
+            values_sql = ", ".join("(?, ?)" for _ in batch)
+            flat_params: list[Any] = []
+            for opt_idx, label in batch:
+                flat_params.append(opt_idx)
+                flat_params.append(label)
+            cur = await db.execute(
+                f"WITH opt_tags(opt_idx, label) AS (VALUES {values_sql}) "
+                "SELECT ot.opt_idx, COUNT(DISTINCT r.job_id) "
+                "FROM opt_tags ot "
+                "JOIN job_metadata_labels jml ON jml.label = ot.label "
+                "JOIN results r ON r.job_name = jml.job_name "
+                "GROUP BY ot.opt_idx",
+                flat_params,
             )
-            row = await cursor.fetchone()
-            multi_tag_counts[tag_tuple] = int(row[0]) if row else 0
+            for opt_idx, count in await cur.fetchall():
+                tag_set_counts[unique_tag_sets[int(opt_idx)]] = int(count)
+            batch.clear()
+
+        for idx, tag_tuple in enumerate(unique_tag_sets):
+            if batch and len(batch) + len(tag_tuple) > batch_limit:
+                await _flush_batch()
+            for label in tag_tuple:
+                batch.append((idx, label))
+        await _flush_batch()
 
     enriched: list[dict[str, Any]] = []
     for facet in active_facets:
         options_out: list[dict[str, Any]] = []
         for opt in facet.options:
-            if len(opt.tags) == 1:
-                count = single_tag_counts.get(opt.tags[0], 0)
-            else:
-                count = multi_tag_counts.get(tuple(sorted(opt.tags)), 0)
+            count = tag_set_counts.get(tuple(sorted(opt.tags)), 0)
             missing = [tag for tag in opt.tags if tag not in live_labels]
             options_out.append(
                 {

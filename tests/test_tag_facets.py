@@ -145,6 +145,24 @@ class TestTagFacetSchemaValidation:
         with pytest.raises(ValueError, match="duplicate facet id"):
             parse_tag_facets([item, item], strict=True)
 
+    def test_tag_shared_across_two_facets_rejected(self) -> None:
+        with pytest.raises(ValueError, match="cannot belong to multiple facets"):
+            parse_tag_facets(
+                [
+                    {
+                        "id": "platform",
+                        "name": "P",
+                        "options": [{"label": "AWS", "tags": ["aws"]}],
+                    },
+                    {
+                        "id": "cloud",
+                        "name": "C",
+                        "options": [{"label": "AWS2", "tags": ["aws"]}],
+                    },
+                ],
+                strict=True,
+            )
+
     def test_name_length_and_empty_rejected(self) -> None:
         with pytest.raises(ValueError, match="facet name"):
             parse_tag_facets(
@@ -663,6 +681,26 @@ class TestTagFacetsAPI:
             == 200
         )
 
+        # Moving the vanished tag into a DIFFERENT facet/option is rejected with 422
+        copied_vanished = [
+            {
+                "id": "platform",
+                "name": "Platform",
+                "options": [{"label": "AWS", "tags": ["aws"]}],
+            },
+            {
+                "id": "storage",
+                "name": "Storage class",
+                "options": [{"label": "Reused", "tags": ["old-tag"]}],
+            },
+        ]
+        reused_resp = facet_client.put(
+            "/api/admin/settings",
+            json={"settings": {"tag_facets": json.dumps(copied_vanished)}},
+        )
+        assert reused_resp.status_code == 422
+        assert "old-tag" in reused_resp.json()["detail"]
+
         # Adding a brand-new unknown tag is still rejected with 422
         with_brand_new_unknown = [
             initial[0],
@@ -723,3 +761,11 @@ class TestTagFacetsAPI:
         with patch.dict(os.environ, {"TAG_FACETS": valid_env}):
             resp = facet_client.post("/api/admin/settings/tag_facets/persist")
         assert resp.status_code == 200
+
+        # Persisting an env facet whose tag later vanished also succeeds cleanly
+        assert facet_client.delete("/api/admin/settings/tag_facets").status_code == 200
+        asyncio.run(storage.set_job_metadata("job-1", labels=["other"]))
+        with patch.dict(os.environ, {"TAG_FACETS": valid_env}):
+            clear_settings_cache()
+            resp_vanished = facet_client.post("/api/admin/settings/tag_facets/persist")
+        assert resp_vanished.status_code == 200

@@ -46,10 +46,19 @@ export function TagFacetsEditor({ facets, onChange, disabled = false }: TagFacet
 
   const liveLabels = metadataOptions.allLabels
   const liveLabelSet = useMemo(() => new Set(liveLabels), [liveLabels])
-  const liveTagOptions = useMemo(
-    () => liveLabels.map((tag) => ({ value: tag })),
-    [liveLabels],
-  )
+  // Map each tag to the first facet using it so the picker prevents
+  // assigning the same tag to two different facets.
+  const tagOwnerByFacetIndex = useMemo(() => {
+    const owners = new Map<string, { index: number; name: string }>()
+    facets.forEach((f, idx) => {
+      for (const opt of f.options) {
+        for (const tag of opt.tags) {
+          if (!owners.has(tag)) owners.set(tag, { index: idx, name: f.name || f.id || `Facet ${idx + 1}` })
+        }
+      }
+    })
+    return owners
+  }, [facets])
 
   const updateFacet = (facetIndex: number, updater: (facet: TagFacet) => TagFacet) => {
     onChange(facets.map((f, i) => (i === facetIndex ? updater(f) : f)))
@@ -250,7 +259,15 @@ export function TagFacetsEditor({ facets, onChange, disabled = false }: TagFacet
                           label={`tags for ${opt.label || `option ${optionIndex + 1}`}`}
                           placeholder="Pick tags…"
                           values={opt.tags}
-                          options={liveTagOptions}
+                          options={liveLabels.map((tag) => {
+                            const owner = tagOwnerByFacetIndex.get(tag)
+                            const usedElsewhere = owner !== undefined && owner.index !== facetIndex
+                            return {
+                              value: tag,
+                              disabled: usedElsewhere,
+                              hint: usedElsewhere ? `Used in ${owner.name}` : undefined,
+                            }
+                          })}
                           multiple
                           allowCustom={false}
                           loading={!metadataLoaded}

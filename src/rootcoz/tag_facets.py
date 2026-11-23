@@ -196,6 +196,7 @@ def parse_tag_facets(
 
     facets: list[TagFacet] = []
     seen_ids: set[str] = set()
+    tag_owner: dict[str, str] = {}
     for index, item in enumerate(data):
         try:
             facet = TagFacet.model_validate(item)
@@ -211,6 +212,18 @@ def parse_tag_facets(
                 raise ValueError(msg)
             logger.warning("Ignoring TAG_FACETS: %s", msg)
             return []
+        facet_tags = {tag for opt in facet.options for tag in opt.tags}
+        for tag in sorted(facet_tags):
+            if tag in tag_owner:
+                msg = (
+                    f"tag '{tag}' cannot belong to multiple facets "
+                    f"('{tag_owner[tag]}' and '{facet.id}')"
+                )
+                if strict:
+                    raise ValueError(msg)
+                logger.warning("Ignoring TAG_FACETS: %s", msg)
+                return []
+            tag_owner[tag] = facet.id
         seen_ids.add(facet.id)
         facets.append(facet)
 
@@ -228,6 +241,18 @@ def serialize_tag_facets(facets: Sequence[TagFacet]) -> str:
 def collect_facet_tags(facets: Sequence[TagFacet]) -> set[str]:
     """Return every distinct tag referenced across *facets*."""
     return {tag for facet in facets for opt in facet.options for tag in opt.tags}
+
+
+def collect_option_tag_refs(
+    facets: Sequence[TagFacet],
+) -> set[tuple[str, str, str]]:
+    """Return ``(facet_id, option_label, tag)`` tuples across *facets*."""
+    return {
+        (facet.id, opt.label, tag)
+        for facet in facets
+        for opt in facet.options
+        for tag in opt.tags
+    }
 
 
 def partition_labels_by_facets(

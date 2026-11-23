@@ -385,7 +385,7 @@ from rootcoz.storage import (
 from rootcoz.tag_facets import (
     FilterFacetsResponse,
     TagFacet,
-    collect_facet_tags,
+    collect_option_tag_refs,
     diff_tag_facets,
     parse_tag_facets,
     serialize_tag_facets,
@@ -23219,15 +23219,17 @@ async def _validate_and_normalize_tag_facets(
     raw_facets: Any,
     *,
     allow_missing_tags: bool = False,
-    existing_tags: set[str] | None = None,
+    existing_refs: set[tuple[str, str, str]] | None = None,
 ) -> str:
     """Validate ``tag_facets`` schema and (optionally) live tag existence.
 
-    Raises HTTP 422 on schema violations or newly-introduced tags missing from
-    ``job_metadata_labels``. Tags already present in *existing_tags* are allowed
-    through so a vanished tag in an untouched facet never blocks renaming or
-    reordering other facets; *allow_missing_tags* bypasses the live-label check
-    for backup imports onto fresh/empty databases.
+    Raises HTTP 422 on schema violations or newly-introduced ``(facet_id,
+    option_label, tag)`` references whose tag is missing from
+    ``job_metadata_labels``. Only unchanged references already present in
+    *existing_refs* are exempted so a vanished tag never blocks editing other
+    facets or persisting an env config, while still blocking adding that
+    vanished tag to any new facet or option. *allow_missing_tags* bypasses
+    the live-label check for backup imports onto fresh/empty databases.
     """
     if raw_facets is None or (isinstance(raw_facets, str) and not raw_facets.strip()):
         return "[]"
@@ -23236,12 +23238,13 @@ async def _validate_and_normalize_tag_facets(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"tag_facets: {exc}") from exc
     if not allow_missing_tags:
-        referenced_tags = collect_facet_tags(parsed_facets)
-        check_tags = (
-            referenced_tags - existing_tags
-            if existing_tags is not None
-            else referenced_tags
+        submitted_refs = collect_option_tag_refs(parsed_facets)
+        new_refs = (
+            submitted_refs - existing_refs
+            if existing_refs is not None
+            else submitted_refs
         )
+        check_tags = {tag for _, _, tag in new_refs}
         if check_tags:
             live_labels = await storage.get_live_job_labels()
             unknown_tags = sorted(check_tags - live_labels)
@@ -23340,15 +23343,15 @@ async def _validate_settings_updates(
     # tags against live job_metadata_labels (imports allow missing tags so
     # restoring a backup onto an empty DB succeeds).
     if "tag_facets" in settings_updates:
-        existing_tags = (
+        existing_refs = (
             None
             if allow_missing_facet_tags
-            else collect_facet_tags(get_settings().parsed_tag_facets)
+            else collect_option_tag_refs(get_settings().parsed_tag_facets)
         )
         settings_updates["tag_facets"] = await _validate_and_normalize_tag_facets(
             settings_updates["tag_facets"],
             allow_missing_tags=allow_missing_facet_tags,
-            existing_tags=existing_tags,
+            existing_refs=existing_refs,
         )
 
     for key, value in settings_updates.items():
@@ -23507,6 +23510,22 @@ async def _record_tag_facet_audit_rows(
         )
 
 
+@asynccontextmanager
+async def _audit_tag_facets_change(
+    should_track: bool, *, actor: str, request: Request
+) -> AsyncIterator[None]:
+    """Snapshot active tag facets before a write and emit per-facet audit rows after."""
+    before = get_settings().parsed_tag_facets if should_track else None
+    yield
+    if before is not None:
+        await _record_tag_facet_audit_rows(
+            before,
+            get_settings().parsed_tag_facets,
+            actor=actor,
+            request=request,
+        )
+
+
 @app.put("/api/admin/settings", operation_id="updateAdminSettings")
 async def update_admin_settings(request: Request) -> JSONResponse:
     """Update one or more server settings. Body: {"settings": {"key": "value", ...}}"""
@@ -23524,37 +23543,30 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         )
 
     username = request.state.username or "admin"
-    facets_before = (
-        get_settings().parsed_tag_facets if "tag_facets" in settings_updates else None
-    )
-    warnings = await _save_settings_to_db(settings_updates, username)
-    changed_keys = list(settings_updates.keys())
+    async with _audit_tag_facets_change(
+        "tag_facets" in settings_updates, actor=username, request=request
+    ):
+        warnings = await _save_settings_to_db(settings_updates, username)
+        changed_keys = list(settings_updates.keys())
 
-    logger.info(
-        "Admin settings updated: keys=%s, by=%s",
-        changed_keys,
-        username,
-    )
-    await record_audit(
-        action="settings.update",
-        actor=username,
-        message=f"Admin settings updated: keys={changed_keys}, by={username}",
-        target_type="setting",
-        details={
-            "changed_keys": changed_keys,
-            "redacted_keys": [
-                key for key in changed_keys if key in _SENSITIVE_SETTINGS
-            ],
-            # Kept for consumers of the original shape.
-            "keys": changed_keys,
-        },
-        request=request,
-    )
-    if facets_before is not None:
-        await _record_tag_facet_audit_rows(
-            facets_before,
-            get_settings().parsed_tag_facets,
+        logger.info(
+            "Admin settings updated: keys=%s, by=%s",
+            changed_keys,
+            username,
+        )
+        await record_audit(
+            action="settings.update",
             actor=username,
+            message=f"Admin settings updated: keys={changed_keys}, by={username}",
+            target_type="setting",
+            details={
+                "changed_keys": changed_keys,
+                "redacted_keys": [
+                    key for key in changed_keys if key in _SENSITIVE_SETTINGS
+                ],
+                # Kept for consumers of the original shape.
+                "keys": changed_keys,
+            },
             request=request,
         )
 
@@ -23827,49 +23839,43 @@ async def import_server_settings(request: Request) -> JSONResponse:
         return JSONResponse(content=content)
 
     username = request.state.username or "admin"
-    facets_before = (
-        get_settings().parsed_tag_facets if "tag_facets" in applied else None
-    )
-    # Only keys the diff marked as applied are written — unchanged keys
-    # (including sanitized-equal ones whose credentials the target keeps)
-    # must not be overwritten (#361 Qodo r2).
-    warnings = await _save_settings_to_db(
-        {key: value for key, value in updates.items() if key in applied}, username
-    )
-    if warnings:
-        content["warnings"] = warnings
-    logger.info(
-        "Admin settings imported: applied=%d, unchanged=%d, by=%s",
-        len(applied),
-        len(unchanged),
-        username,
-    )
-    # Key names only — ``applied`` carries the old/new values of every change,
-    # which must not be copied into the audit trail.
-    changed_keys = list(applied)
-    await record_audit(
-        action="settings.import",
-        actor=username,
-        message=(
-            f"Admin settings imported: applied={len(applied)},"
-            f" unchanged={len(unchanged)}, by={username}"
-        ),
-        target_type="setting",
-        details={
-            "changed_keys": changed_keys,
-            "redacted_keys": [
-                key for key in changed_keys if key in _SENSITIVE_SETTINGS
-            ],
-            # Kept for consumers of the original shape.
-            "keys": changed_keys,
-        },
-        request=request,
-    )
-    if facets_before is not None:
-        await _record_tag_facet_audit_rows(
-            facets_before,
-            get_settings().parsed_tag_facets,
+    async with _audit_tag_facets_change(
+        "tag_facets" in applied, actor=username, request=request
+    ):
+        # Only keys the diff marked as applied are written — unchanged keys
+        # (including sanitized-equal ones whose credentials the target keeps)
+        # must not be overwritten (#361 Qodo r2).
+        warnings = await _save_settings_to_db(
+            {key: value for key, value in updates.items() if key in applied},
+            username,
+        )
+        if warnings:
+            content["warnings"] = warnings
+        logger.info(
+            "Admin settings imported: applied=%d, unchanged=%d, by=%s",
+            len(applied),
+            len(unchanged),
+            username,
+        )
+        # Key names only — ``applied`` carries the old/new values of every change,
+        # which must not be copied into the audit trail.
+        changed_keys = list(applied)
+        await record_audit(
+            action="settings.import",
             actor=username,
+            message=(
+                f"Admin settings imported: applied={len(applied)},"
+                f" unchanged={len(unchanged)}, by={username}"
+            ),
+            target_type="setting",
+            details={
+                "changed_keys": changed_keys,
+                "redacted_keys": [
+                    key for key in changed_keys if key in _SENSITIVE_SETTINGS
+                ],
+                # Kept for consumers of the original shape.
+                "keys": changed_keys,
+            },
             request=request,
         )
     return JSONResponse(content=content)
@@ -24076,29 +24082,26 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         # Canonical decimal form — the env bridge exports this verbatim.
         env_value = str(getattr(validated, key))
 
-    facets_before = get_settings().parsed_tag_facets if key == "tag_facets" else None
     if key == "tag_facets":
         env_value = await _validate_and_normalize_tag_facets(
-            env_value, allow_missing_tags=False
+            env_value,
+            allow_missing_tags=False,
+            existing_refs=collect_option_tag_refs(get_settings().parsed_tag_facets),
         )
 
     username = request.state.username or "admin"
-    await _save_settings_to_db({key: env_value}, username)
+    async with _audit_tag_facets_change(
+        key == "tag_facets", actor=username, request=request
+    ):
+        await _save_settings_to_db({key: env_value}, username)
 
-    await record_audit(
-        action="admin.setting_persist",
-        actor=username,
-        message=f"Admin setting persisted from env: key={key}, by={username}",
-        target_type="setting",
-        target_id=key,
-        details=_audit_setting_details(key),
-        request=request,
-    )
-    if facets_before is not None:
-        await _record_tag_facet_audit_rows(
-            facets_before,
-            get_settings().parsed_tag_facets,
+        await record_audit(
+            action="admin.setting_persist",
             actor=username,
+            message=f"Admin setting persisted from env: key={key}, by={username}",
+            target_type="setting",
+            target_id=key,
+            details=_audit_setting_details(key),
             request=request,
         )
     return JSONResponse(content={"key": key, "source": "db"})
@@ -24134,53 +24137,47 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
             status_code=400, detail=f"Server-only setting (env var only): {key}"
         )
 
-    facets_before = get_settings().parsed_tag_facets if key == "tag_facets" else None
-    deleted = await storage.delete_server_setting(
-        key, deleted_by=request.state.username or "admin"
-    )
-    if not deleted:
-        raise HTTPException(
-            status_code=404, detail=f"Setting '{key}' has no DB override"
-        )
+    username = request.state.username or "admin"
+    async with _audit_tag_facets_change(
+        key == "tag_facets", actor=username, request=request
+    ):
+        deleted = await storage.delete_server_setting(key, deleted_by=username)
+        if not deleted:
+            raise HTTPException(
+                status_code=404, detail=f"Setting '{key}' has no DB override"
+            )
 
-    # Remove from in-memory cache so get_settings() falls back to env/default
-    remove_from_db_settings_cache([key])
-    if key in _LOG_FILE_SETTINGS:
-        _apply_log_file_settings()
+        # Remove from in-memory cache so get_settings() falls back to env/default
+        remove_from_db_settings_cache([key])
+        if key in _LOG_FILE_SETTINGS:
+            _apply_log_file_settings()
 
-    # Keep the sidecar transcript env bridge in sync with the reset — the
-    # bridge must stop assigning the removed override so the deployment
-    # environment controls the sidecar again, and the runtime override is
-    # dropped so the boot env governs immediately.
-    content: dict[str, Any] = {"reset": key}
-    if key == "record_transcripts" or key in _SIDECAR_BRIDGE_SETTINGS:
-        synced = await _apply_transcript_recording_setting()
-        if not synced and key == "record_transcripts":
-            content["warnings"] = [
-                (
-                    "record_transcripts was reset, but the running sidecar could "
-                    "not be updated — it keeps its current recording state until "
-                    "a restart or a later successful sync"
-                )
-            ]
+        # Keep the sidecar transcript env bridge in sync with the reset — the
+        # bridge must stop assigning the removed override so the deployment
+        # environment controls the sidecar again, and the runtime override is
+        # dropped so the boot env governs immediately.
+        content: dict[str, Any] = {"reset": key}
+        if key == "record_transcripts" or key in _SIDECAR_BRIDGE_SETTINGS:
+            synced = await _apply_transcript_recording_setting()
+            if not synced and key == "record_transcripts":
+                content["warnings"] = [
+                    (
+                        "record_transcripts was reset, but the running sidecar could "
+                        "not be updated — it keeps its current recording state until "
+                        "a restart or a later successful sync"
+                    )
+                ]
 
-    _broadcast_settings_change()
+        _broadcast_settings_change()
 
-    logger.info("Admin setting reset: key=%s, by=%s", key, request.state.username)
-    await record_audit(
-        action="settings.reset",
-        actor=request.state.username or "admin",
-        message=f"Admin setting reset: key={key}, by={request.state.username}",
-        target_type="setting",
-        target_id=key,
-        details=_audit_setting_details(key),
-        request=request,
-    )
-    if facets_before is not None:
-        await _record_tag_facet_audit_rows(
-            facets_before,
-            get_settings().parsed_tag_facets,
-            actor=request.state.username or "admin",
+        logger.info("Admin setting reset: key=%s, by=%s", key, request.state.username)
+        await record_audit(
+            action="settings.reset",
+            actor=username,
+            message=f"Admin setting reset: key={key}, by={request.state.username}",
+            target_type="setting",
+            target_id=key,
+            details=_audit_setting_details(key),
             request=request,
         )
 

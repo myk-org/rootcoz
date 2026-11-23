@@ -86,7 +86,6 @@ export function applyFacetOptionChange(
   facet: FilterFacet,
   selectedLabels: readonly string[],
   nextOptionLabels: readonly string[],
-  allFacets: readonly FilterFacet[] = [facet],
 ): string[] {
   const prevSelected = new Set(selectedOptionLabelsForFacet(facet, selectedLabels))
   const nextSelected = new Set(nextOptionLabels)
@@ -95,16 +94,6 @@ export function applyFacetOptionChange(
   for (const opt of facet.options) {
     if (nextSelected.has(opt.label)) {
       for (const tag of opt.tags) stillNeededTags.add(tag)
-    }
-  }
-  // Keep any tag still required by a selected option in another facet
-  for (const other of allFacets) {
-    if (other.id === facet.id) continue
-    const otherSelected = new Set(selectedOptionLabelsForFacet(other, selectedLabels))
-    for (const opt of other.options) {
-      if (otherSelected.has(opt.label)) {
-        for (const tag of opt.tags) stillNeededTags.add(tag)
-      }
     }
   }
 

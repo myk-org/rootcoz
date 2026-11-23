@@ -161,21 +161,13 @@ describe('FacetDropdowns (#658)', () => {
     expect(onLabelsChange).toHaveBeenCalledWith(['io2-csi', 'scheduled'])
   })
 
-  it('preserves shared tags still needed by another selected facet when clearing one facet', () => {
-    const overlappingFacets: FilterFacet[] = [
-      {
-        id: 'primary',
-        name: 'Primary',
-        options: [{ label: 'AWS', tags: ['aws'], count: 5, missing_tags: [] }],
-      },
-      {
-        id: 'cloud',
-        name: 'Cloud',
-        options: [{ label: 'AWS Mirror', tags: ['aws'], count: 5, missing_tags: [] }],
-      },
-    ]
-    const next = applyFacetOptionChange(overlappingFacets[0], ['aws'], [], overlappingFacets)
-    expect(next).toEqual(['aws'])
+  it('keeps a shared tag when another option in the same facet remains selected, and clears it when deselected', () => {
+    // AWS=[aws] and Cloud=[aws, gcp] both selected -> unselecting Cloud keeps aws for AWS
+    const afterRemoveCloud = applyFacetOptionChange(SAMPLE_FACETS[0], ['aws', 'gcp'], ['AWS'])
+    expect(afterRemoveCloud).toEqual(['aws'])
+    // Unselecting AWS removes aws cleanly (no deadlock)
+    const afterRemoveAws = applyFacetOptionChange(SAMPLE_FACETS[0], ['aws'], [])
+    expect(afterRemoveAws).toEqual([])
   })
 
   it('still shows a disappeared option if it is already selected in the URL so the user can clear it', () => {
