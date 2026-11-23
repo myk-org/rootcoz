@@ -550,7 +550,11 @@ def test_main_and_chat_have_no_direct_credential_source_contextvar_references():
             assert token not in source_text, (
                 f"{py_file.relative_to(repo_root)} must not reference {token!r}"
             )
-    for rel_path in ("src/rootcoz/main.py", "src/rootcoz/engine/chat.py"):
+    for rel_path in (
+        "src/rootcoz/main.py",
+        "src/rootcoz/engine/chat.py",
+        "src/rootcoz/engine/chat_runtime.py",
+    ):
         source_text = (repo_root / rel_path).read_text(encoding="utf-8")
         assert "chat_session_source" not in source_text, (
             f"{rel_path} must not reference 'chat_session_source'; route through rootcoz.ai_catalog"

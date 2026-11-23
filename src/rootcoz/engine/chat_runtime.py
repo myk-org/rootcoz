@@ -29,7 +29,7 @@ from collections.abc import (
 from collections.abc import (
     Set as AbstractSet,
 )
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, ExitStack, asynccontextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from functools import partial
@@ -39,11 +39,10 @@ from typing import Any
 import httpx
 from fastapi import BackgroundTasks, HTTPException
 
-from rootcoz import ai_client, get_child_logger, storage
+from rootcoz import ai_catalog, ai_client, get_child_logger, storage
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
     SessionCreationRefused,
-    ai_username,
     format_chat_ai_user_error,
     normalize_provider,
 )
@@ -373,9 +372,13 @@ async def _default_post_server_notice(
     )
 
 
-async def _default_validate_catalog_pair(provider: str, model: str) -> tuple[str, str]:
+async def _default_validate_catalog_selection(
+    provider: str, model: str, *, username: str | None = None
+) -> ai_catalog.ResolvedAiSelection:
     try:
-        return await ai_client.resolve_catalog_pair(provider, model)
+        return await ai_catalog.resolve_ai_selection(provider, model, username=username)
+    except ai_client.InactiveServerProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -429,9 +432,9 @@ class ChatRuntimeHost:
     )
     issue_blocked_notice: Callable[..., Awaitable[str]] = _default_issue_blocked_notice
     post_server_notice: Callable[..., Awaitable[int]] = _default_post_server_notice
-    validate_catalog_pair: Callable[[str, str], Awaitable[tuple[str, str]]] = (
-        _default_validate_catalog_pair
-    )
+    validate_catalog_selection: Callable[
+        ..., Awaitable[ai_catalog.ResolvedAiSelection]
+    ] = _default_validate_catalog_selection
     spawn_background: Callable[[Coroutine[Any, Any, Any]], asyncio.Task[Any]] = (
         asyncio.create_task
     )
@@ -450,9 +453,11 @@ class ChatRuntimeHost:
     on_notify_chat_changed: Callable[..., None] | None = None
     on_set_chat_prep_phase: Callable[..., None] | None = None
     on_schedule_chat_index: Callable[..., None] | None = None
-    on_validate_chat_selection: Callable[..., Awaitable[tuple[str, str]]] | None = None
+    on_validate_chat_selection: (
+        Callable[..., Awaitable[ai_catalog.ResolvedAiSelection]] | None
+    ) = None
     on_normalize_and_validate_ai_params: (
-        Callable[..., Awaitable[tuple[str | None, str | None]]] | None
+        Callable[..., Awaitable[ai_catalog.ResolvedAiSelection | None]] | None
     ) = None
     on_resolve_chat_credentials: (
         Callable[..., Awaitable[tuple[str, str, JiraConnection | None, str, str]]]
@@ -922,7 +927,7 @@ class ChatRuntime:
 
     async def _call_validate_chat_selection(
         self, body: ChatInitRequest, username: str
-    ) -> tuple[str, str]:
+    ) -> ai_catalog.ResolvedAiSelection:
         if self.host.on_validate_chat_selection is not None:
             return await self.host.on_validate_chat_selection(body, username)
         return await self.validate_chat_selection(body, username)
@@ -933,7 +938,7 @@ class ChatRuntime:
         ai_model: str | None,
         *,
         username: str,
-    ) -> tuple[str | None, str | None]:
+    ) -> ai_catalog.ResolvedAiSelection | None:
         if self.host.on_normalize_and_validate_ai_params is not None:
             return await self.host.on_normalize_and_validate_ai_params(
                 ai_provider, ai_model, username=username
@@ -1395,7 +1400,7 @@ class ChatRuntime:
         ai_model: str | None,
         *,
         username: str,
-    ) -> tuple[str | None, str | None]:
+    ) -> ai_catalog.ResolvedAiSelection | None:
         """Normalize and validate AI provider/model from request body."""
         provider_raw = (ai_provider or "").strip()
         provider = (normalize_provider(provider_raw) or None) if provider_raw else None
@@ -1406,38 +1411,34 @@ class ChatRuntime:
                 detail="Both ai_provider and ai_model are required when either is set",
             )
         if provider and model:
-            ai_client._selected_credential_source.set("")
-            user_token = ai_username.set(username)
-            try:
-                return await self.host.validate_catalog_pair(provider, model)
-            finally:
-                ai_username.reset(user_token)
-        return provider, model
+            return await self.host.validate_catalog_selection(
+                provider, model, username=username
+            )
+        return None
 
     async def validate_chat_selection(
         self, body: ChatInitRequest, username: str
-    ) -> tuple[str, str]:
+    ) -> ai_catalog.ResolvedAiSelection:
         """Validate the chosen pair as this user, never as the analysis job."""
-        provider, model = await self._call_normalize_and_validate_ai_params(
+        selection = await self._call_normalize_and_validate_ai_params(
             body.ai_provider,
             body.ai_model,
             username=username,
         )
-        if not provider or not model:
+        if selection is None:
             raise HTTPException(
                 status_code=422, detail="Select an AI provider and model"
             )
-        source = ai_client._selected_credential_source.get()
+        source = selection.credential_source
         if source == "server":
-            token = ai_username.set(username)
             try:
-                await ai_client.require_server_provider_grant(provider, model)
+                await ai_catalog.check_server_provider_grant(
+                    username, selection.provider, selection.model
+                )
             except ai_client.InactiveServerProviderError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
-            finally:
-                ai_username.reset(token)
         elif source != "user":
             raise HTTPException(
                 status_code=422, detail="Chat credential source unavailable"
@@ -1445,10 +1446,10 @@ class ChatRuntime:
         logger.debug(
             "Chat selection validated for user=%s provider=%s source=%s",
             username,
-            provider,
+            selection.provider,
             source,
         )
-        return provider, model
+        return selection
 
     async def available_chat_session(
         self, job_id: str, username: str, session: Any = _UNSET_SESSION
@@ -1466,15 +1467,12 @@ class ChatRuntime:
                 active["session_id"], username, active["ai_provider"]
             )
             if source == "server":
-                token = ai_username.set(username)
                 try:
-                    await ai_client.require_server_provider_grant(
-                        active["ai_provider"], active["ai_model"]
+                    await ai_catalog.check_server_provider_grant(
+                        username, active["ai_provider"], active["ai_model"]
                     )
                 except ValueError:
                     return None
-                finally:
-                    ai_username.reset(token)
             elif source == "user":
                 if (
                     await ai_client.provider_accepts_user_keys(active["ai_provider"])
@@ -1806,17 +1804,14 @@ class ChatRuntime:
     async def _scoped_chat_init_context(
         self, username: str, ai_provider: str, credential_source: str
     ) -> AsyncIterator[int | None]:
-        """Resolve credential generation and scope ai_username + chat_session_source."""
+        """Resolve credential generation and bind scoped AI execution context."""
         credential_generation = await self._credential_generation_for_source(
             username, ai_provider, credential_source
         )
-        token = ai_username.set(username)
-        source_token = ai_client.chat_session_source.set(credential_source)
-        try:
+        with ai_catalog.scoped_ai_context(
+            username, credential_source=credential_source
+        ):
             yield credential_generation
-        finally:
-            ai_client.chat_session_source.reset(source_token)
-            ai_username.reset(token)
 
     async def _persist_init_session(
         self,
@@ -1867,8 +1862,9 @@ class ChatRuntime:
             raise HTTPException(status_code=404, detail="Job not found")
         result_data = stored["result"]
         params = result_data.get("request_params", {})
-        ai_provider, ai_model = await self._call_validate_chat_selection(body, username)
-        credential_source = ai_client._selected_credential_source.get()
+        selection = await self._call_validate_chat_selection(body, username)
+        ai_provider, ai_model = selection.as_pair()
+        credential_source = selection.credential_source
         existing_session_id, _ = await self._call_check_chat_session_choice(
             job_id,
             username,
@@ -2210,10 +2206,9 @@ class ChatRuntime:
         """Initialize admin chat workspace and AI session."""
         session_id: str | None = ""
         async with self.hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
-            ai_provider, ai_model = await self._call_validate_chat_selection(
-                body, username
-            )
-            credential_source = ai_client._selected_credential_source.get()
+            selection = await self._call_validate_chat_selection(body, username)
+            ai_provider, ai_model = selection.as_pair()
+            credential_source = selection.credential_source
             session_id, _ = await self._call_check_chat_session_choice(
                 ADMIN_CHAT_JOB_ID,
                 username,
@@ -2370,16 +2365,17 @@ class ChatRuntime:
                     status_code=422, detail="Select both provider and model"
                 )
             session, _ = await self._call_current_chat_choice(conversation_id, username)
-            ai_provider, ai_model = await self._call_normalize_and_validate_ai_params(
+            selection = await self._call_normalize_and_validate_ai_params(
                 body.ai_provider or session["ai_provider"],
                 body.ai_model or session["ai_model"],
                 username=username,
             )
-            if ai_provider is None or ai_model is None:
+            if selection is None:
                 raise HTTPException(
                     status_code=422, detail="Select both provider and model"
                 )
-            credential_source = ai_client._selected_credential_source.get()
+            ai_provider, ai_model = selection.as_pair()
+            credential_source = selection.credential_source
             await self._call_check_chat_session_choice(
                 conversation_id,
                 username,
@@ -2465,11 +2461,11 @@ class ChatRuntime:
         lock_key = f"{conversation_id}:{username}"
         label = adapter.log_label
         effective_admin = is_admin or adapter.is_admin_mode
-        user_token = ai_username.set(username)
-        source_token = None
+        ai_ctx_stack = ExitStack()
 
         async with adapter.track_turn(self):
             try:
+                ai_ctx_stack.enter_context(ai_catalog.scoped_ai_context(username))
                 async with self.hold_chat_lock(lock_key):
                     try:
                         async with adapter.setup_barrier(self):
@@ -2507,8 +2503,10 @@ class ChatRuntime:
                                 ai_model,
                                 credential_source,
                             )
-                            source_token = ai_client.chat_session_source.set(
-                                credential_source
+                            ai_ctx_stack.enter_context(
+                                ai_catalog.scoped_ai_context(
+                                    credential_source=credential_source
+                                )
                             )
 
                             credential_generation = (
@@ -2694,8 +2692,8 @@ class ChatRuntime:
                             # Same predicate Start applied (#582): the full grant,
                             # or the free grant for a pair still declared free.
                             try:
-                                await ai_client.require_server_provider_grant(
-                                    ai_provider, ai_model
+                                await ai_catalog.check_server_provider_grant(
+                                    username, ai_provider, ai_model
                                 )
                             except ValueError as exc:
                                 logger.info(
@@ -2793,9 +2791,7 @@ class ChatRuntime:
                 )
                 raise
             finally:
-                if source_token is not None:
-                    ai_client.chat_session_source.reset(source_token)
-                ai_username.reset(user_token)
+                ai_ctx_stack.close()
                 self.cleanup_chat_state(lock_key)
                 adapter.cleanup_after_turn(self)
                 # Do NOT revoke auth_header — it's embedded in custom tool HTTP

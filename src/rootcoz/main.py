@@ -1231,8 +1231,8 @@ _chat_runtime = ChatRuntime(
         job_issue_repo_slugs=lambda params: _job_issue_repo_slugs(params),
         issue_blocked_notice=lambda **kwargs: _issue_blocked_notice(**kwargs),
         post_server_notice=lambda **kwargs: _post_server_notice(**kwargs),
-        validate_catalog_pair=lambda provider, model: _validate_catalog_pair(
-            provider, model
+        validate_catalog_selection=lambda provider, model, *, username=None: (
+            _validate_catalog_selection(provider, model, username=username)
         ),
         spawn_background=lambda coro: _spawn_background(coro),
         resolve_admin_artifacts_owner_id=lambda username: (
@@ -25855,7 +25855,7 @@ def _build_ci_workspace_params(
 
 async def _validate_chat_selection(
     body: ChatInitRequest, username: str
-) -> tuple[str, str]:
+) -> ai_catalog.ResolvedAiSelection:
     return await _chat_runtime.validate_chat_selection(body, username)
 
 
@@ -26025,7 +26025,7 @@ async def _normalize_and_validate_ai_params(
     ai_model: str | None,
     *,
     username: str,
-) -> tuple[str | None, str | None]:
+) -> ai_catalog.ResolvedAiSelection | None:
     return await _chat_runtime.normalize_and_validate_ai_params(
         ai_provider, ai_model, username=username
     )

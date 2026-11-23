@@ -514,9 +514,11 @@ async def test_server_grant_revoked_mid_turn_refuses_reply_both_modes(
         "build_session_tools",
         AsyncMock(return_value=SimpleNamespace(custom=[])),
     )
+    from rootcoz import ai_catalog
+
     monkeypatch.setattr(
-        ai_client,
-        "require_server_provider_grant",
+        ai_catalog,
+        "check_server_provider_grant",
         AsyncMock(side_effect=ValueError("Server grant revoked")),
     )
     monkeypatch.setattr(
@@ -690,14 +692,17 @@ async def test_start_job_chat_init_handshake_dedupe_conflict_and_425(
         chat_engine, "init_chat_session", AsyncMock(return_value="sess-prep")
     )
 
-    async def validate_pair(provider: str, model: str) -> tuple[str, str]:
-        ai_client._selected_credential_source.set("user")
-        return provider, model
+    from rootcoz import ai_catalog
+
+    async def validate_selection(
+        provider: str, model: str, *, username: str | None = None
+    ) -> ai_catalog.ResolvedAiSelection:
+        return ai_catalog.ResolvedAiSelection(provider, model, "user")
 
     runtime = ChatRuntime(
         ChatRuntimeHost(
             get_settings=lambda: Settings(ai_call_timeout=30),
-            validate_catalog_pair=validate_pair,
+            validate_catalog_selection=validate_selection,
             on_enter_chat_workspace=AsyncMock(return_value=workspace),
         )
     )
