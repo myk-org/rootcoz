@@ -2047,6 +2047,49 @@ class TestRootCozClientAuth:
         client = _make_client(handler)
         assert client.admin_delete_user_identity("alice", "google")["ok"] is True
 
+    @pytest.mark.parametrize(
+        "provider,username",
+        [
+            ("google?x", "alice"),
+            ("google#frag", "bob"),
+            ("go/ogle", "carol"),
+            ("github", "al?ice"),
+            ("github", "al#ice"),
+            ("github", "al/ice"),
+        ],
+    )
+    def test_identity_path_segments_are_percent_encoded(
+        self, provider: str, username: str
+    ):
+        """URL-special characters in provider/username must be percent-encoded."""
+        from urllib.parse import quote
+
+        raw_paths: list[bytes] = []
+
+        def handler(request):
+            raw_paths.append(request.url.raw_path)
+            return httpx.Response(200, json={"ok": True, "identities": []})
+
+        client = _make_client(handler)
+
+        client.delete_user_identity(provider)
+        assert (
+            raw_paths[-1] == f"/api/user/identities/{quote(provider, safe='')}".encode()
+        )
+
+        client.admin_user_identities(username)
+        assert (
+            raw_paths[-1]
+            == f"/api/admin/users/{quote(username, safe='')}/identities".encode()
+        )
+
+        client.admin_delete_user_identity(username, provider)
+        expected = (
+            f"/api/admin/users/{quote(username, safe='')}"
+            f"/identities/{quote(provider, safe='')}"
+        ).encode()
+        assert raw_paths[-1] == expected
+
     def test_sso_providers(self):
         def handler(request):
             assert request.url.path == "/api/auth/sso/providers"

@@ -3525,3 +3525,93 @@ describe('SSO tab grouping', () => {
     expect(screen.getByRole('heading', { name: 'Google' })).toBeInTheDocument()
   })
 })
+
+
+describe('Editing a configured unrevealed SSO client secret (#585 Qodo finding 15)', () => {
+  const section = (key: string, label: string) => ({ section: key, section_label: label })
+  const ssoSettings = () => [
+    mk('sso_allowed_domains', 'SSO', 'redhat.com'),
+    mk('sso_google_client_id', 'SSO', 'gid', section('google', 'Google')),
+    mk('sso_google_client_secret', 'SSO', 'gsecret', { sensitive: true, is_set: true, source: 'db' as const, ...section('google', 'Google') }),
+  ]
+
+  async function openSsoTab() {
+    get.mockResolvedValue([...baseSettings(), ...ssoSettings()] as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'SSO' }))
+    await waitForRow('sso_google_client_secret')
+  }
+
+  it('starts with an empty input (not the mask) and blocks Save / Enter without a replacement', async () => {
+    await openSsoTab()
+
+    // Click Edit on the unrevealed secret
+    const editBtn = within(row('sso_google_client_secret')!).getByRole('button', { name: 'Edit SSO_GOOGLE_CLIENT_SECRET' })
+    fireEvent.click(editBtn)
+
+    // The editor input must be empty — never the server's masked value
+    const input = screen.getByLabelText('Edit SSO_GOOGLE_CLIENT_SECRET') as HTMLInputElement
+    expect(input.value).toBe('')
+    expect(input.placeholder).toBe('Enter new value to replace')
+
+    // Save button must be disabled when empty
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    // Pressing Enter must not fire a PUT
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it('enables Save once a replacement is typed and submits the new value', async () => {
+    await openSsoTab()
+    put.mockResolvedValue(undefined as never)
+
+    const editBtn = within(row('sso_google_client_secret')!).getByRole('button', { name: 'Edit SSO_GOOGLE_CLIENT_SECRET' })
+    fireEvent.click(editBtn)
+
+    const input = screen.getByLabelText('Edit SSO_GOOGLE_CLIENT_SECRET') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'new-secret-value' } })
+
+    // Save is now enabled
+    const saveBtn = screen.getByRole('button', { name: 'Save' })
+    expect(saveBtn).not.toBeDisabled()
+
+    fireEvent.click(saveBtn)
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { sso_google_client_secret: 'new-secret-value' }, // pragma: allowlist secret
+      }),
+    )
+  })
+
+  it('still seeds the editor with the plaintext when the secret has been revealed first', async () => {
+    // Reveal returns the real value
+    get.mockImplementation(async (url: unknown) => {
+      const key = typeof url === 'string' ? url.match(/reveal_key=([^&]+)/)?.[1] : undefined
+      if (key === 'sso_google_client_secret') {
+        const settings = [...baseSettings(), ...ssoSettings()]
+        const item = settings.find((s) => s.key === 'sso_google_client_secret')!
+        item.value = 'real-secret-plaintext' // pragma: allowlist secret
+        return settings
+      }
+      return [...baseSettings(), ...ssoSettings()]
+    })
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'SSO' }))
+    await waitForRow('sso_google_client_secret')
+
+    // Reveal the secret first
+    fireEvent.click(within(row('sso_google_client_secret')!).getByRole('button', { name: 'Reveal value' }))
+    await waitFor(() =>
+      expect(within(row('sso_google_client_secret')!).getByRole('button', { name: 'Edit SSO_GOOGLE_CLIENT_SECRET' }).textContent).toBe('real-secret-plaintext'),
+    )
+
+    // Now edit — the editor starts with the revealed plaintext, not empty
+    fireEvent.click(within(row('sso_google_client_secret')!).getByRole('button', { name: 'Edit SSO_GOOGLE_CLIENT_SECRET' }))
+    const input = screen.getByLabelText('Edit SSO_GOOGLE_CLIENT_SECRET') as HTMLInputElement
+    expect(input.value).toBe('real-secret-plaintext')
+
+    // Save is enabled (it has a real value)
+    expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled()
+  })
+})

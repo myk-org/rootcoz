@@ -25655,11 +25655,24 @@ async def _validate_settings_updates(
         try:
             validated = _validate_effective_setting({**accepted, key: value})
         except ValidationError as exc:
-            for err in exc.errors():
-                ctx_err = err.get("ctx", {}).get("error")
-                errors.append(
-                    f"{key}: {ctx_err if ctx_err else err.get('msg', str(err))}"
-                )
+            # Separate field-level errors (non-empty loc) from model-level
+            # cross-field errors (empty loc).  A cross-field error on a
+            # partial batch is not conclusive — the remaining keys may
+            # satisfy the rule — so it is deferred to the batch-level
+            # check below.
+            field_errs = [e for e in exc.errors() if e.get("loc")]
+            if field_errs:
+                for err in field_errs:
+                    ctx_err = err.get("ctx", {}).get("error")
+                    errors.append(
+                        f"{key}: {ctx_err if ctx_err else err.get('msg', str(err))}"
+                    )
+                continue
+            # Only model-level errors — the field value itself is valid.
+            # Accept it so the batch-level check sees the complete pair.
+            if is_int:
+                settings_updates[key] = str(int(value))
+            accepted[key] = int(value) if is_int else value
             continue
         if is_int:
             # Canonical decimal form: "+14" and " 14 " persist as "14" in the
@@ -25678,6 +25691,19 @@ async def _validate_settings_updates(
                 continue
             settings_updates[key] = str(validated_int)
         accepted[key] = getattr(validated, key)
+
+    # Cross-field validation on the complete batch: a pair like
+    # (ttl=2, interval=1) is valid only when both keys are present, but
+    # per-key validation deferred model-level errors because the second key
+    # was not yet in `accepted`.  Validate once with every accepted key so
+    # the cross-field rule sees the pair the batch will store.
+    if not errors and accepted:
+        try:
+            _validate_effective_setting(accepted)
+        except ValidationError as exc:
+            for err in exc.errors():
+                ctx_err = err.get("ctx", {}).get("error")
+                errors.append(str(ctx_err) if ctx_err else err.get("msg", str(err)))
 
     # A provider whose id and secret are saved without PUBLIC_BASE_URL is a
     # provider the login page hides: the callback cannot be built without a

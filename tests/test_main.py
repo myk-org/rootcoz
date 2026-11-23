@@ -16907,6 +16907,54 @@ class TestAdminSettingsEndpoints:
         assert db_setting_is_set("sso_device_poll_interval_seconds") is False
         assert db_setting_is_set("sso_device_code_ttl_seconds") is False
 
+    def test_device_timing_pair_valid_in_both_key_orders(self, test_client) -> None:
+        """A valid (ttl=2, interval=1) pair must save regardless of JSON key order."""
+        from rootcoz.config import get_settings
+
+        for settings in (
+            {
+                "sso_device_code_ttl_seconds": "2",
+                "sso_device_poll_interval_seconds": "1",
+            },
+            {
+                "sso_device_poll_interval_seconds": "1",
+                "sso_device_code_ttl_seconds": "2",
+            },
+        ):
+            response = test_client.put(
+                "/api/admin/settings", json={"settings": settings}
+            )
+            assert response.status_code == 200, (
+                f"order {list(settings)} failed: {response.json()}"
+            )
+            effective = get_settings()
+            assert effective.sso_device_poll_interval_seconds == 1
+            assert effective.sso_device_code_ttl_seconds == 2
+
+    def test_device_timing_pair_invalid_in_both_key_orders(self, test_client) -> None:
+        """An invalid pair (ttl=2, interval=3) must be refused in both orders."""
+        from rootcoz.config import db_setting_is_set
+
+        for settings in (
+            {
+                "sso_device_code_ttl_seconds": "2",
+                "sso_device_poll_interval_seconds": "3",
+            },
+            {
+                "sso_device_poll_interval_seconds": "3",
+                "sso_device_code_ttl_seconds": "2",
+            },
+        ):
+            refused = test_client.put(
+                "/api/admin/settings", json={"settings": settings}
+            )
+            assert refused.status_code == 400, (
+                f"order {list(settings)} should have failed"
+            )
+            assert "sso_device_poll_interval_seconds" in refused.json()["detail"]
+            assert db_setting_is_set("sso_device_poll_interval_seconds") is False
+            assert db_setting_is_set("sso_device_code_ttl_seconds") is False
+
     def test_put_settings_prow_url_with_credentials_rejected(self, test_client) -> None:
         response = test_client.put(
             "/api/admin/settings",

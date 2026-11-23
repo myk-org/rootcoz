@@ -105,9 +105,10 @@ def _date_claim(claims: dict[str, Any], name: str) -> float | None:
     try:
         finite = math.isfinite(value)
     except OverflowError:
-        # An integer too large for a float is a date no clock can reach: it is
-        # the far-future bound it stands for, not a crash out of a refusal.
-        return math.inf
+        # An integer too large for a float is a date no clock can reach.
+        # Preserve the sign: a huge positive exp is the far future (unexpired),
+        # a huge negative exp is the far past (expired).
+        return math.inf if value > 0 else -math.inf
     if not finite:
         raise AuthError("id_token_invalid", f"ID token has a malformed {name}")
     return float(value)

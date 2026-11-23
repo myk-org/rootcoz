@@ -1828,7 +1828,12 @@ export function ServerSettingsPage() {
             dispatch({
               type: 'START_EDIT',
               key: setting.key,
-              currentValue: state.revealedValues[setting.key] ?? setting.value,
+              // Unrevealed sensitive settings must never seed the editor with
+              // the server's masked value — start empty so the admin must type
+              // a replacement (#585 Qodo finding 15).
+              currentValue: setting.sensitive
+                ? (state.revealedValues[setting.key] ?? '')
+                : setting.value,
             })
           }
           onCancelEdit={() => dispatch({ type: 'CANCEL_EDIT' })}
@@ -2592,6 +2597,11 @@ function SettingRow({
       : ''
 
   // ---- Editing mode ----
+  // A set, unrevealed secret must not be saveable without a replacement value
+  // — submitting empty would send the mask and corrupt the credential (#585).
+  const isUnrevealedSecret = setting.sensitive && isSet && revealedValue === undefined
+  const saveBlocked = isUnrevealedSecret && !editValue.trim()
+
   if (isEditing) {
     return (
       <div className="py-3 space-y-2">
@@ -2601,10 +2611,11 @@ function SettingRow({
           type={setting.type === 'integer' ? 'number' : setting.sensitive ? 'password' : 'text'}
           autoComplete={setting.sensitive ? 'new-password' : 'off'}
           value={editValue}
+          placeholder={isUnrevealedSecret ? 'Enter new value to replace' : undefined}
           disabled={disabled}
           onChange={(e) => onSetEditValue(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') onSave()
+            if (e.key === 'Enter' && !saveBlocked) onSave()
             if (e.key === 'Escape') onCancelEdit()
           }}
           className="h-9 font-mono text-sm"
@@ -2613,7 +2624,7 @@ function SettingRow({
         {trap && <ValueTrap text={trap} />}
         {hint && <p className="text-xs text-text-quaternary">{hint}</p>}
         <div className="flex items-center gap-2">
-          <Button size="sm" onClick={onSave} disabled={saving || disabled} className="h-7 text-xs">
+          <Button size="sm" onClick={onSave} disabled={saving || disabled || saveBlocked} className="h-7 text-xs">
             {saving ? (
               <>
                 <Loader2 className="mr-1 h-3 w-3 animate-spin" />

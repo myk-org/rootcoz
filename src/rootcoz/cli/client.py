@@ -340,18 +340,23 @@ class RootCozClient:
 
     def delete_user_identity(self, provider: str) -> dict[str, Any]:
         """Unlink one provider from your account. DELETE /api/user/identities/{provider}"""
-        return self._request("DELETE", f"/api/user/identities/{provider}")
+        return self._request(
+            "DELETE", f"/api/user/identities/{quote(provider, safe='')}"
+        )
 
     def admin_user_identities(self, username: str) -> dict[str, Any]:
         """List any account's linked identities. GET /api/admin/users/{username}/identities"""
-        return self._request("GET", f"/api/admin/users/{username}/identities")
+        return self._request(
+            "GET", f"/api/admin/users/{quote(username, safe='')}/identities"
+        )
 
     def admin_delete_user_identity(
         self, username: str, provider: str
     ) -> dict[str, Any]:
         """Unlink a provider from any account. DELETE /api/admin/users/{username}/identities/{provider}"""
         return self._request(
-            "DELETE", f"/api/admin/users/{username}/identities/{provider}"
+            "DELETE",
+            f"/api/admin/users/{quote(username, safe='')}/identities/{quote(provider, safe='')}",
         )
 
     def sso_providers(self) -> dict[str, Any]:

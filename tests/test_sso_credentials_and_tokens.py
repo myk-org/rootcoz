@@ -168,3 +168,19 @@ async def test_a_future_nbf_and_iat_are_still_refused() -> None:
         with pytest.raises(AuthError) as excinfo:
             await _verify(token, key_set)
         assert excinfo.value.reason == "id_token_invalid"
+
+
+async def test_a_negative_overflowing_exp_is_refused_as_expired() -> None:
+    """A huge negative integer exp is the far past — the token is expired."""
+    token, key_set = _signed_id_token({"exp": -(10**400)})
+    with pytest.raises(AuthError) as excinfo:
+        await _verify(token, key_set)
+    assert excinfo.value.reason == "id_token_invalid"
+    assert "expired" in str(excinfo.value).lower()
+
+
+async def test_a_positive_overflowing_exp_is_still_the_far_future() -> None:
+    """Positive overflow is unchanged — the existing contract is preserved."""
+    token, key_set = _signed_id_token({"exp": 10**400})
+    claims = await _verify(token, key_set)
+    assert claims["exp"] == 10**400
