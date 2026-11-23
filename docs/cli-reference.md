@@ -105,6 +105,9 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 | `--failures`, `--passed-tests`, `--skipped-tests` | JSON arrays of raw test entries. Accepted only with `--source raw`; any other source rejects them with a validation error. `--source raw` requires at least one of the three. |
 | `--tag` | Categorization tag. Repeatable. |
 | `--label`, `-l` | Job metadata label merged on analyze. Repeatable, and distinct from `--tag`. |
+| `--team` | Owning team for `job_metadata.team` (≤ 64 chars). Precedence: request → `metadata-rules.yaml` → empty; never overwrites an existing non-NULL stored value. |
+| `--tier` | Service tier for `job_metadata.tier` (≤ 32 chars). Same precedence as `--team`. |
+| `--version` | Version label for `job_metadata.version` (≤ 64 chars). Same precedence as `--team`. |
 
 Related lifecycle commands:
 

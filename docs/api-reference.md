@@ -124,7 +124,8 @@ The shared body accepts the server defaults as per-request overrides:
 | `atlassian_oauth_cloud_id`, `jira_site_url`, `jira_project_key`, `jira_max_results`, `enable_jira` | Jira search during analysis. Jira credentials and per-method URLs (`jira_email`, `jira_api_token`, `jira_pat`, `jira_oauth_client_secret`, `jira_atst_token`, `jira_cloud_url`, `jira_server_url`, and the three `jira_*_ssl_verify` flags) are **Server Settings only** — analysis requests cannot carry them; the server-selected `jira_auth_mode` and its credentials always apply |
 | `github_token` | GitHub access for comment enrichment |
 | `raw_prompt`, `issue_prompt` | Additive prompt instructions |
-| `labels`, plus name and tag fields | Metadata for the job |
+| `team`, `tier`, `version` | Job-level filter metadata (`job_metadata.team`, `.tier`, `.version`): `team` ≤ 64 chars, `tier` ≤ 32 chars, `version` ≤ 64 chars, trimmed; empty or whitespace-only string behaves as omitted; over-length or control/non-printable values return `422`. Per-field precedence is **request → `metadata-rules.yaml` → empty**; an existing non-NULL stored column is never overwritten by ingest (manual `PUT /api/jobs/{job_name}/metadata` edits stay sticky). Each ingest write records a `job.metadata_set` audit row with `details.trigger: "ingest"` and per-field `details.sources` (`"request"` vs `"rules"`) |
+| `labels`, plus name and tag fields | Metadata labels (merged into `job_metadata.labels`), display name, and categorization tags |
 
 > **Note:** Resolution order for provider, model, timeout, concurrency, peers, and additional repos is request → `.rootcoz/settings.json` in the cloned tests repo → server setting → environment variable. See [Configuring Analysis Context](configure-analysis-context.html).
 

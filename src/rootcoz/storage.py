@@ -11484,58 +11484,79 @@ async def bulk_set_metadata(items: list[dict[str, Any]]) -> dict[str, Any]:
     return {"updated": len(items)}
 
 
+_METADATA_SCALAR_FIELDS: tuple[str, ...] = ("team", "tier", "version")
+
+
+def _clean_explicit_metadata(
+    explicit: Mapping[str, str | None] | None,
+) -> dict[str, str]:
+    """Return trimmed, non-empty explicit scalar metadata fields."""
+    if not explicit:
+        return {}
+    cleaned: dict[str, str] = {}
+    for field in _METADATA_SCALAR_FIELDS:
+        raw = explicit.get(field)
+        if isinstance(raw, str):
+            val = raw.strip()
+            if val:
+                cleaned[field] = val
+    return cleaned
+
+
 async def auto_assign_job_metadata(
     job_name: str,
     rules: list[dict[str, Any]],
     extra_labels: list[str] | None = None,
+    explicit: Mapping[str, str | None] | None = None,
 ) -> dict[str, Any] | None:
-    """Auto-assign metadata from name pattern rules and/or merge extra labels.
+    """Auto-assign metadata from explicit request fields, rules, and/or labels.
 
     Called when a new analysis result is stored.
 
-    - When a metadata row already exists and ``extra_labels`` is empty: NULL
-      scalar fields (team/tier/version) are filled from matching rules
-      (non-NULL existing values are preserved). Rule labels are merged into
-      existing labels. Returns None only if nothing actually changed.
-    - When a metadata row already exists and ``extra_labels`` is present:
-      NULL scalar fields are filled from matching rules the same way, and
-      labels are merged from existing + rule labels + extras. Returns None
-      only if the resulting row is identical to the existing one.
-    - When no metadata exists: rules are applied when they match. With
-      extras and no rule match, a labels-only row is created.
+    Per-field scalar precedence (``team``, ``tier``, ``version``):
+    stored non-NULL value → ``explicit`` (request) → ``rules`` → NULL.
+    Existing non-NULL columns are never overwritten so manual ``PUT …/metadata``
+    corrections stay sticky.
+
+    Labels are merged from existing + rule labels + ``extra_labels``.
 
     All write paths use ``BEGIN IMMEDIATE`` so concurrent analyses of the
-    same job cannot overwrite each other's labels.
+    same job cannot overwrite each other's metadata or labels.
 
     Args:
         job_name: The CI job name.
         rules: Ordered list of metadata rule dicts.
         extra_labels: Optional caller-supplied labels to merge into
             ``job_metadata.labels`` (case preserved).
+        explicit: Optional caller-supplied scalar metadata dict
+            (``team``, ``tier``, ``version``). Empty/None values are ignored.
 
     Returns:
-        The assigned/updated metadata dict, or None when nothing changed.
+        The assigned/updated metadata dict (including ``sources`` mapping each
+        written field to ``"request"``, ``"rules"``, or ``"request+rules"``),
+        or None when nothing changed.
     """
     if not job_name:
         return None
 
     extras = merge_labels(extra_labels)
     rules = rules or []
+    explicit_clean = _clean_explicit_metadata(explicit)
 
-    # Nothing to do — no extras and no rules to apply.
-    if not extras and not rules:
+    # Nothing to do — no explicit fields, no extras, and no rules to apply.
+    if not extras and not rules and not explicit_clean:
         return None
 
     # Resolve rule match outside the transaction (pure, no DB).
     matched = match_job_metadata(job_name, rules) if rules else None
 
     # Early exit: nothing to write.
-    if not extras and matched is None:
+    if not extras and not explicit_clean and matched is None:
         logger.debug(f"auto_assign_job_metadata: no rule matched job '{job_name}'")
         return None
 
     # All writes go through BEGIN IMMEDIATE to prevent concurrent analyses
-    # from overwriting each other's labels.
+    # from overwriting each other's metadata or labels.
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
@@ -11545,43 +11566,48 @@ async def auto_assign_job_metadata(
                 (job_name,),
             )
             row = await cursor.fetchone()
+            existing = _job_metadata_row_to_dict(row) if row is not None else {}
+            existing_labels = list(existing.get("labels") or [])
+            rule_labels = list(matched.get("labels", [])) if matched is not None else []
 
-            if row is not None:
-                existing = _job_metadata_row_to_dict(row)
-                existing_labels = list(existing.get("labels") or [])
-                if matched is not None:
-                    # Fill NULL scalars from rules; preserve non-NULL existing values.
-                    team = existing.get("team") or matched.get("team")
-                    tier = existing.get("tier") or matched.get("tier")
-                    version = existing.get("version") or matched.get("version")
-                    merged_labels = merge_labels(
-                        existing_labels,
-                        list(matched.get("labels", [])),
-                        extras,
-                    )
+            scalars: dict[str, str | None] = {}
+            sources: dict[str, str] = {}
+            for field in _METADATA_SCALAR_FIELDS:
+                existing_val = existing.get(field)
+                if existing_val is not None:
+                    scalars[field] = existing_val
+                elif field in explicit_clean:
+                    scalars[field] = explicit_clean[field]
+                    sources[field] = "request"
+                elif matched is not None and matched.get(field):
+                    scalars[field] = matched[field]
+                    sources[field] = "rules"
                 else:
-                    # No rule match — only merge extras into labels.
-                    team = existing.get("team")
-                    tier = existing.get("tier")
-                    version = existing.get("version")
-                    merged_labels = merge_labels(existing_labels, extras)
-                if (
-                    team == existing.get("team")
-                    and tier == existing.get("tier")
-                    and version == existing.get("version")
-                    and merged_labels == existing_labels
-                ):
-                    await db.rollback()
-                    return None
-            else:
-                # No existing metadata — use rule match if available.
-                team = matched.get("team") if matched else None
-                tier = matched.get("tier") if matched else None
-                version = matched.get("version") if matched else None
-                merged_labels = merge_labels(
-                    list(matched.get("labels", [])) if matched else None,
-                    extras,
+                    scalars[field] = None
+
+            merged_labels = merge_labels(existing_labels, rule_labels, extras)
+            if merged_labels != existing_labels:
+                existing_set = set(existing_labels)
+                extras_set = set(extras)
+                from_request = any(lbl not in existing_set for lbl in extras)
+                from_rules = any(
+                    lbl not in existing_set and lbl not in extras_set
+                    for lbl in rule_labels
                 )
+                if from_request and from_rules:
+                    sources["labels"] = "request+rules"
+                elif from_request:
+                    sources["labels"] = "request"
+                elif from_rules:
+                    sources["labels"] = "rules"
+
+            if not sources:
+                await db.rollback()
+                return None
+
+            team = scalars["team"]
+            tier = scalars["tier"]
+            version = scalars["version"]
 
             await _upsert_job_metadata_row(
                 db,
@@ -11604,14 +11630,12 @@ async def auto_assign_job_metadata(
         "tier": tier,
         "version": version,
         "labels": merged_labels,
+        "sources": sources,
     }
-    action = (
-        "Merged metadata labels into"
-        if row is not None
-        else "Auto-assigned metadata to"
-    )
+    action = "Updated metadata for" if row is not None else "Auto-assigned metadata to"
     logger.info(
-        f"{action} job '{job_name}': team={team}, tier={tier}, labels={merged_labels}"
+        f"{action} job '{job_name}': team={team}, tier={tier}, version={version}, "
+        f"labels={merged_labels}, sources={sources}"
     )
     return result
 
