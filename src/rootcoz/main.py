@@ -23216,6 +23216,26 @@ async def _normalize_enumerated_value(key: str, value: str) -> tuple[str, str | 
     return value, None
 
 
+# Serializes validate+write+audit operations on ``tag_facets`` so concurrent
+# admin saves cannot observe a stale vanished-tag baseline and reintroduce
+# removed dead-tag options.
+_TAG_FACETS_WRITE_LOCK = asyncio.Lock()
+
+
+def _persisted_tag_facet_option_sets() -> list[frozenset[str]]:
+    """Return option tag sets from the persisted DB ``tag_facets`` override only.
+
+    Never reads unvalidated env defaults so env-sourced unknown tags cannot
+    exempt themselves from live-label validation on PUT or persist.
+    """
+    from rootcoz.config import get_db_setting
+
+    stored = get_db_setting("tag_facets")
+    if not stored:
+        return []
+    return collect_option_tag_sets(parse_tag_facets(stored, strict=False))
+
+
 async def _validate_and_normalize_tag_facets(
     raw_facets: Any,
     *,
@@ -23338,9 +23358,7 @@ async def _validate_settings_updates(
     # restoring a backup onto an empty DB succeeds).
     if "tag_facets" in settings_updates:
         existing_option_sets = (
-            None
-            if allow_missing_facet_tags
-            else collect_option_tag_sets(get_settings().parsed_tag_facets)
+            None if allow_missing_facet_tags else _persisted_tag_facet_option_sets()
         )
         settings_updates["tag_facets"] = await _validate_and_normalize_tag_facets(
             settings_updates["tag_facets"],
@@ -23508,10 +23526,13 @@ async def _record_tag_facet_audit_rows(
 async def _audit_tag_facets_change(
     should_track: bool, *, actor: str, request: Request
 ) -> AsyncIterator[None]:
-    """Snapshot active tag facets before a write and emit per-facet audit rows after."""
-    before = get_settings().parsed_tag_facets if should_track else None
-    yield
-    if before is not None:
+    """Serialize ``tag_facets`` validate+write and emit per-facet audit rows after."""
+    if not should_track:
+        yield
+        return
+    async with _TAG_FACETS_WRITE_LOCK:
+        before = get_settings().parsed_tag_facets
+        yield
         await _record_tag_facet_audit_rows(
             before,
             get_settings().parsed_tag_facets,
@@ -23530,16 +23551,15 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     if not settings_updates:
         raise HTTPException(status_code=400, detail="No settings provided")
 
-    errors = await _validate_settings_updates(settings_updates)
-    if errors:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid settings: {'; '.join(errors)}"
-        )
-
     username = request.state.username or "admin"
     async with _audit_tag_facets_change(
         "tag_facets" in settings_updates, actor=username, request=request
     ):
+        errors = await _validate_settings_updates(settings_updates)
+        if errors:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid settings: {'; '.join(errors)}"
+            )
         warnings = await _save_settings_to_db(settings_updates, username)
         changed_keys = list(settings_updates.keys())
 
@@ -24076,19 +24096,16 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         # Canonical decimal form — the env bridge exports this verbatim.
         env_value = str(getattr(validated, key))
 
-    if key == "tag_facets":
-        env_value = await _validate_and_normalize_tag_facets(
-            env_value,
-            allow_missing_tags=False,
-            existing_option_sets=collect_option_tag_sets(
-                get_settings().parsed_tag_facets
-            ),
-        )
-
     username = request.state.username or "admin"
     async with _audit_tag_facets_change(
         key == "tag_facets", actor=username, request=request
     ):
+        if key == "tag_facets":
+            env_value = await _validate_and_normalize_tag_facets(
+                env_value,
+                allow_missing_tags=False,
+                existing_option_sets=_persisted_tag_facet_option_sets(),
+            )
         await _save_settings_to_db({key: env_value}, username)
 
         await record_audit(

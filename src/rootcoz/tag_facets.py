@@ -255,29 +255,54 @@ def find_newly_introduced_unknown_tags(
     live_labels: set[str],
     existing_option_sets: Sequence[frozenset[str]] | None = None,
 ) -> list[str]:
-    """Return sorted unknown tags that are NOT carried over 1-to-1 from an existing option.
+    """Return sorted unknown tags not covered by a 1-to-1 matching of existing options.
 
-    Each existing option may cover at most one submitted option whose missing
-    tags are a subset of that existing option's tags. This lets admins rename
-    or reorder options/facets holding a vanished tag, or persist an unchanged
-    env config, while still rejecting copying a vanished tag into additional
-    options or introducing brand-new unknown tags.
+    Uses exact bipartite maximum matching (augmenting-path DFS) so reordering
+    options with overlapping vanished tags always finds a valid 1-to-1
+    assignment when one exists, while still rejecting duplicated vanished
+    tags or newly introduced unknown tags.
     """
-    available = list(existing_option_sets) if existing_option_sets is not None else []
-    unknown: set[str] = set()
-    for facet in submitted:
-        for opt in facet.options:
-            opt_missing = frozenset(t for t in opt.tags if t not in live_labels)
-            if not opt_missing:
+    submitted_missing = [
+        frozenset(t for t in opt.tags if t not in live_labels)
+        for facet in submitted
+        for opt in facet.options
+    ]
+    needed = [tags for tags in submitted_missing if tags]
+    if not needed:
+        return []
+    if not existing_option_sets:
+        return sorted({t for tags in needed for t in tags})
+
+    existing_list = list(existing_option_sets)
+    adj: list[list[int]] = [
+        [j for j, existing in enumerate(existing_list) if req <= existing]
+        for req in needed
+    ]
+    match_right: list[int] = [-1] * len(existing_list)
+    matched_left: list[bool] = [False] * len(needed)
+
+    def _augment(left_idx: int, visited: list[bool]) -> bool:
+        for right_idx in adj[left_idx]:
+            if visited[right_idx]:
                 continue
-            matched_idx = next(
-                (i for i, existing in enumerate(available) if opt_missing <= existing),
-                None,
-            )
-            if matched_idx is not None:
-                available.pop(matched_idx)
-            else:
-                unknown.update(opt_missing)
+            visited[right_idx] = True
+            if match_right[right_idx] == -1 or _augment(
+                match_right[right_idx], visited
+            ):
+                match_right[right_idx] = left_idx
+                return True
+        return False
+
+    for left_idx in range(len(needed)):
+        if _augment(left_idx, [False] * len(existing_list)):
+            matched_left[left_idx] = True
+
+    unknown = {
+        t
+        for left_idx, req in enumerate(needed)
+        if not matched_left[left_idx]
+        for t in req
+    }
     return sorted(unknown)
 
 

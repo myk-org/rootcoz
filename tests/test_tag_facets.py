@@ -782,10 +782,57 @@ class TestTagFacetsAPI:
             resp = facet_client.post("/api/admin/settings/tag_facets/persist")
         assert resp.status_code == 200
 
-        # Persisting an env facet whose tag later vanished also succeeds cleanly
+        # Env TAG_FACETS with no DB row and an unknown tag cannot bypass 422 on persist or PUT
         assert facet_client.delete("/api/admin/settings/tag_facets").status_code == 200
         asyncio.run(storage.set_job_metadata("job-1", labels=["other"]))
         with patch.dict(os.environ, {"TAG_FACETS": valid_env}):
             clear_settings_cache()
-            resp_vanished = facet_client.post("/api/admin/settings/tag_facets/persist")
-        assert resp_vanished.status_code == 200
+            resp_env_unknown = facet_client.post(
+                "/api/admin/settings/tag_facets/persist"
+            )
+            assert resp_env_unknown.status_code == 422
+            assert "aws" in resp_env_unknown.json()["detail"]
+            resp_put_env_unknown = facet_client.put(
+                "/api/admin/settings",
+                json={"settings": {"tag_facets": valid_env}},
+            )
+            assert resp_put_env_unknown.status_code == 422
+
+    def test_reordering_overlapping_vanished_options_succeeds(
+        self, facet_client: TestClient
+    ) -> None:
+        asyncio.run(_seed_run("r1", "job-1", labels=["d1", "d2"]))
+        initial = [
+            {
+                "id": "platform",
+                "name": "Platform",
+                "options": [
+                    {"label": "Both", "tags": ["d1", "d2"]},
+                    {"label": "First", "tags": ["d1"]},
+                ],
+            }
+        ]
+        assert (
+            facet_client.put(
+                "/api/admin/settings",
+                json={"settings": {"tag_facets": json.dumps(initial)}},
+            ).status_code
+            == 200
+        )
+        # Both tags vanish -> reordering First before Both must still succeed via bipartite matching
+        asyncio.run(storage.set_job_metadata("job-1", labels=["other"]))
+        reordered = [
+            {
+                "id": "platform",
+                "name": "Platform",
+                "options": [
+                    {"label": "First", "tags": ["d1"]},
+                    {"label": "Both", "tags": ["d1", "d2"]},
+                ],
+            }
+        ]
+        resp = facet_client.put(
+            "/api/admin/settings",
+            json={"settings": {"tag_facets": json.dumps(reordered)}},
+        )
+        assert resp.status_code == 200
