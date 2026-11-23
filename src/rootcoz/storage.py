@@ -57,7 +57,6 @@ from rootcoz.models import (
 )
 from rootcoz.tag_facets import (
     TagFacet,
-    collect_facet_tags,
     partition_labels_by_facets,
 )
 from rootcoz.url_utils import sanitize_http_href
@@ -11503,38 +11502,68 @@ async def get_filter_facets_with_counts(
     if not active_facets:
         return []
 
-    referenced_tags = sorted(collect_facet_tags(active_facets))
-    label_to_job_ids: dict[str, set[str]] = {}
+    single_tags = sorted(
+        {
+            opt.tags[0]
+            for facet in active_facets
+            for opt in facet.options
+            if len(opt.tags) == 1
+        }
+    )
+    multi_tag_sets = sorted(
+        {
+            tuple(sorted(opt.tags))
+            for facet in active_facets
+            for opt in facet.options
+            if len(opt.tags) > 1
+        }
+    )
+    single_tag_counts: dict[str, int] = {}
+    multi_tag_counts: dict[tuple[str, ...], int] = {}
 
     async with _connect_db() as db:
         cursor = await db.execute("SELECT DISTINCT label FROM job_metadata_labels")
         live_labels = {row[0] for row in await cursor.fetchall() if row[0]}
 
-        if referenced_tags:
-            placeholders = ", ".join("?" for _ in referenced_tags)
+        if single_tags:
+            placeholders = ", ".join("?" for _ in single_tags)
             cursor = await db.execute(
-                f"SELECT jml.label, r.job_id "
-                f"FROM results r "
-                f"JOIN job_metadata_labels jml ON jml.job_name = r.job_name "
-                f"WHERE jml.label IN ({placeholders})",
-                referenced_tags,
+                "SELECT jml.label, COUNT(DISTINCT r.job_id) "
+                "FROM results r "
+                "JOIN job_metadata_labels jml ON jml.job_name = r.job_name "
+                f"WHERE jml.label IN ({placeholders}) "
+                "GROUP BY jml.label",
+                single_tags,
             )
-            for label, job_id in await cursor.fetchall():
-                label_to_job_ids.setdefault(label, set()).add(job_id)
+            for label, count in await cursor.fetchall():
+                single_tag_counts[label] = int(count)
+
+        for tag_tuple in multi_tag_sets:
+            placeholders = ", ".join("?" for _ in tag_tuple)
+            cursor = await db.execute(
+                "SELECT COUNT(DISTINCT r.job_id) "
+                "FROM results r "
+                "JOIN job_metadata_labels jml ON jml.job_name = r.job_name "
+                f"WHERE jml.label IN ({placeholders})",
+                list(tag_tuple),
+            )
+            row = await cursor.fetchone()
+            multi_tag_counts[tag_tuple] = int(row[0]) if row else 0
 
     enriched: list[dict[str, Any]] = []
     for facet in active_facets:
         options_out: list[dict[str, Any]] = []
         for opt in facet.options:
-            matched_ids: set[str] = set()
-            for tag in opt.tags:
-                matched_ids.update(label_to_job_ids.get(tag, ()))
+            if len(opt.tags) == 1:
+                count = single_tag_counts.get(opt.tags[0], 0)
+            else:
+                count = multi_tag_counts.get(tuple(sorted(opt.tags)), 0)
             missing = [tag for tag in opt.tags if tag not in live_labels]
             options_out.append(
                 {
                     "label": opt.label,
                     "tags": list(opt.tags),
-                    "count": len(matched_ids),
+                    "count": count,
                     "missing_tags": missing,
                 }
             )
@@ -13090,7 +13119,7 @@ def _build_tags_filter(
     active_facets = (
         tag_facets if tag_facets is not None else get_settings().parsed_tag_facets
     )
-    for group in partition_labels_by_facets(tags, active_facets):
+    for group in partition_labels_by_facets(tags, active_facets, ungrouped_mode="or"):
         conditions.append(f"{job_name_col} IN ({_build_labels_subquery(group)})")
         params.extend(group)
 

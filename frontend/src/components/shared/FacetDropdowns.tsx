@@ -41,7 +41,7 @@ export function FacetDropdowns({ facets, selectedLabels, onLabelsChange }: Facet
               label: `${opt.label} (${opt.count})`,
             }))}
             onChange={(nextOptions) =>
-              onLabelsChange(applyFacetOptionChange(facet, selectedLabels, nextOptions))
+              onLabelsChange(applyFacetOptionChange(facet, selectedLabels, nextOptions, facets))
             }
             className="w-full sm:w-44"
           />

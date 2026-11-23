@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -231,14 +231,19 @@ def collect_facet_tags(facets: Sequence[TagFacet]) -> set[str]:
 
 
 def partition_labels_by_facets(
-    labels: Sequence[str], facets: Sequence[TagFacet]
+    labels: Sequence[str],
+    facets: Sequence[TagFacet],
+    *,
+    ungrouped_mode: Literal["and", "or"] = "and",
 ) -> list[list[str]]:
     """Partition requested labels into AND-of-OR groups using *facets*.
 
     - Requested labels that belong to the same facet form one OR group.
     - Distinct facets produce separate groups combined with AND.
-    - Requested labels outside any facet become singleton groups combined
-      with AND against everything else.
+    - Requested labels outside any facet combine according to
+      *ungrouped_mode*: ``"and"`` (Dashboard: one singleton group per
+      tag) or ``"or"`` (Reports: one shared OR group, preserving legacy
+      multi-tag report bookmarks when no facets cover those tags).
     """
     unique_labels = list(dict.fromkeys(lbl for lbl in labels if lbl))
     if not unique_labels:
@@ -254,9 +259,12 @@ def partition_labels_by_facets(
             groups.append(matched)
             covered.update(matched)
 
-    for lbl in unique_labels:
-        if lbl not in covered:
-            groups.append([lbl])
+    ungrouped = [lbl for lbl in unique_labels if lbl not in covered]
+    if ungrouped:
+        if ungrouped_mode == "or":
+            groups.append(ungrouped)
+        else:
+            groups.extend([lbl] for lbl in ungrouped)
 
     return groups
 

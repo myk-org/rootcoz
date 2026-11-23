@@ -10701,9 +10701,18 @@ class TestTagFacetsCLI:
         assert res_file.exit_code == 0, res_file.output
         mock_client.admin_set_tag_facets.assert_called_once_with(facets)
 
-    def test_admin_tag_facets_set_invalid_json_fails(self, mock_client):
+    def test_admin_tag_facets_set_invalid_json_and_binary_file_fail(
+        self, mock_client, tmp_path
+    ):
         res = runner.invoke(app, ["admin", "tag-facets", "set", "{not-json"])
         assert res.exit_code == 1
+        mock_client.admin_set_tag_facets.assert_not_called()
+
+        bad_utf8 = tmp_path / "binary.json"
+        bad_utf8.write_bytes(b"\xff\xfe\x00")
+        res_bin = runner.invoke(app, ["admin", "tag-facets", "set", f"@{bad_utf8}"])
+        assert res_bin.exit_code == 1
+        assert "Error reading" in res_bin.output
         mock_client.admin_set_tag_facets.assert_not_called()
 
     def test_admin_tag_facets_reset(self, mock_client):

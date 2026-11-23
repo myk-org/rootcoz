@@ -4736,7 +4736,7 @@ def admin_tag_facets_set(
         file_path = Path(facets_spec[1:])
         try:
             raw_text = file_path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             typer.echo(f"Error reading {file_path}: {exc}", err=True)
             raise typer.Exit(code=1) from exc
     try:

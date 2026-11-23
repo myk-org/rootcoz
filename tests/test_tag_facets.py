@@ -610,3 +610,116 @@ class TestTagFacetsAPI:
         # Never store the facet options/tags blob in audit details
         for event in facet_events:
             assert "aws" not in json.dumps(event["details"])
+
+    def test_reports_preserves_legacy_or_for_ungrouped_tags_when_no_facets_configured(
+        self, facet_client: TestClient
+    ) -> None:
+        asyncio.run(_seed_run("r-aws", "job-aws", labels=["aws"]))
+        asyncio.run(_seed_run("r-vs", "job-vs", labels=["vsphere"]))
+        # Default tag_facets=[] -> legacy Reports multi-tag bookmark matches EITHER tag (OR)
+        rep = facet_client.get("/api/reports/totals", params={"tags": "aws,vsphere"})
+        assert rep.status_code == 200
+        assert rep.json()["total_jobs"] == 2
+
+    def test_vanished_tag_does_not_block_editing_other_facets_or_import(
+        self, facet_client: TestClient
+    ) -> None:
+        asyncio.run(_seed_run("r1", "job-1", labels=["aws", "old-tag", "io2-csi"]))
+        initial = [
+            {
+                "id": "platform",
+                "name": "Platform",
+                "options": [
+                    {"label": "AWS", "tags": ["aws"]},
+                    {"label": "Legacy", "tags": ["old-tag"]},
+                ],
+            },
+            {
+                "id": "storage",
+                "name": "Storage",
+                "options": [{"label": "io2", "tags": ["io2-csi"]}],
+            },
+        ]
+        assert (
+            facet_client.put(
+                "/api/admin/settings",
+                json={"settings": {"tag_facets": json.dumps(initial)}},
+            ).status_code
+            == 200
+        )
+        # Now old-tag disappears from job metadata
+        asyncio.run(storage.set_job_metadata("job-1", labels=["aws", "io2-csi"]))
+
+        # Renaming storage (without touching Legacy) still succeeds
+        renamed = [
+            initial[0],
+            {**initial[1], "name": "Storage class"},
+        ]
+        assert (
+            facet_client.put(
+                "/api/admin/settings",
+                json={"settings": {"tag_facets": json.dumps(renamed)}},
+            ).status_code
+            == 200
+        )
+
+        # Adding a brand-new unknown tag is still rejected with 422
+        with_brand_new_unknown = [
+            initial[0],
+            {
+                "id": "storage",
+                "name": "Storage class",
+                "options": [{"label": "Bad", "tags": ["brand-new-unknown"]}],
+            },
+        ]
+        bad = facet_client.put(
+            "/api/admin/settings",
+            json={"settings": {"tag_facets": json.dumps(with_brand_new_unknown)}},
+        )
+        assert bad.status_code == 422
+        assert "brand-new-unknown" in bad.json()["detail"]
+
+        # Backup import onto a fresh DB allows missing tags while validating schema
+        imp = facet_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "tag_facets": json.dumps(
+                        [
+                            {
+                                "id": "imported",
+                                "name": "Imported",
+                                "options": [
+                                    {"label": "Future", "tags": ["not-seen-yet"]}
+                                ],
+                            }
+                        ]
+                    )
+                },
+            },
+        )
+        assert imp.status_code == 200
+
+    def test_persist_admin_setting_validates_env_tag_facets(
+        self, facet_client: TestClient
+    ) -> None:
+        # Malformed env TAG_FACETS cannot be persisted to DB
+        with patch.dict(os.environ, {"TAG_FACETS": "{invalid-json"}):
+            resp = facet_client.post("/api/admin/settings/tag_facets/persist")
+        assert resp.status_code == 422
+
+        # Valid env TAG_FACETS referencing live tag persists cleanly
+        asyncio.run(_seed_run("r1", "job-1", labels=["aws"]))
+        valid_env = json.dumps(
+            [
+                {
+                    "id": "platform",
+                    "name": "Platform",
+                    "options": [{"label": "AWS", "tags": ["aws"]}],
+                }
+            ]
+        )
+        with patch.dict(os.environ, {"TAG_FACETS": valid_env}):
+            resp = facet_client.post("/api/admin/settings/tag_facets/persist")
+        assert resp.status_code == 200

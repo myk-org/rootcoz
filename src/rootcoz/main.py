@@ -23215,7 +23215,52 @@ async def _normalize_enumerated_value(key: str, value: str) -> tuple[str, str | 
     return value, None
 
 
-async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
+async def _validate_and_normalize_tag_facets(
+    raw_facets: Any,
+    *,
+    allow_missing_tags: bool = False,
+    existing_tags: set[str] | None = None,
+) -> str:
+    """Validate ``tag_facets`` schema and (optionally) live tag existence.
+
+    Raises HTTP 422 on schema violations or newly-introduced tags missing from
+    ``job_metadata_labels``. Tags already present in *existing_tags* are allowed
+    through so a vanished tag in an untouched facet never blocks renaming or
+    reordering other facets; *allow_missing_tags* bypasses the live-label check
+    for backup imports onto fresh/empty databases.
+    """
+    if raw_facets is None or (isinstance(raw_facets, str) and not raw_facets.strip()):
+        return "[]"
+    try:
+        parsed_facets = parse_tag_facets(raw_facets, strict=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"tag_facets: {exc}") from exc
+    if not allow_missing_tags:
+        referenced_tags = collect_facet_tags(parsed_facets)
+        check_tags = (
+            referenced_tags - existing_tags
+            if existing_tags is not None
+            else referenced_tags
+        )
+        if check_tags:
+            live_labels = await storage.get_live_job_labels()
+            unknown_tags = sorted(check_tags - live_labels)
+            if unknown_tags:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "tag_facets: unknown tag(s) not present in job "
+                        f"metadata: {', '.join(unknown_tags)}"
+                    ),
+                )
+    return serialize_tag_facets(parsed_facets)
+
+
+async def _validate_settings_updates(
+    settings_updates: dict[str, Any],
+    *,
+    allow_missing_facet_tags: bool = False,
+) -> list[str]:
     """Validate admin settings updates; return per-entry error messages.
 
     Shared by the PUT update and the settings import endpoints so every
@@ -23291,34 +23336,20 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
     if site_url and (site_error := jira_site_url_error(str(site_url))):
         raise HTTPException(status_code=422, detail=site_error)
 
-    # Admin-defined tag facets (#658): validate schema and verify every
-    # referenced tag currently exists in job_metadata_labels on save.
+    # Admin-defined tag facets (#658): validate schema and check newly-added
+    # tags against live job_metadata_labels (imports allow missing tags so
+    # restoring a backup onto an empty DB succeeds).
     if "tag_facets" in settings_updates:
-        raw_facets = settings_updates["tag_facets"]
-        if raw_facets is None or (
-            isinstance(raw_facets, str) and not raw_facets.strip()
-        ):
-            settings_updates["tag_facets"] = "[]"
-        else:
-            try:
-                parsed_facets = parse_tag_facets(raw_facets, strict=True)
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=422, detail=f"tag_facets: {exc}"
-                ) from exc
-            referenced_tags = collect_facet_tags(parsed_facets)
-            if referenced_tags:
-                live_labels = await storage.get_live_job_labels()
-                unknown_tags = sorted(referenced_tags - live_labels)
-                if unknown_tags:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=(
-                            "tag_facets: unknown tag(s) not present in job "
-                            f"metadata: {', '.join(unknown_tags)}"
-                        ),
-                    )
-            settings_updates["tag_facets"] = serialize_tag_facets(parsed_facets)
+        existing_tags = (
+            None
+            if allow_missing_facet_tags
+            else collect_facet_tags(get_settings().parsed_tag_facets)
+        )
+        settings_updates["tag_facets"] = await _validate_and_normalize_tag_facets(
+            settings_updates["tag_facets"],
+            allow_missing_tags=allow_missing_facet_tags,
+            existing_tags=existing_tags,
+        )
 
     for key, value in settings_updates.items():
         if key not in valid_keys:
@@ -23767,7 +23798,7 @@ async def import_server_settings(request: Request) -> JSONResponse:
     # rules the per-setting PUT enforces, plus the empty-override gates
     # the shared save path applies (checked here so a rejection is a 422
     # before any DB write, keeping the import atomic).
-    errors = await _validate_settings_updates(updates)
+    errors = await _validate_settings_updates(updates, allow_missing_facet_tags=True)
     for key, value in updates.items():
         if key in _DERIVED_SETTINGS:
             # Same rule the persist endpoint enforces: a derived value is
@@ -24045,6 +24076,12 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         # Canonical decimal form — the env bridge exports this verbatim.
         env_value = str(getattr(validated, key))
 
+    facets_before = get_settings().parsed_tag_facets if key == "tag_facets" else None
+    if key == "tag_facets":
+        env_value = await _validate_and_normalize_tag_facets(
+            env_value, allow_missing_tags=False
+        )
+
     username = request.state.username or "admin"
     await _save_settings_to_db({key: env_value}, username)
 
@@ -24057,6 +24094,13 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         details=_audit_setting_details(key),
         request=request,
     )
+    if facets_before is not None:
+        await _record_tag_facet_audit_rows(
+            facets_before,
+            get_settings().parsed_tag_facets,
+            actor=username,
+            request=request,
+        )
     return JSONResponse(content={"key": key, "source": "db"})
 
 
