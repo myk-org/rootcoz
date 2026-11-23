@@ -8,7 +8,7 @@ import {
   formatProviderModelLabel,
   KNOWN_PROVIDER_LABELS,
   normalizeProvider,
-} from '@/lib/aiProviders'
+} from '@/lib/providerCatalog'
 
 /**
  * Full set of built-in sidecar provider IDs (@earendil-works/pi-ai KnownProvider

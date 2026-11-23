@@ -833,14 +833,20 @@ def install_start_rig(monkeypatch, tmp_path):
             header=header,
             credential_source=credential_source,
         )
+        from rootcoz import ai_catalog
+
         monkeypatch.setattr(graft_http, "cloned_graph_roots", lambda workspace: {})
         monkeypatch.setattr(chat, "get_sidecar_client", lambda: client)
         monkeypatch.setattr(
-            chat,
-            "resolve_catalog_pair",
-            AsyncMock(return_value=("openai", "undeclared")),
+            ai_catalog,
+            "resolve_ai_selection",
+            AsyncMock(
+                return_value=ai_catalog.ResolvedAiSelection(
+                    "openai", "undeclared", credential_source
+                )
+            ),
         )
-        monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+        monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
         if credential_source == "user":
             await storage.update_user_ai_credential(
                 "alice", "openai", REFUSAL_SECRET_KEY
@@ -891,7 +897,7 @@ def _install_common_chat_stubs(
     Shared by ``install_start_rig`` and ``install_turn_rig`` so one edit reaches
     both; each rig adds only what its own path calls.
     """
-    from rootcoz import ai_client, main
+    from rootcoz import ai_catalog, main
     from rootcoz.engine import chat
     from rootcoz.sources import chat_workspace
 
@@ -907,11 +913,10 @@ def _install_common_chat_stubs(
     )
     _install_header(monkeypatch, header)
 
-    async def validate(provider, model):
-        ai_client._selected_credential_source.set(credential_source)
-        return provider, model
+    async def validate(provider, model, *, username=None):
+        return ai_catalog.ResolvedAiSelection(provider, model, credential_source)
 
-    monkeypatch.setattr(main, "_validate_catalog_pair", validate)
+    monkeypatch.setattr(main, "_validate_catalog_selection", validate)
 
 
 @contextmanager

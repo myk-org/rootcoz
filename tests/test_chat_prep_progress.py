@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from rootcoz import ai_client, main, storage
+from rootcoz import main, storage
 from rootcoz.models import ChatInitRequest
 
 
@@ -60,11 +60,12 @@ async def _setup_job(
     )
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
 
-    async def validate(p, m):
-        ai_client._selected_credential_source.set("user")
-        return p, m
+    from rootcoz import ai_catalog
 
-    monkeypatch.setattr(main, "_validate_catalog_pair", validate)
+    async def validate(p, m, *, username=None):
+        return ai_catalog.ResolvedAiSelection(p, m, "user")
+
+    monkeypatch.setattr(main, "_validate_catalog_selection", validate)
 
     async def create(**kwargs):
         await storage.save_ai_session_source("sid", "alice", "openai", "user")

@@ -26,10 +26,7 @@ import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { CheckCircle2, ExternalLink } from 'lucide-react'
-import { formatProviderModelLabel } from '@/lib/aiProviders'
-import { useCatalogProviderLabels } from '@/lib/useProviderLabels'
-import { completeAiPairOverride } from '@/lib/analysisAi'
-import { useAiSelection } from '@/lib/useAiSelection'
+import { completeAiPairOverride, formatProviderModelLabel, useAiSelection, useCatalogProviderLabels } from '@/lib/providerCatalog'
 import type {
   Capabilities,
   FeedbackRequest,

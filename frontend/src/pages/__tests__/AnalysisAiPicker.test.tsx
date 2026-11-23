@@ -6,7 +6,7 @@ import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
 import { AnalysisProviderSelect } from '@/components/shared/AnalysisAiPicker'
 import { ReAnalyzeDialog } from '@/pages/report/ReAnalyzeDialog'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
+import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 import { writeLastAiPair } from '@/lib/lastAiPair'
 import type { AnalysisResult, AiModelsResponse } from '@/types'
 

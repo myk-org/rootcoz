@@ -51,10 +51,14 @@ import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
 import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import { TestResultBanner } from '@/components/shared/TestResultBanner'
-import { useProviderModels } from '@/hooks/useProviderModels'
-import { useProviderCatalog } from '@/lib/useProviderOptions'
-import { normalizeProvider } from '@/lib/aiProviders'
-import { isAnalysisAiAvailable, analysisAiUnavailablePart, type AnalysisAiUnavailablePart } from '@/lib/analysisAi'
+import {
+  analysisAiUnavailablePart,
+  isAnalysisAiAvailable,
+  normalizeProvider,
+  useProviderCatalog,
+  useProviderModels,
+  type AnalysisAiUnavailablePart,
+} from '@/lib/providerCatalog'
 import { ServerProvidersCard } from '@/components/shared/ServerProvidersCard'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'

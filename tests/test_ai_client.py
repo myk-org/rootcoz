@@ -15,7 +15,7 @@ from urllib.parse import quote
 import httpx
 import pytest
 
-from rootcoz import ai_client, storage
+from rootcoz import ai_catalog, ai_client, storage
 from rootcoz.ai_client import AIResult, normalize_provider
 
 # Import-time capture, before conftest's autouse fixture rebinds the module
@@ -131,7 +131,7 @@ async def test_resolve_catalog_pair_rejects_removed_cli_acpx_cursor_providers(
             ]
         ),
     )
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     with pytest.raises(ValueError, match="Unknown Pi-sidecar provider/model pair"):
         await ai_client.resolve_catalog_pair(removed_provider, "claude-sonnet-4-6")
 
@@ -246,7 +246,7 @@ async def test_call_ai_passes_exact_catalog_pair_to_sidecar(
     result = AIResult(success=True, text="result")
     call = AsyncMock(return_value=result)
     monkeypatch.setattr(ai_client, "_call_ai", call)
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     token = ai_client.ai_username.set("admin")
     try:
         assert (
@@ -297,7 +297,7 @@ async def test_missing_normal_user_cannot_create_server_session(
         return_value=AIResult(success=True, text="reply", session_id="new-session")
     )
     monkeypatch.setattr(ai_client, "_call_ai", call)
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     try:
         with pytest.raises(LookupError, match="account changed"):
             await call_ai_under_test("prompt", ai_provider="openai", ai_model="model")
@@ -324,7 +324,7 @@ async def test_server_session_discarded_when_account_changes_during_sidecar_call
     monkeypatch.setattr(
         ai_client, "get_sidecar_client", lambda: AsyncMock(delete_session=delete)
     )
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
 
     async def sidecar_call(*args: object, **kwargs: object) -> AIResult:
         await storage.delete_user("alice")
@@ -359,7 +359,7 @@ async def test_server_session_collision_does_not_delete_existing_sidecar_session
     monkeypatch.setattr(
         ai_client, "get_sidecar_client", lambda: AsyncMock(delete_session=delete)
     )
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     monkeypatch.setattr(
         ai_client,
         "_call_ai",
@@ -713,7 +713,7 @@ async def test_resolve_catalog_pair_maps_unambiguous_legacy_gemini(
         AsyncMock(return_value=[{"provider": "google", "id": "gemini-2.5"}]),
     )
 
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     assert await ai_client.resolve_catalog_pair("gemini", "gemini-2.5") == (
         "google",
         "gemini-2.5",
@@ -748,7 +748,7 @@ async def test_resolve_catalog_pair_uses_warm_catalog_when_refresh_fails(
     fetch = AsyncMock(side_effect=RuntimeError("temporary sidecar failure"))
     monkeypatch.setattr(ai_client, "_list_models_raw", fetch)
 
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     assert await ai_client.resolve_catalog_pair("openai", "gpt-5") == (
         "openai",
         "gpt-5",
@@ -832,7 +832,7 @@ async def test_resolve_catalog_pair_rejects_model_from_another_provider(
         ),
     )
 
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     assert await ai_client.resolve_catalog_pair("openai", "shared-model") == (
         "openai",
         "shared-model",
@@ -854,7 +854,7 @@ async def test_resolve_catalog_pair_adopts_mixed_case_catalog_spelling(
         AsyncMock(return_value=[{"provider": "MyGateway", "id": "mygateway/gpt-4o"}]),
     )
 
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     for requested in ("mygateway", "MyGateway", "MYGATEWAY"):
         assert await ai_client.resolve_catalog_pair(requested, "mygateway/gpt-4o") == (
             "MyGateway",
@@ -874,7 +874,7 @@ async def test_resolve_catalog_pair_mixed_case_alias_still_maps_legacy(
         AsyncMock(return_value=[{"provider": "google", "id": "gemini-2.5"}]),
     )
 
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     assert await ai_client.resolve_catalog_pair("GEMINI", "gemini-2.5") == (
         "google",
         "gemini-2.5",
@@ -907,7 +907,7 @@ async def test_resolve_catalog_pair_refresh_reevaluates_mixed_case_provider(
         ),
     )
 
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     assert await ai_client.resolve_catalog_pair("mygateway", "mygateway/new-model") == (
         "mygateway",
         "mygateway/new-model",
@@ -934,7 +934,7 @@ async def test_resolve_catalog_pair_refresh_finds_new_model_same_spelling(
         ),
     )
 
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     assert await ai_client.resolve_catalog_pair("mygateway", "mygateway/new-model") == (
         "MyGateway",
         "mygateway/new-model",
@@ -1233,7 +1233,11 @@ async def test_user_credential_failure_tokens_survive_partial_narration(
 ) -> None:
     """User-keyed failures keep the exact retry/auth token, never the narration."""
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "model"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(
+            return_value=ai_catalog.ResolvedAiSelection("openai", "model", "user")
+        ),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="user-key-1"))
     monkeypatch.setattr(
@@ -1260,14 +1264,18 @@ async def test_server_turn_warning_keeps_answer_and_sanitizes_error(
     """A completed server turn keeps its whole answer; the warning is sanitized."""
     long_answer = "y" * 4000
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "model"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(
+            return_value=ai_catalog.ResolvedAiSelection("openai", "model", "server")
+        ),
     )
     monkeypatch.setattr(
         ai_client,
         "server_provider_key_with_generation",
         AsyncMock(return_value=(None, None)),
     )
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     monkeypatch.setattr(
         ai_client, "_collect_server_redact_keys", AsyncMock(return_value=())
     )
@@ -1307,14 +1315,18 @@ async def test_server_failure_keeps_sanitized_cause_not_ai_call_failed(
         f"see https://api.example.test/v1?key={google_key}"
     )
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "model"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(
+            return_value=ai_catalog.ResolvedAiSelection("openai", "model", "server")
+        ),
     )
     monkeypatch.setattr(
         ai_client,
         "server_provider_key_with_generation",
         AsyncMock(return_value=(None, None)),
     )
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     monkeypatch.setattr(
         ai_client, "_collect_server_redact_keys", AsyncMock(return_value=())
     )
@@ -1554,11 +1566,13 @@ async def test_legacy_untracked_server_session_resumes(
     try:
         _bind_internal_call_ai(monkeypatch, client)
         monkeypatch.setattr(
-            ai_client,
-            "resolve_catalog_pair",
-            AsyncMock(return_value=("openai", "model")),
+            ai_catalog,
+            "resolve_ai_selection",
+            AsyncMock(
+                return_value=ai_catalog.ResolvedAiSelection("openai", "model", "server")
+            ),
         )
-        monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+        monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
         with capture_main_logs(caplog, logging.DEBUG, logger="rootcoz.storage"):
             result = await call_ai_under_test(
                 "next turn",
@@ -1596,9 +1610,11 @@ async def test_tracked_server_session_after_rotation_is_unavailable(
     try:
         _bind_internal_call_ai(monkeypatch, client)
         monkeypatch.setattr(
-            ai_client,
-            "resolve_catalog_pair",
-            AsyncMock(return_value=("openai", "model")),
+            ai_catalog,
+            "resolve_ai_selection",
+            AsyncMock(
+                return_value=ai_catalog.ResolvedAiSelection("openai", "model", "server")
+            ),
         )
         result = await call_ai_under_test(
             "next turn",
@@ -1633,9 +1649,13 @@ async def test_server_key_rotated_mid_turn_fails_closed(
         )
 
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "model"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(
+            return_value=ai_catalog.ResolvedAiSelection("openai", "model", "server")
+        ),
     )
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     monkeypatch.setattr(ai_client, "_call_ai", rotate_then_fail)
     sidecar = AsyncMock(delete_session=delete)
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: sidecar)
@@ -1767,11 +1787,13 @@ async def test_unreadable_credential_store_does_not_fail_the_turn(
     try:
         _bind_internal_call_ai(monkeypatch, client)
         monkeypatch.setattr(
-            ai_client,
-            "resolve_catalog_pair",
-            AsyncMock(return_value=("openai", "model")),
+            ai_catalog,
+            "resolve_ai_selection",
+            AsyncMock(
+                return_value=ai_catalog.ResolvedAiSelection("openai", "model", "server")
+            ),
         )
-        monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+        monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
         token = ai_client.ai_username.set("admin")
         try:
             with capture_main_logs(
@@ -1838,11 +1860,13 @@ async def test_rotation_after_session_validation_fails_closed(
     try:
         _bind_internal_call_ai(monkeypatch, client)
         monkeypatch.setattr(
-            ai_client,
-            "resolve_catalog_pair",
-            AsyncMock(return_value=("openai", "model")),
+            ai_catalog,
+            "resolve_ai_selection",
+            AsyncMock(
+                return_value=ai_catalog.ResolvedAiSelection("openai", "model", "server")
+            ),
         )
-        monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+        monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
         result = await call_ai_under_test(
             "next turn",
             ai_provider="openai",
@@ -1879,7 +1903,11 @@ async def test_server_key_never_logged_when_sessions_creation_echoes_base64(
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "_call_ai", real_internal_call_ai)
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "model"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(
+            return_value=ai_catalog.ResolvedAiSelection("openai", "model", "server")
+        ),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
     monkeypatch.setattr(
@@ -1887,7 +1915,7 @@ async def test_server_key_never_logged_when_sessions_creation_echoes_base64(
         "server_provider_key_with_generation",
         AsyncMock(return_value=(secret, None)),
     )
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     monkeypatch.setattr(
         ai_client, "_collect_server_redact_keys", AsyncMock(return_value=(secret,))
     )

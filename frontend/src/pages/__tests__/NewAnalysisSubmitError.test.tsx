@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { AuthProvider } from '@/lib/AuthProvider'
 import { ApiError } from '@/lib/api'
 import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
-import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
+import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 
 const get = vi.fn()
 const post = vi.fn()

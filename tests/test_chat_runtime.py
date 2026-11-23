@@ -210,7 +210,7 @@ async def test_unified_process_turn_happy_path_and_context_reset(
 
     async def fake_ai(**kwargs):
         observed_ctx.append(
-            (ai_client.ai_username.get(), ai_client.chat_session_source.get())
+            (ai_client.ai_username.get(), kwargs["pinned_credential_source"])
         )
         kwargs["on_delta"]("Hello ")
         kwargs["on_delta"]("world!")
@@ -222,7 +222,6 @@ async def test_unified_process_turn_happy_path_and_context_reset(
 
     received_frames: list[dict] = []
     orig_user = ai_client.ai_username.set("outer-user")
-    orig_source = ai_client.chat_session_source.set("server")
     try:
         async with runtime.subscribe_chat_stream(conversation_id, "alice") as sub:
             await runtime.process_turn(
@@ -242,10 +241,8 @@ async def test_unified_process_turn_happy_path_and_context_reset(
 
         assert observed_ctx == [("alice", "user")]
         assert ai_client.ai_username.get() == "outer-user"
-        assert ai_client.chat_session_source.get() == "server"
     finally:
         ai_client.ai_username.reset(orig_user)
-        ai_client.chat_session_source.reset(orig_source)
 
     rows = await storage.get_chat_messages(conversation_id, username="alice")
     assistant = next(r for r in rows if r["id"] == assistant_msg_id)
@@ -514,9 +511,11 @@ async def test_server_grant_revoked_mid_turn_refuses_reply_both_modes(
         "build_session_tools",
         AsyncMock(return_value=SimpleNamespace(custom=[])),
     )
+    from rootcoz import ai_catalog
+
     monkeypatch.setattr(
-        ai_client,
-        "require_server_provider_grant",
+        ai_catalog,
+        "check_server_provider_grant",
         AsyncMock(side_effect=ValueError("Server grant revoked")),
     )
     monkeypatch.setattr(
@@ -690,14 +689,17 @@ async def test_start_job_chat_init_handshake_dedupe_conflict_and_425(
         chat_engine, "init_chat_session", AsyncMock(return_value="sess-prep")
     )
 
-    async def validate_pair(provider: str, model: str) -> tuple[str, str]:
-        ai_client._selected_credential_source.set("user")
-        return provider, model
+    from rootcoz import ai_catalog
+
+    async def validate_selection(
+        provider: str, model: str, *, username: str | None = None
+    ) -> ai_catalog.ResolvedAiSelection:
+        return ai_catalog.ResolvedAiSelection(provider, model, "user")
 
     runtime = ChatRuntime(
         ChatRuntimeHost(
             get_settings=lambda: Settings(ai_call_timeout=30),
-            validate_catalog_pair=validate_pair,
+            validate_catalog_selection=validate_selection,
             on_enter_chat_workspace=AsyncMock(return_value=workspace),
         )
     )

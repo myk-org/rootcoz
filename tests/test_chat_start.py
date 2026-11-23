@@ -122,15 +122,16 @@ async def test_start_and_send_use_selected_source_not_job_or_settings(
     )
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
 
-    async def validate(p, m):
-        ai_client._selected_credential_source.set("user")
-        return p, m
+    from rootcoz import ai_catalog
 
-    monkeypatch.setattr(main, "_validate_catalog_pair", validate)
+    async def validate(p, m, *, username=None):
+        return ai_catalog.ResolvedAiSelection(p, m, "user")
+
+    monkeypatch.setattr(main, "_validate_catalog_selection", validate)
 
     async def create(**kwargs):
         assert (kwargs["ai_provider"], kwargs["ai_model"]) == ("openai", "chosen")
-        assert ai_client.chat_session_source.get() == "user"
+        assert kwargs["pinned_credential_source"] == "user"
         await storage.save_ai_session_source("sid", "alice", "openai", "user")
         return "sid"
 
@@ -300,11 +301,12 @@ async def test_chat_selection_uses_server_source_when_granted(monkeypatch, tmp_p
         "_get_model_catalog",
         AsyncMock(return_value=[{"provider": "openai", "id": "m"}]),
     )
-    provider, model = await main._validate_chat_selection(
+    from rootcoz import ai_catalog
+
+    selection = await main._validate_chat_selection(
         ChatInitRequest(ai_provider="openai", ai_model="m"), "alice"
     )
-    assert (provider, model) == ("openai", "m")
-    assert ai_client._selected_credential_source.get() == "server"
+    assert selection == ai_catalog.ResolvedAiSelection("openai", "m", "server")
 
 
 @pytest.mark.asyncio
@@ -363,11 +365,12 @@ async def test_new_session_replaces_stale_welcome_but_keeps_replies(
     )
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
 
-    async def validate(p, m):
-        ai_client._selected_credential_source.set("user")
-        return p, m
+    from rootcoz import ai_catalog
 
-    monkeypatch.setattr(main, "_validate_catalog_pair", validate)
+    async def validate(p, m, *, username=None):
+        return ai_catalog.ResolvedAiSelection(p, m, "user")
+
+    monkeypatch.setattr(main, "_validate_catalog_selection", validate)
 
     sessions = iter(["sid-1", "sid-2"])
 

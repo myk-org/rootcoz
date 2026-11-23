@@ -763,8 +763,10 @@ async def test_resumed_server_credential_turn_streams_through_one_prompt_path(
             ]
         ),
     )
+    from rootcoz import ai_catalog
+
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     monkeypatch.setattr(
         ai_client,
         "server_provider_key_with_generation",
@@ -1156,9 +1158,6 @@ def _patch_chat_processing(monkeypatch: pytest.MonkeyPatch) -> None:
         AsyncMock(return_value=("", "", None, "", "")),
     )
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
-    from rootcoz.ai_client import _selected_credential_source
-
-    _selected_credential_source.set("server")
 
 
 async def _run_chat_turn(

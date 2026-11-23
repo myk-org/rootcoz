@@ -39,11 +39,9 @@ import type {
 } from '@/types'
 import { useUserTokenPresence } from '@/lib/useUserTokens'
 import { useReportDispatch, useRefreshEnrichments, useReportState } from '@/pages/report/reportState'
-import { useAiSelection } from '@/lib/useAiSelection'
+import { isAnalysisAiAvailable, useAiSelection, useProviderCatalog } from '@/lib/providerCatalog'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { IssueMatchList } from './IssueMatchList'
-import { isAnalysisAiAvailable } from '@/lib/analysisAi'
-import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { useAuth } from '@/lib/auth'
 
 type BugTarget = 'github' | 'jira'

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback, useId } from
 import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
 import { CONTROL_CLASS } from '@/lib/controlStyles'
-import { credentialLabel } from '@/lib/analysisAi'
+import { credentialLabel } from '@/lib/providerCatalog'
 import { CredentialSourceLabel, ServerAccessHint, ServerAccessTooltip } from '@/components/shared/CredentialSourceLabel'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ChevronDown } from 'lucide-react'

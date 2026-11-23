@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from pi_sidecar_client import get_sidecar_client
 
-from rootcoz import get_child_logger
+from rootcoz import ai_catalog, get_child_logger
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
     SessionCreationRefused,
@@ -22,7 +22,6 @@ from rootcoz.ai_client import (
     call_ai,
     create_session_safely,
     format_ai_diagnostic,
-    resolve_catalog_pair,
 )
 from rootcoz.error_messages import tracker_credential_message, unavailable_sentence
 from rootcoz.jira import (
@@ -1874,6 +1873,7 @@ async def _create_chat_session(
     log_prefix: str = "Chat",
     custom_tools: list[dict[str, Any]] | None = None,
     restrict_tools: bool = True,
+    pinned_credential_source: str | None = None,
 ) -> str | None:
     """Create a sidecar session with the given system prompt. Returns session_id or None."""
     logger.info(
@@ -1884,16 +1884,11 @@ async def _create_chat_session(
     )
     try:
         client = get_sidecar_client()
-        sidecar_provider, sidecar_model = await resolve_catalog_pair(
-            ai_provider, ai_model
+        selection = await ai_catalog.resolve_ai_selection(ai_provider, ai_model)
+        sidecar_provider, sidecar_model = selection.as_pair()
+        ai_catalog.validate_pinned_source(
+            selection, pinned_source=pinned_credential_source
         )
-        from rootcoz.ai_client import _selected_credential_source, chat_session_source
-
-        if (
-            chat_session_source.get()
-            and _selected_credential_source.get() != chat_session_source.get()
-        ):
-            raise ValueError("Chat credential source changed during Start")
         create_kwargs: dict[str, Any] = {
             "provider": sidecar_provider,
             "model": sidecar_model,
@@ -1908,20 +1903,22 @@ async def _create_chat_session(
 
         key = (
             await session_key(sidecar_provider)
-            if _selected_credential_source.get() == "user"
+            if selection.credential_source == "user"
             else None
         )
-        if _selected_credential_source.get() == "user" and key is None:
+        if selection.credential_source == "user" and key is None:
             raise ValueError("User AI credential unavailable; Start a new chat")
         if key is not None:
             create_kwargs["api_key"] = key
         else:
             from rootcoz.ai_client import (
-                require_server_provider_grant,
+                ai_username,
                 server_provider_key_with_generation,
             )
 
-            await require_server_provider_grant(sidecar_provider, sidecar_model)
+            await ai_catalog.check_server_provider_grant(
+                ai_username.get(), sidecar_provider, sidecar_model
+            )
             # A stored server provider key (#347) reaches chat sessions too:
             # pass it as the session apiKey while keeping the server
             # credential-source classification (create_session_safely records
@@ -1964,6 +1961,7 @@ async def init_chat_session(
     ci_build_data_available: bool = False,
     issue_repos: tuple[str, ...] = (),
     tracker_unavailable: dict[str, str] | None = None,
+    pinned_credential_source: str | None = None,
 ) -> str | None:
     """Initialize a chat session via the sidecar. Returns session_id or None."""
     system_prompt = build_system_prompt(
@@ -1984,6 +1982,7 @@ async def init_chat_session(
         log_prefix=f"Chat(job={job_id})",
         custom_tools=custom_tools,
         restrict_tools=True,
+        pinned_credential_source=pinned_credential_source,
     )
 
 
@@ -1994,6 +1993,7 @@ async def init_admin_chat_session(
     repo_path: Path | None = None,
     custom_tools: list[dict[str, Any]] | None = None,
     tracker_unavailable: dict[str, str] | None = None,
+    pinned_credential_source: str | None = None,
 ) -> str | None:
     """Initialize an admin chat session via the sidecar. Returns session_id or None."""
     system_prompt = build_admin_system_prompt(
@@ -2008,6 +2008,7 @@ async def init_admin_chat_session(
         log_prefix="Admin chat",
         custom_tools=custom_tools,
         restrict_tools=True,
+        pinned_credential_source=pinned_credential_source,
     )
 
 
@@ -2033,6 +2034,7 @@ async def _chat_with_ai_impl(
     call_type: str = "chat",
     on_delta: Callable[[str], None] | None = None,
     on_warning: Callable[[str], None] | None = None,
+    pinned_credential_source: str | None = None,
 ) -> tuple[bool, str, str | None]:
     """Shared AI chat implementation used by both job and admin chat.
 
@@ -2070,6 +2072,8 @@ async def _chat_with_ai_impl(
         "ai_call_timeout": ai_call_timeout,
         "session_id": session_id,
     }
+    if pinned_credential_source is not None:
+        call_kwargs["pinned_credential_source"] = pinned_credential_source
     if custom_tools:
         call_kwargs["custom_tools"] = custom_tools
     if on_delta is not None and session_id:
@@ -2085,16 +2089,14 @@ async def _chat_with_ai_impl(
     result = await call_ai(prompt, accept_turn=_chat_turn_usable, **call_kwargs)
 
     # A revoked or switched chat source must never be rebuilt under another identity.
-    from rootcoz.ai_client import chat_session_source
-
     if (
         not result.success
         and session_id
         and "not found" in result.text.lower()
         and result.text != "AI session unavailable"
         and (
-            not chat_session_source.get()
-            or result.credential_source == chat_session_source.get()
+            not pinned_credential_source
+            or result.credential_source == pinned_credential_source
         )
     ):
         logger.warning("%s: session lost, rebuilding with full context", log_prefix)
@@ -2116,6 +2118,8 @@ async def _chat_with_ai_impl(
             # The rebuilt session is created inside this call, so there is no feed id
             # to subscribe to yet: this retry never streams (`on_delta` is not passed).
         }
+        if pinned_credential_source is not None:
+            retry_kwargs["pinned_credential_source"] = pinned_credential_source
         if custom_tools:
             retry_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
@@ -2186,6 +2190,7 @@ async def chat_with_ai(
     issue_repos: tuple[str, ...] = (),
     on_delta: Callable[[str], None] | None = None,
     on_warning: Callable[[str], None] | None = None,
+    pinned_credential_source: str | None = None,
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response via the sidecar."""
 
@@ -2217,6 +2222,7 @@ async def chat_with_ai(
         call_type="chat",
         on_delta=on_delta,
         on_warning=on_warning,
+        pinned_credential_source=pinned_credential_source,
     )
 
 
@@ -2233,6 +2239,7 @@ async def admin_chat_with_ai(
     tracker_unavailable: dict[str, str] | None = None,
     on_delta: Callable[[str], None] | None = None,
     on_warning: Callable[[str], None] | None = None,
+    pinned_credential_source: str | None = None,
 ) -> tuple[bool, str, str | None]:
     """Send an admin chat message and get an AI response."""
 
@@ -2257,4 +2264,5 @@ async def admin_chat_with_ai(
         call_type="admin_chat",
         on_delta=on_delta,
         on_warning=on_warning,
+        pinned_credential_source=pinned_credential_source,
     )

@@ -1,9 +1,8 @@
 import { useState, useCallback, useRef } from 'react'
 import { api } from '@/lib/api'
-import { completeAiPairOverride } from '@/lib/analysisAi'
+import { completeAiPairOverride, useAiSelection } from '@/lib/providerCatalog'
 import { useReportState, useReportDispatch } from '@/pages/report/reportState'
 import { reviewKey } from '@/lib/reviewKey'
-import { useAiSelection } from '@/lib/useAiSelection'
 import { putReviewed, scopedReviewState } from './failureUpdates'
 
 /* ------------------------------------------------------------------ */

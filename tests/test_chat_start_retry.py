@@ -47,9 +47,10 @@ async def test_repeated_start_reuses_session_without_duplicate_welcome(
         ai_client, "provider_accepts_user_keys", AsyncMock(return_value=True)
     )
 
+    from rootcoz import ai_catalog
+
     async def validate(body, username):
-        ai_client._selected_credential_source.set(source)
-        return body.ai_provider, body.ai_model
+        return ai_catalog.ResolvedAiSelection(body.ai_provider, body.ai_model, source)
 
     monkeypatch.setattr(main, "_validate_chat_selection", validate)
 

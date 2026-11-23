@@ -68,6 +68,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from rootcoz import (
+    ai_catalog,
     analysis_slots,
     get_child_logger,
     issue_attachments,
@@ -88,12 +89,9 @@ from rootcoz.ai_client import (
     call_ai_once,
     format_ai_diagnostic,
     list_models,
-    model_listing_status,
     normalize_provider,
     parse_ambient_auth_provider_ids,
     registered_provider_ids,
-    resolve_catalog_pair,
-    scoped_models,
     supported_key_providers,
     update_model_catalog,
 )
@@ -1233,8 +1231,8 @@ _chat_runtime = ChatRuntime(
         job_issue_repo_slugs=lambda params: _job_issue_repo_slugs(params),
         issue_blocked_notice=lambda **kwargs: _issue_blocked_notice(**kwargs),
         post_server_notice=lambda **kwargs: _post_server_notice(**kwargs),
-        validate_catalog_pair=lambda provider, model: _validate_catalog_pair(
-            provider, model
+        validate_catalog_selection=lambda provider, model, *, username=None: (
+            _validate_catalog_selection(provider, model, username=username)
         ),
         spawn_background=lambda coro: _spawn_background(coro),
         resolve_admin_artifacts_owner_id=lambda username: (
@@ -5341,11 +5339,11 @@ def _resolve_ai_provider_model(
     Returns:
         Tuple of (resolved_provider, resolved_model). May be empty strings.
     """
-    if settings is None:
-        settings = get_settings()
-    provider = normalize_provider(ai_provider or settings.ai_provider)
-    model = ai_model or settings.ai_model
-    return provider, model
+    return ai_catalog.resolve_provider_model_values(
+        ai_provider,
+        ai_model,
+        settings=get_settings() if settings is None else settings,
+    )
 
 
 def _resolve_ai_config_values(
@@ -5380,12 +5378,17 @@ def _resolve_ai_config_values(
     return provider, model
 
 
-async def _validate_catalog_pair(provider: str, model: str) -> tuple[str, str]:
-    """Return a catalog-backed AI pair or a clear client error."""
+async def _validate_catalog_selection(
+    provider: str,
+    model: str,
+    *,
+    username: str | None = None,
+) -> ai_catalog.ResolvedAiSelection:
+    """Return a catalog-backed AI selection or a clear client error."""
     from rootcoz.ai_client import InactiveServerProviderError
 
     try:
-        return await resolve_catalog_pair(provider, model)
+        return await ai_catalog.resolve_ai_selection(provider, model, username=username)
     except InactiveServerProviderError as exc:
         logger.info(
             "Rejected server credentials for deactivated provider: %s/%s",
@@ -5409,6 +5412,11 @@ async def _validate_catalog_pair(provider: str, model: str) -> tuple[str, str]:
         raise HTTPException(
             status_code=503, detail="AI model catalog is temporarily unavailable"
         ) from exc
+
+
+async def _validate_catalog_pair(provider: str, model: str) -> tuple[str, str]:
+    """Return a catalog-backed AI pair or a clear client error."""
+    return (await _validate_catalog_selection(provider, model)).as_pair()
 
 
 async def _resolve_ai_config(
@@ -17728,13 +17736,9 @@ async def get_classifications(
 
 async def scoped_models_for_request(
     request: Request,
-) -> dict[str, list[dict[str, Any]]]:
+) -> ai_catalog.ScopedCatalog:
     """Discover models using the authenticated caller's credential scope."""
-    token = ai_username.set(request.state.username)
-    try:
-        return await scoped_models()
-    finally:
-        ai_username.reset(token)
+    return await ai_catalog.load_scoped_catalog(request.state.username)
 
 
 @app.get("/api/ai-models", operation_id="listAiModels")
@@ -17749,38 +17753,27 @@ async def list_ai_models(
     _require_authenticated(request)
     logger.debug("GET /api/ai-models provider=%s", provider)
     try:
-        scoped = await scoped_models_for_request(request)
-        listing_status = model_listing_status.get() or {}
+        catalog = await scoped_models_for_request(request)
         if provider:
-            provider = normalize_provider(provider)
-            # Custom providers may be registered with mixed case (e.g.
-            # "EnMaaS"): resolve the query case-insensitively and adopt the
-            # catalog's exact spelling so per-provider consumers (settings
-            # page pickers) see the models and persist the right ID.
-            if provider not in scoped:
-                exact = next((k for k in scoped if k.lower() == provider), None)
-                if exact is not None:
-                    provider = exact
-            models = scoped.get(provider, [])
-            if not models and provider not in listing_status:
+            exact_provider, models, status_entry = catalog.models_for(provider)
+            if not models and status_entry is None:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Unknown Pi-sidecar provider: {provider}",
+                    detail=f"Unknown Pi-sidecar provider: {exact_provider}",
                 )
-            payload: dict[str, Any] = {"provider": provider, "models": models}
-            if provider in listing_status:
-                payload["modelListingSupported"] = listing_status[provider][
-                    "modelListingSupported"
-                ]
-                if listing_status[provider].get("unavailable"):
+            payload: dict[str, Any] = {"provider": exact_provider, "models": models}
+            if status_entry is not None:
+                payload["modelListingSupported"] = status_entry["modelListingSupported"]
+                if status_entry.get("unavailable"):
                     payload["unavailable"] = True
             return strip_sensitive_from_response(payload)
 
         # No provider specified — use the shared successful sidecar catalog.
-        all_models = scoped
-        provider_status: dict[str, Any] = dict(listing_status)
         return strip_sensitive_from_response(
-            {"providers": all_models, "provider_status": provider_status}
+            {
+                "providers": catalog.providers,
+                "provider_status": dict(catalog.provider_status),
+            }
         )
     except HTTPException:
         raise
@@ -25862,7 +25855,7 @@ def _build_ci_workspace_params(
 
 async def _validate_chat_selection(
     body: ChatInitRequest, username: str
-) -> tuple[str, str]:
+) -> ai_catalog.ResolvedAiSelection:
     return await _chat_runtime.validate_chat_selection(body, username)
 
 
@@ -26032,7 +26025,7 @@ async def _normalize_and_validate_ai_params(
     ai_model: str | None,
     *,
     username: str,
-) -> tuple[str | None, str | None]:
+) -> ai_catalog.ResolvedAiSelection | None:
     return await _chat_runtime.normalize_and_validate_ai_params(
         ai_provider, ai_model, username=username
     )

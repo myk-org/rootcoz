@@ -18,7 +18,7 @@ from tests.conftest import capture_main_logs
 async def test_queued_admin_chat_demotion_cannot_mint_admin_token_or_call_ai(
     tmp_path, monkeypatch
 ):
-    from rootcoz.ai_client import _selected_credential_source
+    from rootcoz import ai_catalog
     from rootcoz.engine import chat
 
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "admin-role.db")
@@ -37,8 +37,7 @@ async def test_queued_admin_chat_demotion_cannot_mint_admin_token_or_call_ai(
     )
 
     async def validate(provider, model, **kwargs):
-        _selected_credential_source.set("server")
-        return provider, model
+        return ai_catalog.ResolvedAiSelection(provider, model, "server")
 
     monkeypatch.setattr(main, "_normalize_and_validate_ai_params", validate)
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **kw: tmp_path)
@@ -399,9 +398,6 @@ async def test_current_admin_chat_auth_token_can_read_schema(tmp_path, monkeypat
 
 
 async def _start_user_chat(job_id: str) -> None:
-    from rootcoz.ai_client import _selected_credential_source
-
-    _selected_credential_source.set("user")
     await storage.save_ai_session_source("old-session", "alice", "p", "user")
     await storage.add_chat_message(
         job_id,
@@ -1271,13 +1267,12 @@ async def test_initial_chat_handler_revokes_session_rotated_before_insert(
     await storage.update_user_ai_credential("alice", "p", "old-key")
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
 
-    async def validate(provider, model):
-        from rootcoz.ai_client import _selected_credential_source
+    from rootcoz import ai_catalog
 
-        _selected_credential_source.set("user")
-        return provider, model
+    async def validate(provider, model, *, username=None):
+        return ai_catalog.ResolvedAiSelection(provider, model, "user")
 
-    monkeypatch.setattr(main, "_validate_catalog_pair", validate)
+    monkeypatch.setattr(main, "_validate_catalog_selection", validate)
     deleted = AsyncMock(side_effect=OSError("sidecar offline"))
     monkeypatch.setattr(
         "pi_sidecar_client.get_sidecar_client",

@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthProvider } from '@/lib/AuthProvider'
 import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
-import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
+import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 
 const get = vi.fn()
 const post = vi.fn()

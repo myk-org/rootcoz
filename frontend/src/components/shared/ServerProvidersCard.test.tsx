@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { api, ApiError } from '@/lib/api'
-import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
+import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 import { ServerProvidersCard } from './ServerProvidersCard'
 
 Element.prototype.scrollIntoView = vi.fn()
@@ -26,22 +26,26 @@ vi.mock('@/lib/api', () => ({
     }
   },
 }))
-vi.mock('@/lib/useProviderOptions', () => ({
-  resetProviderCatalogCache: vi.fn(),
-  useProviderCatalog: () => ({
-    providers: {
-      gemini: [
-        { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
-        { id: 'gemini-2.5-flash', name: 'Flash' },
-      ],
-      openai: [{ id: 'gpt-4o', name: 'GPT-4o' }],
-      // Mixed-case catalog ID, exposed folded with its exact-case original.
-      enmaas: [{ id: 'enmaas-f1', name: 'F1' }],
-    },
-    originalIds: { enmaas: 'EnMaaS' },
-    providerStatus: {},
-  }),
-}))
+vi.mock('@/lib/providerCatalog', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/providerCatalog')>()
+  return {
+    ...actual,
+    resetProviderCatalogCache: vi.fn(),
+    useProviderCatalog: () => ({
+      providers: {
+        gemini: [
+          { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+          { id: 'gemini-2.5-flash', name: 'Flash' },
+        ],
+        openai: [{ id: 'gpt-4o', name: 'GPT-4o' }],
+        // Mixed-case catalog ID, exposed folded with its exact-case original.
+        enmaas: [{ id: 'enmaas-f1', name: 'F1' }],
+      },
+      originalIds: { enmaas: 'EnMaaS' },
+      providerStatus: {},
+    }),
+  }
+})
 
 const get = vi.mocked(api.get)
 const post = vi.mocked(api.post)

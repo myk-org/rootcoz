@@ -2,11 +2,19 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import { CredentialSourceLabel, ServerAccessHint, ServerAccessTooltip, UnverifiedModelsWarning } from '@/components/shared/CredentialSourceLabel'
 import { useId } from 'react'
-import { useProviderCatalog } from '@/lib/useProviderOptions'
-import { useCatalogProviderLabels } from '@/lib/useProviderLabels'
 import { useAuth } from '@/lib/auth'
-import { buildProviderOptions, formatProviderLabel, normalizeProvider } from '@/lib/aiProviders'
-import { allowsUnverified, usableModels, visibleModels, analysisProviderIds, credentialLabel } from '@/lib/analysisAi'
+import {
+  allowsUnverified,
+  analysisProviderIds,
+  buildProviderOptions,
+  credentialLabel,
+  formatProviderLabel,
+  normalizeProvider,
+  usableModels,
+  useCatalogProviderLabels,
+  useProviderCatalog,
+  visibleModels,
+} from '@/lib/providerCatalog'
 
 /** Radix SelectItem rejects an empty value, so the server default needs a sentinel. */
 const SERVER_DEFAULT = '__server_default__'

@@ -1415,9 +1415,13 @@ async def test_call_ai_passes_server_key_as_session_api_key(tmp_path, monkeypatc
     await storage.set_server_ai_credential("p", SECRET, "admin")
     # The pair must be selected: a stored key makes the provider managed,
     # so an unselected model is excluded from server credentials.
+    from rootcoz import ai_catalog
+
     await storage.set_server_provider_models("p", [{"id": "m"}], "admin")
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "server")),
     )
     sidecar = AsyncMock(return_value=AIResult(success=True, text="ok", session_id="s1"))
     monkeypatch.setattr(ai_client, "_call_ai", sidecar)
@@ -1434,10 +1438,14 @@ async def test_call_ai_passes_server_key_as_session_api_key(tmp_path, monkeypatc
 
 
 async def test_call_ai_without_server_key_keeps_ambient_flow(tmp_path, monkeypatch):
+    from rootcoz import ai_catalog
+
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-ambient.db")
     await storage.init_db()
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "server")),
     )
     sidecar = AsyncMock(return_value=AIResult(success=True, text="ok", session_id="s2"))
     monkeypatch.setattr(ai_client, "_call_ai", sidecar)
@@ -1455,9 +1463,13 @@ async def test_call_ai_once_passes_server_key_and_cleans_up(tmp_path, monkeypatc
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-once.db")
     await storage.init_db()
     await storage.set_server_ai_credential("p", SECRET, "admin")
+    from rootcoz import ai_catalog
+
     await storage.set_server_provider_models("p", [{"id": "m"}], "admin")
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "server")),
     )
     sidecar = AsyncMock(return_value=AIResult(success=True, text="ok", session_id="s3"))
     monkeypatch.setattr(ai_client, "_call_ai", sidecar)
@@ -1482,9 +1494,13 @@ async def test_user_key_still_wins_over_server_key(tmp_path, monkeypatch):
     await storage.init_db()
     await storage.create_admin_user("alice")
     await storage.update_user_ai_credential("alice", "p", "user-key-value-9")
+    from rootcoz import ai_catalog
+
     await storage.set_server_ai_credential("p", SECRET, "admin")
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(
         ai_client, "supported_key_providers", AsyncMock(return_value=["p"])
@@ -1513,9 +1529,13 @@ async def test_call_ai_rejects_deselected_model_on_server_credentials(
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-excluded.db")
     await storage.init_db()
     await storage.set_server_ai_credential("p", SECRET, "admin")
+    from rootcoz import ai_catalog
+
     await storage.set_server_provider_models("p", [{"id": "other"}], "admin")
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "server")),
     )
     sidecar = AsyncMock(return_value=AIResult(success=True, text="ok"))
     monkeypatch.setattr(ai_client, "_call_ai", sidecar)
@@ -1542,9 +1562,13 @@ async def test_call_ai_once_rejects_deselected_model_on_server_credentials(
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-excluded-once.db")
     await storage.init_db()
     await storage.set_server_ai_credential("p", SECRET, "admin")
+    from rootcoz import ai_catalog
+
     await storage.set_server_provider_models("p", [], "admin")
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "server")),
     )
     sidecar = AsyncMock(return_value=AIResult(success=True, text="ok"))
     monkeypatch.setattr(ai_client, "_call_ai", sidecar)
@@ -1564,9 +1588,13 @@ async def test_user_key_can_run_model_excluded_from_server_pool(tmp_path, monkey
     await storage.create_user("alice")
     await storage.update_user_ai_credential("alice", "p", "user-key-value-7")
     await storage.set_server_ai_credential("p", SECRET, "admin")
+    from rootcoz import ai_catalog
+
     await storage.set_server_provider_models("p", [{"id": "other"}], "admin")
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(
         ai_client, "supported_key_providers", AsyncMock(return_value=["p"])
@@ -1587,6 +1615,7 @@ async def test_user_key_can_run_model_excluded_from_server_pool(tmp_path, monkey
 @pytest.mark.asyncio
 async def test_chat_session_creation_rejects_deselected_model(monkeypatch, tmp_path):
     """Chat session creation refuses a deselected pair on server credentials."""
+    from rootcoz import ai_catalog
     from rootcoz.engine import chat
 
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat-excluded.db")
@@ -1595,7 +1624,9 @@ async def test_chat_session_creation_rejects_deselected_model(monkeypatch, tmp_p
     await storage.set_server_provider_models("openai", [{"id": "other"}], "admin")
     create = AsyncMock(return_value="chat-sid")
     monkeypatch.setattr(
-        chat, "resolve_catalog_pair", AsyncMock(return_value=("openai", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("openai", "m", "server")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
     monkeypatch.setattr(
@@ -1605,7 +1636,6 @@ async def test_chat_session_creation_rejects_deselected_model(monkeypatch, tmp_p
     )
     monkeypatch.setattr(chat, "create_session_safely", create)
     monkeypatch.setattr(chat, "get_sidecar_client", lambda: object())
-    choice = ai_client._selected_credential_source.set("server")
     token = ai_client.ai_username.set("admin")
     try:
         assert (
@@ -1619,7 +1649,6 @@ async def test_chat_session_creation_rejects_deselected_model(monkeypatch, tmp_p
         )
         create.assert_not_awaited()
     finally:
-        ai_client._selected_credential_source.reset(choice)
         ai_client.ai_username.reset(token)
 
 
@@ -1916,14 +1945,17 @@ async def test_endpoint_key_checks_are_case_insensitive(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_chat_session_passes_stored_server_key(monkeypatch, tmp_path):
+    from rootcoz import ai_catalog
     from rootcoz.engine import chat
 
     create = AsyncMock(return_value="chat-sid")
     monkeypatch.setattr(
-        chat, "resolve_catalog_pair", AsyncMock(return_value=("openai", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("openai", "m", "server")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     monkeypatch.setattr(
         ai_client,
         "server_provider_key_with_generation",
@@ -1931,24 +1963,20 @@ async def test_chat_session_passes_stored_server_key(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(chat, "create_session_safely", create)
     monkeypatch.setattr(chat, "get_sidecar_client", lambda: object())
-    choice = ai_client._selected_credential_source.set("server")
-    try:
-        assert (
-            await chat._create_chat_session(
-                system_prompt="hi",
-                ai_provider="openai",
-                ai_model="m",
-                repo_path=tmp_path,
-            )
-            == "chat-sid"
+    assert (
+        await chat._create_chat_session(
+            system_prompt="hi",
+            ai_provider="openai",
+            ai_model="m",
+            repo_path=tmp_path,
         )
-        kwargs = create.call_args.kwargs
-        assert kwargs["server_api_key"] == SECRET
-        # The generation rides along from the SAME read as the key (#569).
-        assert kwargs["server_generation"] == 5
-        assert "api_key" not in kwargs  # never classified as a user key
-    finally:
-        ai_client._selected_credential_source.reset(choice)
+        == "chat-sid"
+    )
+    kwargs = create.call_args.kwargs
+    assert kwargs["server_api_key"] == SECRET
+    # The generation rides along from the SAME read as the key (#569).
+    assert kwargs["server_generation"] == 5
+    assert "api_key" not in kwargs  # never classified as a user key
 
 
 @pytest.mark.asyncio

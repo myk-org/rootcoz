@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { PeerRound, TokenUsageSummary } from '@/types'
-import { formatProviderModelLabel } from '@/lib/aiProviders'
+import { formatProviderModelLabel } from '@/lib/providerCatalog'
 import type { RepoUrl } from '@/lib/autoLink'
 import { Badge } from '@/components/ui/badge'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { ChatUI } from '@/components/shared/ChatUI'
 import { Bot, Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { normalizeProvider } from '@/lib/aiProviders'
+import { normalizeProvider } from '@/lib/providerCatalog'
 import type { DefaultServerSettings } from '@/types'
 
 export function AdminChatPage() {

@@ -3,7 +3,7 @@ import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { useEffect } from 'react'
 import { useReportDispatch } from '@/pages/report/reportState'
 import { ReportProvider } from '../ReportContext'
-import { useAiSelection } from '@/lib/useAiSelection'
+import { useAiSelection } from '@/lib/providerCatalog'
 import { useReviewSuggestion } from '../useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 

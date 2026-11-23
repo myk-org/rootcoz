@@ -1,7 +1,6 @@
 import { createContext, useContext, useMemo, type Dispatch } from 'react'
 import { reviewKey } from '@/lib/reviewKey'
-import { collectProviderIds, extractOriginalProviderIds } from '@/lib/aiProviders'
-import { useProviderLabels } from '@/lib/useProviderLabels'
+import { collectProviderIds, extractOriginalProviderIds, useProviderLabels } from '@/lib/providerCatalog'
 import type { SelectedGroup } from './failureUpdates'
 import { reconcileSelection, scopeKey } from './failureUpdates'
 import type { AnalysisResult, Capabilities, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel, TrackedInEntry, PreviousAnalysis } from '@/types'

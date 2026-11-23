@@ -6,9 +6,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
-import { useProviderCatalog, useProviderOptions } from '@/lib/useProviderOptions'
-import { normalizeProvider } from '@/lib/aiProviders'
-import { allowsUnverified, credentialLabel, usableModels } from '@/lib/analysisAi'
+import { allowsUnverified, credentialLabel, normalizeProvider, usableModels, useProviderCatalog, useProviderOptions } from '@/lib/providerCatalog'
 
 interface ProviderSelectProps {
   value: string

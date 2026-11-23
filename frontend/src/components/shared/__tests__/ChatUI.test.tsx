@@ -4,7 +4,7 @@ import { afterEach, beforeAll, expect, it, vi } from 'vitest'
 import { ChatUI } from '@/components/shared/ChatUI'
 import { ApiError } from '@/lib/api'
 import { INVALID_DATE_FALLBACK } from '@/lib/utils'
-import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
+import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 import { useSSE } from '@/lib/useSSE'
 import { MockEventSource } from '@/test/MockEventSource'
 

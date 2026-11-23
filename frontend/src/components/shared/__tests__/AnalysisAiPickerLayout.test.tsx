@@ -13,18 +13,22 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 // send the key, so the model list is a stale suggestion set, not a verified one.
 const providerStatus = { openrouter: { has_api_key: true, modelListingSupported: false } }
 
-vi.mock('@/lib/useProviderOptions', () => ({
-  useProviderCatalog: () => ({
-    providers: [
-      {
-        provider: 'openrouter',
-        name: 'OpenRouter',
-        models: [{ id: 'stealth/space-bunny-alpha', name: 'Space Bunny Alpha', verified: true }],
-      },
-    ],
-    providerStatus,
-  }),
-}))
+vi.mock('@/lib/providerCatalog', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/providerCatalog')>()
+  return {
+    ...actual,
+    useProviderCatalog: () => ({
+      providers: [
+        {
+          provider: 'openrouter',
+          name: 'OpenRouter',
+          models: [{ id: 'stealth/space-bunny-alpha', name: 'Space Bunny Alpha', verified: true }],
+        },
+      ],
+      providerStatus,
+    }),
+  }
+})
 vi.mock('@/lib/auth', () => ({
   useAuth: () => ({ canUseServerProviders: false }),
 }))

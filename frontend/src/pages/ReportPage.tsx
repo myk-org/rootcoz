@@ -35,7 +35,7 @@ import { ReportPortalButton } from './report/ReportPortalButton'
 import { DatadogButton } from './report/DatadogButton'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { OriginJobBanner, ReanalyzedForwardBanner } from '@/components/shared/ReanalysisBanner'
-import { formatProviderLabel, formatProviderModelLabel } from '@/lib/aiProviders'
+import { formatProviderLabel, formatProviderModelLabel } from '@/lib/providerCatalog'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { useAuth } from '@/lib/auth'
 

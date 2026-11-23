@@ -39,11 +39,10 @@ from typing import Any
 import httpx
 from fastapi import BackgroundTasks, HTTPException
 
-from rootcoz import ai_client, get_child_logger, storage
+from rootcoz import ai_catalog, ai_client, get_child_logger, storage
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
     SessionCreationRefused,
-    ai_username,
     format_chat_ai_user_error,
     normalize_provider,
 )
@@ -373,9 +372,13 @@ async def _default_post_server_notice(
     )
 
 
-async def _default_validate_catalog_pair(provider: str, model: str) -> tuple[str, str]:
+async def _default_validate_catalog_selection(
+    provider: str, model: str, *, username: str | None = None
+) -> ai_catalog.ResolvedAiSelection:
     try:
-        return await ai_client.resolve_catalog_pair(provider, model)
+        return await ai_catalog.resolve_ai_selection(provider, model, username=username)
+    except ai_client.InactiveServerProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -429,9 +432,9 @@ class ChatRuntimeHost:
     )
     issue_blocked_notice: Callable[..., Awaitable[str]] = _default_issue_blocked_notice
     post_server_notice: Callable[..., Awaitable[int]] = _default_post_server_notice
-    validate_catalog_pair: Callable[[str, str], Awaitable[tuple[str, str]]] = (
-        _default_validate_catalog_pair
-    )
+    validate_catalog_selection: Callable[
+        ..., Awaitable[ai_catalog.ResolvedAiSelection]
+    ] = _default_validate_catalog_selection
     spawn_background: Callable[[Coroutine[Any, Any, Any]], asyncio.Task[Any]] = (
         asyncio.create_task
     )
@@ -450,9 +453,11 @@ class ChatRuntimeHost:
     on_notify_chat_changed: Callable[..., None] | None = None
     on_set_chat_prep_phase: Callable[..., None] | None = None
     on_schedule_chat_index: Callable[..., None] | None = None
-    on_validate_chat_selection: Callable[..., Awaitable[tuple[str, str]]] | None = None
+    on_validate_chat_selection: (
+        Callable[..., Awaitable[ai_catalog.ResolvedAiSelection]] | None
+    ) = None
     on_normalize_and_validate_ai_params: (
-        Callable[..., Awaitable[tuple[str | None, str | None]]] | None
+        Callable[..., Awaitable[ai_catalog.ResolvedAiSelection | None]] | None
     ) = None
     on_resolve_chat_credentials: (
         Callable[..., Awaitable[tuple[str, str, JiraConnection | None, str, str]]]
@@ -525,6 +530,7 @@ class ChatModeAdapter(ABC):
         ai_model: str,
         workspace: Path,
         session_id: str | None,
+        pinned_credential_source: str,
         on_delta: Callable[[str], None],
         on_warning: Callable[[str], None],
     ) -> tuple[bool, str, str | None]: ...
@@ -710,6 +716,7 @@ class JobChatAdapter(ChatModeAdapter):
         ai_model: str,
         workspace: Path,
         session_id: str | None,
+        pinned_credential_source: str,
         on_delta: Callable[[str], None],
         on_warning: Callable[[str], None],
     ) -> tuple[bool, str, str | None]:
@@ -732,6 +739,7 @@ class JobChatAdapter(ChatModeAdapter):
             # Display only: the stored reply is still the whole text.
             on_delta=on_delta,
             on_warning=on_warning,
+            pinned_credential_source=pinned_credential_source,
         )
 
     def after_turn_completed(self, runtime: ChatRuntime, workspace: Path) -> None:
@@ -831,6 +839,7 @@ class AdminChatAdapter(ChatModeAdapter):
         ai_model: str,
         workspace: Path,
         session_id: str | None,
+        pinned_credential_source: str,
         on_delta: Callable[[str], None],
         on_warning: Callable[[str], None],
     ) -> tuple[bool, str, str | None]:
@@ -846,6 +855,7 @@ class AdminChatAdapter(ChatModeAdapter):
             tracker_unavailable=prepared.tracker_unavailable,
             on_delta=on_delta,
             on_warning=on_warning,
+            pinned_credential_source=pinned_credential_source,
         )
 
     async def verify_post_ai_access(
@@ -922,7 +932,7 @@ class ChatRuntime:
 
     async def _call_validate_chat_selection(
         self, body: ChatInitRequest, username: str
-    ) -> tuple[str, str]:
+    ) -> ai_catalog.ResolvedAiSelection:
         if self.host.on_validate_chat_selection is not None:
             return await self.host.on_validate_chat_selection(body, username)
         return await self.validate_chat_selection(body, username)
@@ -933,7 +943,7 @@ class ChatRuntime:
         ai_model: str | None,
         *,
         username: str,
-    ) -> tuple[str | None, str | None]:
+    ) -> ai_catalog.ResolvedAiSelection | None:
         if self.host.on_normalize_and_validate_ai_params is not None:
             return await self.host.on_normalize_and_validate_ai_params(
                 ai_provider, ai_model, username=username
@@ -1395,7 +1405,7 @@ class ChatRuntime:
         ai_model: str | None,
         *,
         username: str,
-    ) -> tuple[str | None, str | None]:
+    ) -> ai_catalog.ResolvedAiSelection | None:
         """Normalize and validate AI provider/model from request body."""
         provider_raw = (ai_provider or "").strip()
         provider = (normalize_provider(provider_raw) or None) if provider_raw else None
@@ -1406,38 +1416,34 @@ class ChatRuntime:
                 detail="Both ai_provider and ai_model are required when either is set",
             )
         if provider and model:
-            ai_client._selected_credential_source.set("")
-            user_token = ai_username.set(username)
-            try:
-                return await self.host.validate_catalog_pair(provider, model)
-            finally:
-                ai_username.reset(user_token)
-        return provider, model
+            return await self.host.validate_catalog_selection(
+                provider, model, username=username
+            )
+        return None
 
     async def validate_chat_selection(
         self, body: ChatInitRequest, username: str
-    ) -> tuple[str, str]:
+    ) -> ai_catalog.ResolvedAiSelection:
         """Validate the chosen pair as this user, never as the analysis job."""
-        provider, model = await self._call_normalize_and_validate_ai_params(
+        selection = await self._call_normalize_and_validate_ai_params(
             body.ai_provider,
             body.ai_model,
             username=username,
         )
-        if not provider or not model:
+        if selection is None:
             raise HTTPException(
                 status_code=422, detail="Select an AI provider and model"
             )
-        source = ai_client._selected_credential_source.get()
+        source = selection.credential_source
         if source == "server":
-            token = ai_username.set(username)
             try:
-                await ai_client.require_server_provider_grant(provider, model)
+                await ai_catalog.check_server_provider_grant(
+                    username, selection.provider, selection.model
+                )
             except ai_client.InactiveServerProviderError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
-            finally:
-                ai_username.reset(token)
         elif source != "user":
             raise HTTPException(
                 status_code=422, detail="Chat credential source unavailable"
@@ -1445,10 +1451,10 @@ class ChatRuntime:
         logger.debug(
             "Chat selection validated for user=%s provider=%s source=%s",
             username,
-            provider,
+            selection.provider,
             source,
         )
-        return provider, model
+        return selection
 
     async def available_chat_session(
         self, job_id: str, username: str, session: Any = _UNSET_SESSION
@@ -1466,15 +1472,12 @@ class ChatRuntime:
                 active["session_id"], username, active["ai_provider"]
             )
             if source == "server":
-                token = ai_username.set(username)
                 try:
-                    await ai_client.require_server_provider_grant(
-                        active["ai_provider"], active["ai_model"]
+                    await ai_catalog.check_server_provider_grant(
+                        username, active["ai_provider"], active["ai_model"]
                     )
                 except ValueError:
                     return None
-                finally:
-                    ai_username.reset(token)
             elif source == "user":
                 if (
                     await ai_client.provider_accepts_user_keys(active["ai_provider"])
@@ -1806,17 +1809,12 @@ class ChatRuntime:
     async def _scoped_chat_init_context(
         self, username: str, ai_provider: str, credential_source: str
     ) -> AsyncIterator[int | None]:
-        """Resolve credential generation and scope ai_username + chat_session_source."""
+        """Resolve credential generation and bind initiator username context."""
         credential_generation = await self._credential_generation_for_source(
             username, ai_provider, credential_source
         )
-        token = ai_username.set(username)
-        source_token = ai_client.chat_session_source.set(credential_source)
-        try:
+        with ai_catalog.scoped_ai_context(username):
             yield credential_generation
-        finally:
-            ai_client.chat_session_source.reset(source_token)
-            ai_username.reset(token)
 
     async def _persist_init_session(
         self,
@@ -1867,8 +1865,9 @@ class ChatRuntime:
             raise HTTPException(status_code=404, detail="Job not found")
         result_data = stored["result"]
         params = result_data.get("request_params", {})
-        ai_provider, ai_model = await self._call_validate_chat_selection(body, username)
-        credential_source = ai_client._selected_credential_source.get()
+        selection = await self._call_validate_chat_selection(body, username)
+        ai_provider, ai_model = selection.as_pair()
+        credential_source = selection.credential_source
         existing_session_id, _ = await self._call_check_chat_session_choice(
             job_id,
             username,
@@ -1996,6 +1995,7 @@ class ChatRuntime:
                         ci_build_data_available=ci_build_data_available,
                         issue_repos=tuple(sorted(issue_repos)),
                         tracker_unavailable=tracker_unavailable,
+                        pinned_credential_source=credential_source,
                     )
                 if job_id in self.chat_jobs_deleting and session_id:
                     await self._call_discard_unsaved_ai_session(
@@ -2210,10 +2210,9 @@ class ChatRuntime:
         """Initialize admin chat workspace and AI session."""
         session_id: str | None = ""
         async with self.hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
-            ai_provider, ai_model = await self._call_validate_chat_selection(
-                body, username
-            )
-            credential_source = ai_client._selected_credential_source.get()
+            selection = await self._call_validate_chat_selection(body, username)
+            ai_provider, ai_model = selection.as_pair()
+            credential_source = selection.credential_source
             session_id, _ = await self._call_check_chat_session_choice(
                 ADMIN_CHAT_JOB_ID,
                 username,
@@ -2281,6 +2280,7 @@ class ChatRuntime:
                             repo_path=workspace,
                             custom_tools=custom_tools,
                             tracker_unavailable=tracker_unavailable,
+                            pinned_credential_source=credential_source,
                         )
                     except SessionCreationRefused as exc:
                         raise HTTPException(status_code=422, detail=str(exc)) from None
@@ -2370,16 +2370,17 @@ class ChatRuntime:
                     status_code=422, detail="Select both provider and model"
                 )
             session, _ = await self._call_current_chat_choice(conversation_id, username)
-            ai_provider, ai_model = await self._call_normalize_and_validate_ai_params(
+            selection = await self._call_normalize_and_validate_ai_params(
                 body.ai_provider or session["ai_provider"],
                 body.ai_model or session["ai_model"],
                 username=username,
             )
-            if ai_provider is None or ai_model is None:
+            if selection is None:
                 raise HTTPException(
                     status_code=422, detail="Select both provider and model"
                 )
-            credential_source = ai_client._selected_credential_source.get()
+            ai_provider, ai_model = selection.as_pair()
+            credential_source = selection.credential_source
             await self._call_check_chat_session_choice(
                 conversation_id,
                 username,
@@ -2465,22 +2466,142 @@ class ChatRuntime:
         lock_key = f"{conversation_id}:{username}"
         label = adapter.log_label
         effective_admin = is_admin or adapter.is_admin_mode
-        user_token = ai_username.set(username)
-        source_token = None
 
-        async with adapter.track_turn(self):
-            try:
-                async with self.hold_chat_lock(lock_key):
-                    try:
-                        async with adapter.setup_barrier(self):
-                            deleted_msg = adapter.check_deleted_message(self)
-                            if deleted_msg is not None:
-                                logger.info(
-                                    "%s: skip processing for deleted job %s user %s",
-                                    label,
+        with ai_catalog.scoped_ai_context(username):
+            async with adapter.track_turn(self):
+                try:
+                    async with self.hold_chat_lock(lock_key):
+                        try:
+                            async with adapter.setup_barrier(self):
+                                deleted_msg = adapter.check_deleted_message(self)
+                                if deleted_msg is not None:
+                                    logger.info(
+                                        "%s: skip processing for deleted job %s user %s",
+                                        label,
+                                        conversation_id,
+                                        username,
+                                    )
+                                    await self.fail_chat_assistant_placeholder(
+                                        assistant_msg_id,
+                                        conversation_id,
+                                        username,
+                                        deleted_msg,
+                                    )
+                                    return
+
+                                context = await adapter.load_turn_context(self)
+
+                                ai_provider, ai_model = (
+                                    ai_provider_override,
+                                    ai_model_override,
+                                )
+                                if not ai_provider or not ai_model:
+                                    raise ValueError("Chat selection missing")
+                                (
+                                    session_id,
+                                    credential_source,
+                                ) = await self._call_check_chat_session_choice(
                                     conversation_id,
                                     username,
+                                    ai_provider,
+                                    ai_model,
+                                    credential_source,
                                 )
+
+                                credential_generation = (
+                                    await self._credential_generation_for_source(
+                                        username, ai_provider, credential_source
+                                    )
+                                )
+
+                                msg_count = await storage.count_chat_messages(
+                                    conversation_id, username=username
+                                )
+                                all_history = await storage.get_chat_messages(
+                                    conversation_id,
+                                    username=username,
+                                    limit=max(msg_count, 1),
+                                )
+                                history = [
+                                    m
+                                    for m in all_history
+                                    if m.get("status") != "pending" and m.get("content")
+                                ]
+
+                                # Scan all_history (not filtered history) because the
+                                # init message has empty content but carries session_id.
+                                last_session_id: str | None = session_id
+                                for msg in reversed(all_history):
+                                    if (
+                                        msg.get("role") == "assistant"
+                                        and msg.get("session_id")
+                                        and msg.get("ai_provider") == ai_provider
+                                        and msg.get("ai_model") == ai_model
+                                    ):
+                                        last_session_id = msg["session_id"]
+                                        logger.debug(
+                                            "%s: found session %s from history (provider=%s, model=%s)",
+                                            label,
+                                            last_session_id,
+                                            ai_provider,
+                                            ai_model,
+                                        )
+                                        break
+
+                                workspace = await self._call_enter_chat_workspace(
+                                    conversation_id, username, f"{label} message"
+                                )
+                                if workspace is None:
+                                    await self.fail_chat_assistant_placeholder(
+                                        assistant_msg_id,
+                                        conversation_id,
+                                        username,
+                                        f"Error: {self.chat_workspace_unknown_message(conversation_id, username)}",
+                                    )
+                                    return
+
+                                prepared = await adapter.prepare_turn(
+                                    self,
+                                    workspace=workspace,
+                                    username=username,
+                                    context=context,
+                                )
+                                if prepared.refusal_message is not None:
+                                    await self.fail_chat_assistant_placeholder(
+                                        assistant_msg_id,
+                                        conversation_id,
+                                        username,
+                                        prepared.refusal_message,
+                                    )
+                                    return
+
+                                # A resumed session keeps its creation-time tools, so
+                                # rebuild when the tool/graph fingerprint changed.
+                                last_session_id = self.enable_tools_for_session(
+                                    last_session_id, prepared.tool_fingerprint
+                                )
+
+                                abort_signal = self.get_chat_abort_signal(lock_key)
+                                if abort_signal.is_set():
+                                    abort_signal.clear()
+                                    await self.fail_chat_assistant_placeholder(
+                                        assistant_msg_id,
+                                        conversation_id,
+                                        username,
+                                        "Aborted by user.",
+                                    )
+                                    logger.info(
+                                        "%s: aborted before AI call for %s, user %s",
+                                        label,
+                                        conversation_id,
+                                        username,
+                                    )
+                                    return
+
+                            # Lifecycle barrier is released before the AI call so job
+                            # deletion is not blocked behind AI timeouts.
+                            deleted_msg = adapter.check_deleted_message(self)
+                            if deleted_msg is not None:
                                 await self.fail_chat_assistant_placeholder(
                                     assistant_msg_id,
                                     conversation_id,
@@ -2489,104 +2610,34 @@ class ChatRuntime:
                                 )
                                 return
 
-                            context = await adapter.load_turn_context(self)
-
-                            ai_provider, ai_model = (
-                                ai_provider_override,
-                                ai_model_override,
-                            )
-                            if not ai_provider or not ai_model:
-                                raise ValueError("Chat selection missing")
+                            turn_warnings: list[str] = []
+                            turn_started = _time.monotonic()
                             (
-                                session_id,
-                                credential_source,
-                            ) = await self._call_check_chat_session_choice(
-                                conversation_id,
-                                username,
-                                ai_provider,
-                                ai_model,
-                                credential_source,
-                            )
-                            source_token = ai_client.chat_session_source.set(
-                                credential_source
-                            )
-
-                            credential_generation = (
-                                await self._credential_generation_for_source(
-                                    username, ai_provider, credential_source
-                                )
-                            )
-
-                            msg_count = await storage.count_chat_messages(
-                                conversation_id, username=username
-                            )
-                            all_history = await storage.get_chat_messages(
-                                conversation_id,
-                                username=username,
-                                limit=max(msg_count, 1),
-                            )
-                            history = [
-                                m
-                                for m in all_history
-                                if m.get("status") != "pending" and m.get("content")
-                            ]
-
-                            # Scan all_history (not filtered history) because the
-                            # init message has empty content but carries session_id.
-                            last_session_id: str | None = session_id
-                            for msg in reversed(all_history):
-                                if (
-                                    msg.get("role") == "assistant"
-                                    and msg.get("session_id")
-                                    and msg.get("ai_provider") == ai_provider
-                                    and msg.get("ai_model") == ai_model
-                                ):
-                                    last_session_id = msg["session_id"]
-                                    logger.debug(
-                                        "%s: found session %s from history (provider=%s, model=%s)",
-                                        label,
-                                        last_session_id,
-                                        ai_provider,
-                                        ai_model,
-                                    )
-                                    break
-
-                            workspace = await self._call_enter_chat_workspace(
-                                conversation_id, username, f"{label} message"
-                            )
-                            if workspace is None:
-                                await self.fail_chat_assistant_placeholder(
-                                    assistant_msg_id,
-                                    conversation_id,
-                                    username,
-                                    f"Error: {self.chat_workspace_unknown_message(conversation_id, username)}",
-                                )
-                                return
-
-                            prepared = await adapter.prepare_turn(
-                                self,
+                                success,
+                                response_text,
+                                new_session_id,
+                            ) = await adapter.call_ai(
+                                prepared,
+                                message=message,
+                                history=history,
+                                ai_provider=ai_provider,
+                                ai_model=ai_model,
                                 workspace=workspace,
-                                username=username,
-                                context=context,
+                                session_id=last_session_id,
+                                pinned_credential_source=credential_source,
+                                on_delta=self.chat_delta_publisher(
+                                    conversation_id, username, assistant_msg_id
+                                ),
+                                on_warning=turn_warnings.append,
                             )
-                            if prepared.refusal_message is not None:
-                                await self.fail_chat_assistant_placeholder(
-                                    assistant_msg_id,
-                                    conversation_id,
-                                    username,
-                                    prepared.refusal_message,
-                                )
-                                return
+                            turn_elapsed = _time.monotonic() - turn_started
 
-                            # A resumed session keeps its creation-time tools, so
-                            # rebuild when the tool/graph fingerprint changed.
-                            last_session_id = self.enable_tools_for_session(
-                                last_session_id, prepared.tool_fingerprint
-                            )
-
-                            abort_signal = self.get_chat_abort_signal(lock_key)
                             if abort_signal.is_set():
                                 abort_signal.clear()
+                                if new_session_id and new_session_id != last_session_id:
+                                    await self._call_discard_unsaved_ai_session(
+                                        new_session_id, username, ai_provider
+                                    )
                                 await self.fail_chat_assistant_placeholder(
                                     assistant_msg_id,
                                     conversation_id,
@@ -2594,212 +2645,160 @@ class ChatRuntime:
                                     "Aborted by user.",
                                 )
                                 logger.info(
-                                    "%s: aborted before AI call for %s, user %s",
+                                    "%s: aborted after AI call for %s, user %s",
                                     label,
                                     conversation_id,
                                     username,
                                 )
                                 return
 
-                        # Lifecycle barrier is released before the AI call so job
-                        # deletion is not blocked behind AI timeouts.
-                        deleted_msg = adapter.check_deleted_message(self)
-                        if deleted_msg is not None:
-                            await self.fail_chat_assistant_placeholder(
-                                assistant_msg_id,
-                                conversation_id,
-                                username,
-                                deleted_msg,
-                            )
-                            return
-
-                        turn_warnings: list[str] = []
-                        turn_started = _time.monotonic()
-                        success, response_text, new_session_id = await adapter.call_ai(
-                            prepared,
-                            message=message,
-                            history=history,
-                            ai_provider=ai_provider,
-                            ai_model=ai_model,
-                            workspace=workspace,
-                            session_id=last_session_id,
-                            on_delta=self.chat_delta_publisher(
-                                conversation_id, username, assistant_msg_id
-                            ),
-                            on_warning=turn_warnings.append,
-                        )
-                        turn_elapsed = _time.monotonic() - turn_started
-
-                        if abort_signal.is_set():
-                            abort_signal.clear()
-                            if new_session_id and new_session_id != last_session_id:
-                                await self._call_discard_unsaved_ai_session(
-                                    new_session_id, username, ai_provider
-                                )
-                            await self.fail_chat_assistant_placeholder(
-                                assistant_msg_id,
-                                conversation_id,
-                                username,
-                                "Aborted by user.",
-                            )
-                            logger.info(
-                                "%s: aborted after AI call for %s, user %s",
-                                label,
-                                conversation_id,
-                                username,
-                            )
-                            return
-
-                        if not success:
-                            logger.error(
-                                "%s AI call failed for %s (provider=%s, model=%s, elapsed=%.1fs): %s",
-                                label,
-                                conversation_id,
-                                ai_provider,
-                                ai_model,
-                                turn_elapsed,
-                                response_text,
-                            )
-                            user_error = format_chat_ai_user_error(
-                                response_text,
-                                is_admin=effective_admin,
-                                ai_provider=ai_provider,
-                                ai_model=ai_model,
-                            )
-                            await self.fail_chat_assistant_placeholder(
-                                assistant_msg_id,
-                                conversation_id,
-                                username,
-                                f"Error: {user_error}",
-                            )
-                            return
-
-                        post_access_error = await adapter.verify_post_ai_access(
-                            self, username
-                        )
-                        if post_access_error is not None:
-                            if new_session_id and new_session_id != last_session_id:
-                                await self._call_discard_unsaved_ai_session(
-                                    new_session_id, username, ai_provider
-                                )
-                            await self.fail_chat_assistant_placeholder(
-                                assistant_msg_id,
-                                conversation_id,
-                                username,
-                                post_access_error,
-                            )
-                            return
-
-                        if credential_source == "server":
-                            # Same predicate Start applied (#582): the full grant,
-                            # or the free grant for a pair still declared free.
-                            try:
-                                await ai_client.require_server_provider_grant(
-                                    ai_provider, ai_model
-                                )
-                            except ValueError as exc:
-                                logger.info(
-                                    "%s: %s/%s refused on server credentials for user=%s: %s",
+                            if not success:
+                                logger.error(
+                                    "%s AI call failed for %s (provider=%s, model=%s, elapsed=%.1fs): %s",
                                     label,
+                                    conversation_id,
                                     ai_provider,
                                     ai_model,
-                                    username,
-                                    exc,
+                                    turn_elapsed,
+                                    response_text,
+                                )
+                                user_error = format_chat_ai_user_error(
+                                    response_text,
+                                    is_admin=effective_admin,
+                                    ai_provider=ai_provider,
+                                    ai_model=ai_model,
                                 )
                                 await self.fail_chat_assistant_placeholder(
                                     assistant_msg_id,
                                     conversation_id,
                                     username,
-                                    str(exc),
+                                    f"Error: {user_error}",
                                 )
                                 return
 
-                        current_status = await storage.get_chat_message_status(
-                            assistant_msg_id
-                        )
-                        if current_status == "failed":
-                            if new_session_id and new_session_id != last_session_id:
-                                await self._call_discard_unsaved_ai_session(
-                                    new_session_id, username, ai_provider
+                            post_access_error = await adapter.verify_post_ai_access(
+                                self, username
+                            )
+                            if post_access_error is not None:
+                                if new_session_id and new_session_id != last_session_id:
+                                    await self._call_discard_unsaved_ai_session(
+                                        new_session_id, username, ai_provider
+                                    )
+                                await self.fail_chat_assistant_placeholder(
+                                    assistant_msg_id,
+                                    conversation_id,
+                                    username,
+                                    post_access_error,
                                 )
+                                return
+
+                            if credential_source == "server":
+                                # Same predicate Start applied (#582): the full grant,
+                                # or the free grant for a pair still declared free.
+                                try:
+                                    await ai_catalog.check_server_provider_grant(
+                                        username, ai_provider, ai_model
+                                    )
+                                except ValueError as exc:
+                                    logger.info(
+                                        "%s: %s/%s refused on server credentials for user=%s: %s",
+                                        label,
+                                        ai_provider,
+                                        ai_model,
+                                        username,
+                                        exc,
+                                    )
+                                    await self.fail_chat_assistant_placeholder(
+                                        assistant_msg_id,
+                                        conversation_id,
+                                        username,
+                                        str(exc),
+                                    )
+                                    return
+
+                            current_status = await storage.get_chat_message_status(
+                                assistant_msg_id
+                            )
+                            if current_status == "failed":
+                                if new_session_id and new_session_id != last_session_id:
+                                    await self._call_discard_unsaved_ai_session(
+                                        new_session_id, username, ai_provider
+                                    )
+                                logger.info(
+                                    "Chat: message %d was aborted during processing, discarding response",
+                                    assistant_msg_id,
+                                )
+                                return
+
+                            self.remember_chat_session_tools(
+                                new_session_id, prepared.tool_fingerprint
+                            )
+                            saved = await storage.complete_chat_message_if_generation(
+                                assistant_msg_id,
+                                content=response_text,
+                                ai_provider=ai_provider,
+                                ai_model=ai_model,
+                                session_id=new_session_id or "",
+                                credential_generation=credential_generation,
+                                server_source=credential_source == "server",
+                            )
+                            if not saved:
+                                await self.discard_unsaved_chat_response(
+                                    assistant_msg_id,
+                                    conversation_id,
+                                    username,
+                                    ai_provider,
+                                    new_session_id
+                                    if new_session_id != last_session_id
+                                    else None,
+                                    label,
+                                )
+                                return
+
                             logger.info(
-                                "Chat: message %d was aborted during processing, discarding response",
+                                "%s: message %d processed for %s (session=%s, provider=%s, model=%s, elapsed=%.1fs)",
+                                label,
+                                assistant_msg_id,
+                                conversation_id,
+                                new_session_id,
+                                ai_provider,
+                                ai_model,
+                                turn_elapsed,
+                            )
+                            await self.store_chat_turn_warning(
+                                conversation_id, username, turn_warnings
+                            )
+                            adapter.after_turn_completed(self, workspace)
+                            self._call_notify_chat_changed(
+                                conversation_id, username=username
+                            )
+
+                        except Exception:
+                            logger.exception(
+                                "%s processing failed for %s, msg %d",
+                                label,
+                                conversation_id,
                                 assistant_msg_id,
                             )
-                            return
-
-                        self.remember_chat_session_tools(
-                            new_session_id, prepared.tool_fingerprint
-                        )
-                        saved = await storage.complete_chat_message_if_generation(
-                            assistant_msg_id,
-                            content=response_text,
-                            ai_provider=ai_provider,
-                            ai_model=ai_model,
-                            session_id=new_session_id or "",
-                            credential_generation=credential_generation,
-                            server_source=credential_source == "server",
-                        )
-                        if not saved:
-                            await self.discard_unsaved_chat_response(
+                            await self.fail_chat_assistant_placeholder(
                                 assistant_msg_id,
                                 conversation_id,
                                 username,
-                                ai_provider,
-                                new_session_id
-                                if new_session_id != last_session_id
-                                else None,
-                                label,
+                                "An error occurred while processing your message. Please try again.",
                             )
-                            return
-
-                        logger.info(
-                            "%s: message %d processed for %s (session=%s, provider=%s, model=%s, elapsed=%.1fs)",
-                            label,
-                            assistant_msg_id,
-                            conversation_id,
-                            new_session_id,
-                            ai_provider,
-                            ai_model,
-                            turn_elapsed,
-                        )
-                        await self.store_chat_turn_warning(
-                            conversation_id, username, turn_warnings
-                        )
-                        adapter.after_turn_completed(self, workspace)
-                        self._call_notify_chat_changed(
-                            conversation_id, username=username
-                        )
-
-                    except Exception:
-                        logger.exception(
-                            "%s processing failed for %s, msg %d",
-                            label,
-                            conversation_id,
-                            assistant_msg_id,
-                        )
-                        await self.fail_chat_assistant_placeholder(
-                            assistant_msg_id,
-                            conversation_id,
-                            username,
-                            "An error occurred while processing your message. Please try again.",
-                        )
-            except asyncio.CancelledError:
-                await self.fail_chat_assistant_placeholder(
-                    assistant_msg_id,
-                    conversation_id,
-                    username,
-                    "Chat processing was cancelled.",
-                )
-                raise
-            finally:
-                if source_token is not None:
-                    ai_client.chat_session_source.reset(source_token)
-                ai_username.reset(user_token)
-                self.cleanup_chat_state(lock_key)
-                adapter.cleanup_after_turn(self)
-                # Do NOT revoke auth_header — it's embedded in custom tool HTTP
-                # headers and must stay alive for the sidecar session lifetime.
+                except asyncio.CancelledError:
+                    await self.fail_chat_assistant_placeholder(
+                        assistant_msg_id,
+                        conversation_id,
+                        username,
+                        "Chat processing was cancelled.",
+                    )
+                    raise
+                finally:
+                    self.cleanup_chat_state(lock_key)
+                    adapter.cleanup_after_turn(self)
+                    # Do NOT revoke auth_header — it's embedded in custom tool HTTP
+                    # headers and must stay alive for the sidecar session lifetime.
 
     # -- Unified clear history --
 

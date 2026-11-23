@@ -6,7 +6,7 @@ import { useAuth } from '@/lib/auth'
 import { AuthProvider } from '@/lib/AuthProvider'
 import { ApiError } from '@/lib/api'
 import { getUsername, setUsername, clearUsername } from '@/lib/cookies'
-import * as catalog from '@/lib/useProviderOptions'
+import * as catalog from '@/lib/providerCatalog'
 
 const get = vi.fn()
 const post = vi.fn()

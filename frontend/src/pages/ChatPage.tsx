@@ -4,7 +4,7 @@ import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { ChatUI } from '@/components/shared/ChatUI'
 import { ArrowLeft, Loader2 } from 'lucide-react'
-import { normalizeProvider } from '@/lib/aiProviders'
+import { normalizeProvider } from '@/lib/providerCatalog'
 
 import { resolveBuildDisplayId } from '@/lib/utils'
 
