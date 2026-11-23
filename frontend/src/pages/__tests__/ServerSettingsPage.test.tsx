@@ -71,6 +71,9 @@ interface TestSetting {
   category: string
   sensitive: boolean
   is_set?: boolean
+  // Sent by the server for SSO rows: which provider owns the setting.
+  section?: string
+  section_label?: string
   restart_required: boolean
   source: 'default' | 'env' | 'db'
   updated_by: string
@@ -3424,18 +3427,19 @@ describe('SSO tab grouping', () => {
    * split is derived from the key (`sso_<provider>_…`), so this also pins that a
    * new provider field needs no frontend change to land in the right block.
    */
+  const section = (key: string, label: string) => ({ section: key, section_label: label })
   const ssoSettings = () => [
     mk('sso_allowed_domains', 'SSO', 'redhat.com'),
     mk('sso_state_ttl_seconds', 'SSO', '600'),
     mk('sso_device_code_ttl_seconds', 'SSO', '600'),
     mk('sso_device_poll_interval_seconds', 'SSO', '5'),
-    mk('sso_google_client_id', 'SSO', 'gid'),
-    mk('sso_google_client_secret', 'SSO', 'gsecret', { sensitive: true }),
-    mk('sso_github_client_id', 'SSO', 'hid'),
-    mk('sso_openshift_issuer', 'SSO', 'https://oauth.example'),
-    mk('sso_openshift_api_url', 'SSO', 'https://api.example:6443'),
-    mk('sso_redhat_issuer', 'SSO', 'https://sso.example/auth/realms/x'),
-    mk('sso_redhat_client_id', 'SSO', 'rid'),
+    mk('sso_google_client_id', 'SSO', 'gid', section('google', 'Google')),
+    mk('sso_google_client_secret', 'SSO', 'gsecret', { sensitive: true, ...section('google', 'Google') }),
+    mk('sso_github_client_id', 'SSO', 'hid', section('github', 'GitHub')),
+    mk('sso_openshift_issuer', 'SSO', 'https://oauth.example', section('openshift', 'OpenShift')),
+    mk('sso_openshift_api_url', 'SSO', 'https://api.example:6443', section('openshift', 'OpenShift')),
+    mk('sso_redhat_issuer', 'SSO', 'https://sso.example/auth/realms/x', section('redhat', 'Red Hat SSO')),
+    mk('sso_redhat_client_id', 'SSO', 'rid', section('redhat', 'Red Hat SSO')),
   ]
 
   async function openSsoTab() {
@@ -3485,6 +3489,27 @@ describe('SSO tab grouping', () => {
     expect(redhatSection).not.toBeNull()
     expect(redhatSection!.contains(row('sso_redhat_client_id'))).toBe(true)
     expect(redhatSection!.contains(row('sso_openshift_issuer'))).toBe(false)
+  })
+
+  it('gives a provider the UI has never heard of its own section', async () => {
+    // The finding this pins: grouping must come from the payload (the registry
+    // declares the fields), never from a provider list inside the frontend — a
+    // new provider used to fall silently into the generic block.
+    get.mockResolvedValue([
+      ...baseSettings(),
+      ...ssoSettings(),
+      mk('sso_keycloak_client_id', 'SSO', 'kid', section('keycloak', 'Keycloak')),
+    ] as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'SSO' }))
+    await waitForRow('sso_allowed_domains')
+
+    const keycloak = document.querySelector('[data-sso-provider="keycloak"]')
+    expect(keycloak).not.toBeNull()
+    expect(keycloak!.contains(row('sso_keycloak_client_id'))).toBe(true)
+    // …and it is not left in the generic block.
+    expect(row('sso_keycloak_client_id')!.closest('[data-sso-provider]')).toBe(keycloak)
+    expect(screen.getByRole('heading', { name: 'Keycloak' })).toBeInTheDocument()
   })
 
   it('renders no heading for a provider with no settings', async () => {

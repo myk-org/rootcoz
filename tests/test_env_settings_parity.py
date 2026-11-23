@@ -303,6 +303,38 @@ def test_settings_endpoint_labels_every_entry(client):
     assert by_key["admin_key"]["env_var"] == "ADMIN_KEY"
 
 
+def test_sso_settings_carry_the_provider_that_owns_them(client):
+    """The provider registry decides the sub-section, not a list in the UI.
+
+    A provider declares the fields it reads, so a provider the frontend has never
+    heard of still reaches its own section — the UI used to guess from the key
+    against a hand-written map, which filed a new provider's fields under the
+    generic policy block.
+    """
+    response = client.get("/api/admin/settings", headers=_admin_headers())
+    assert response.status_code == 200
+    by_key = {item["key"]: item for item in response.json()}
+
+    # Declared per provider class, so no frontend or test list can drift from it.
+    for provider in main.auth_sso.PROVIDER_CLASSES:
+        for field in provider.settings_fields:
+            assert by_key[field]["section"] == provider.name, field
+            assert by_key[field]["section_label"] == provider.display_name, field
+
+    # The deployment's own SSO policy belongs to no provider: absent, not null.
+    for generic in (
+        "sso_allowed_domains",
+        "sso_state_ttl_seconds",
+        "sso_device_code_ttl_seconds",
+        "sso_device_poll_interval_seconds",
+    ):
+        assert "section" not in by_key[generic], generic
+
+    # Nothing outside SSO claims a section.
+    assert "section" not in by_key["ai_model"]
+    assert "section" not in by_key["jenkins_url"]
+
+
 def test_jira_atst_setting_registration(client):
     """jira_atst_token is registered like every Jira method credential."""
     response = client.get("/api/admin/settings", headers=_admin_headers())

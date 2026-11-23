@@ -8,7 +8,6 @@ import {
   type SsoProvidersResponse,
 } from '@/lib/ssoProviders'
 import { stripQueryParams } from '@/lib/navigation'
-import { ssoProviderLabel as label } from '@/lib/ssoProviders'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 
@@ -41,6 +40,17 @@ type LoadStatus = 'loading' | 'ready' | 'failed'
  * the only way in would lock the person out — the server refuses it and this card
  * says so before the click.
  */
+const PROVIDER_LABELS: Record<string, string> = {
+  google: 'Google',
+  github: 'GitHub',
+  openshift: 'OpenShift',
+  redhat: 'Red Hat SSO',
+}
+
+function label(provider: string): string {
+  return PROVIDER_LABELS[provider] ?? provider
+}
+
 export function SignInMethodsCard() {
   // Connecting and disconnecting are reviewer-level writes on the account, so a
   // viewer is told that instead of being offered a button the server refuses. The

@@ -944,6 +944,31 @@ for _cat, _fields in _SETTINGS_CATEGORIES.items():
         _FIELD_TO_CATEGORY[_f] = _cat
 
 
+# Sub-section each SSO setting belongs to, derived from the provider registry: a
+# provider declares the fields it reads (`settings_fields`), so a provider the UI
+# has never heard of still lands in its own section. Nothing in the frontend may
+# enumerate providers — that is how a new one used to fall into the generic block.
+_FIELD_TO_SSO_PROVIDER: dict[str, tuple[str, str]] = {}
+for _provider_cls in auth_sso.PROVIDER_CLASSES:
+    _display = getattr(_provider_cls, "display_name", "") or _provider_cls.name
+    for _field in getattr(_provider_cls, "settings_fields", ()):
+        _FIELD_TO_SSO_PROVIDER[_field] = (_provider_cls.name, _display)
+
+
+def _sso_section(field_name: str) -> dict[str, str]:
+    """The SSO sub-section a setting belongs to, or ``{}`` when it has none.
+
+    Empty for every non-provider setting (the deployment's own SSO policy, and all
+    other categories), so ``section`` is absent rather than null — the frontend
+    renders an ungrouped row without a special case.
+    """
+    section = _FIELD_TO_SSO_PROVIDER.get(field_name)
+    if section is None:
+        return {}
+    provider, label = section
+    return {"section": provider, "section_label": label}
+
+
 # Server Settings rows show a human label next to the copyable machine key.
 # These read badly when humanised mechanically, so they are named explicitly.
 _SETTING_LABEL_OVERRIDES: dict[str, str] = {
@@ -1136,6 +1161,7 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
             "description": description,
             "type": field_type,
             "category": _FIELD_TO_CATEGORY.get(field_name, "Other"),
+            **_sso_section(field_name),
             "sensitive": is_sensitive,
             "restart_required": field_name in _RESTART_REQUIRED_SETTINGS,
             "source": "default",  # Will be overridden by caller

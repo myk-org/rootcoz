@@ -8,7 +8,6 @@ import { formatBytes, formatUptime } from '@/lib/format'
 import { formatTimestamp } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-import { SSO_PROVIDER_LABELS, ssoProviderLabel, ssoProviderOfKey } from '@/lib/ssoProviders'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -104,6 +103,14 @@ interface ServerSetting {
    * so a missing field means "always visible".
    */
   visible_when?: { key: string; in: string[] }
+  /**
+   * Which SSO provider owns this row, when one does. Sent by the server from the
+   * provider registry (`settings_fields`), so a provider this UI has never heard
+   * of still reaches its own section — the frontend must not enumerate providers.
+   */
+  section?: string
+  /** Display name for that section (the provider's own label). */
+  section_label?: string
 }
 
 interface CategoryGroup {
@@ -1855,7 +1862,21 @@ export function ServerSettingsPage() {
     // block per provider that has rows — split by the key (`sso_<provider>_…`), so
     // a provider that gains a setting needs no change here.
     function renderSsoSections(settings: ServerSetting[]) {
-      const generic = settings.filter((s) => ssoProviderOfKey(s.key) === null)
+      // The provider owns this: the registry declares its fields, so a provider
+      // this UI has never heard of still gets its own section. Nothing here may
+      // enumerate providers — that is exactly how a new one used to fall into the
+      // generic block.
+      const generic = settings.filter((s) => !s.section)
+      const sections = new Map<string, { label: string; rows: ServerSetting[] }>()
+      for (const setting of settings) {
+        if (!setting.section) continue
+        const entry = sections.get(setting.section) ?? {
+          label: setting.section_label || setting.section,
+          rows: [],
+        }
+        entry.rows.push(setting)
+        sections.set(setting.section, entry)
+      }
       return (
         <>
           {generic.length > 0 && (
@@ -1863,20 +1884,16 @@ export function ServerSettingsPage() {
               {generic.map(renderSettingRowInRow)}
             </div>
           )}
-          {Object.keys(SSO_PROVIDER_LABELS).map((provider) => {
-            const rows = settings.filter((s) => ssoProviderOfKey(s.key) === provider)
-            if (rows.length === 0) return null
-            return (
-              <div key={provider} className="mt-4" data-sso-provider={provider}>
-                <h4 className="mb-2 text-xs font-semibold tracking-wide text-text-tertiary uppercase">
-                  {ssoProviderLabel(provider)}
-                </h4>
-                <div className="divide-y divide-border-default">
-                  {rows.map(renderSettingRowInRow)}
-                </div>
+          {Array.from(sections.entries()).map(([provider, { label, rows }]) => (
+            <div key={provider} className="mt-4" data-sso-provider={provider}>
+              <h4 className="mb-2 text-xs font-semibold tracking-wide text-text-tertiary uppercase">
+                {label}
+              </h4>
+              <div className="divide-y divide-border-default">
+                {rows.map(renderSettingRowInRow)}
               </div>
-            )
-          })}
+            </div>
+          ))}
         </>
       )
     }
