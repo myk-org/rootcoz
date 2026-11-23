@@ -117,9 +117,10 @@ async def test_workspace_without_a_graph_gets_no_graph_tools(captured, tmp_path)
 
 def test_chat_and_analysis_share_one_builder() -> None:
     """One builder, so the two tool lists cannot drift apart."""
-    from rootcoz import main, peer_analysis
+    from rootcoz import peer_analysis
+    from rootcoz.engine import chat_runtime
 
-    for module in (core, peer_analysis, main):
+    for module in (core, peer_analysis, chat_runtime):
         assert "build_session_tools(" in inspect.getsource(module), module.__name__
 
 

@@ -59,12 +59,18 @@ async def test_a_turn_answers_while_indexing_is_still_running(tmp_path, monkeypa
 
 def test_both_chat_paths_schedule_the_index_instead_of_awaiting_it():
     """Nothing can block on the graph here: the entry point is not awaitable."""
+    from rootcoz.engine import chat_runtime
+
     assert not inspect.iscoroutinefunction(main._schedule_chat_index)
-    for path in (main._init_chat_under_barrier, main._process_chat_message):
-        assert "_schedule_chat_index" in inspect.getsource(path)
-    message_turn = inspect.getsource(main._process_chat_message)
-    assert message_turn.index("chat_with_ai(") < message_turn.index(
-        "_schedule_chat_index("
+    assert not inspect.iscoroutinefunction(chat_runtime.ChatRuntime.schedule_chat_index)
+    for path in (
+        chat_runtime.ChatRuntime.init_job_chat_under_barrier,
+        chat_runtime.JobChatAdapter.after_turn_completed,
+    ):
+        assert "_call_schedule_chat_index(" in inspect.getsource(path)
+    turn_source = inspect.getsource(chat_runtime.ChatRuntime.process_turn)
+    assert turn_source.index("adapter.call_ai(") < turn_source.index(
+        "adapter.after_turn_completed("
     ), "the build takes the workspace lock the turn's own install needs"
 
 

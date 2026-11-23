@@ -1141,7 +1141,10 @@ def test_is_lock_failure_matches_both_spellings():
 
 def test_only_the_two_chat_starts_refuse_a_storage_fault():
     """#534/#540: the chat starts opt in, so an analysis or a turn never hard-fails."""
-    assert inspect.getsource(main).count("refuse_storage_fault=True") == 2
+    from rootcoz.engine import chat_runtime
+
+    assert inspect.getsource(chat_runtime).count("refuse_storage_fault=True") == 2
+    assert inspect.getsource(main).count("refuse_storage_fault=True") == 0
 
 
 @pytest.mark.asyncio
