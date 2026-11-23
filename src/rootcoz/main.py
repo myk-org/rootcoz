@@ -77,6 +77,7 @@ from rootcoz import (
     get_child_logger,
     issue_attachments,
     issue_matching,
+    job_filters,
     server_status,
     storage,
 )
@@ -19492,79 +19493,16 @@ async def delete_user_ai_credential(provider: str, request: Request) -> JSONResp
 
 # --- Filter presets (#179) ---
 
-# URL query param names each page's presets may carry (validated on save).
-_FILTER_PRESET_KEYS: dict[str, set[str]] = {
-    "dashboard": {
-        "search",
-        "team",
-        "tier",
-        "version",
-        "label",
-        "exclude_label",
-        "status",
-        "review_status",
-        "analysis_state",
-        "submitted_by",
-        "date_from",
-        "date_to",
-        "test_name",
-        "test_name_mode",
-    },
-    "reports": {
-        "search",
-        "team",
-        "tier",
-        "version",
-        "label",
-        "exclude_label",
-        "status",
-        "review_status",
-        "analysis_state",
-        "submitted_by",
-        "date_from",
-        "date_to",
-        "test_name",
-        "test_name_mode",
-        # Legacy date keys stay accepted on read so presets saved before the
-        # unified contract still replay; the UI writes the canonical pair.
-        "from",
-        "to",
-    },
-}
+# Canonical per-page filter allowlist lives in rootcoz.job_filters.
+_FILTER_PRESET_KEYS = job_filters.FILTER_PRESET_KEYS
 
 
 def _validate_filter_preset_filters(page: str, filters: dict[str, Any]) -> None:
-    """Reject unknown filter keys for the page with 422 (never silently drop)."""
-    unknown = set(filters) - _FILTER_PRESET_KEYS[page]
-    if unknown:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unknown filter key(s) for {page}: " + ", ".join(sorted(unknown)),
-        )
-    search = filters.get("search")
-    if search is not None and not isinstance(search, str):
-        raise HTTPException(
-            status_code=422,
-            detail="Filter 'search' must be a string",
-        )
-    test_name_mode = filters.get("test_name_mode")
-    if test_name_mode is not None and test_name_mode not in storage.TEST_NAME_MODES:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Invalid test_name_mode {test_name_mode!r}. "
-                f"Must be one of: {', '.join(storage.TEST_NAME_MODES)}"
-            ),
-        )
-    submitters = filters.get("submitted_by")
-    if submitters is not None:
-        # A preset is replayed into the dashboard endpoint, so it must carry only
-        # submitted_by values that endpoint would accept (count and length caps).
-        values = [submitters] if isinstance(submitters, str) else list(submitters)
-        try:
-            _normalize_submitters([str(value) for value in values])
-        except HTTPException as exc:
-            raise HTTPException(status_code=422, detail=exc.detail) from exc
+    """Reject unknown or invalid filter preset values for the page with 422."""
+    try:
+        job_filters.validate_filter_preset_filters(page, filters)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # SQLite integers are signed 64-bit; an out-of-range preset id cannot exist.
@@ -19587,10 +19525,10 @@ async def list_filter_presets(
 ) -> list[FilterPresetResponse]:
     """List the user's personal presets plus all server presets for a page."""
     _require_authenticated(request)
-    if page not in storage.FILTER_PRESET_PAGES:
+    if page not in job_filters.FILTER_PRESET_PAGES:
         raise HTTPException(
             status_code=422,
-            detail="page must be one of: " + ", ".join(storage.FILTER_PRESET_PAGES),
+            detail="page must be one of: " + ", ".join(job_filters.FILTER_PRESET_PAGES),
         )
     presets = await storage.list_filter_presets(request.state.username, page)
     response.headers["Cache-Control"] = "no-store"
@@ -24940,46 +24878,6 @@ async def test_user_token_connection(
 # -- Job Metadata Endpoints ---------------------------------------------------
 
 
-async def _metadata_filters(
-    team: Annotated[list[str] | None, Query()] = None,
-    tier: Annotated[list[str] | None, Query()] = None,
-    version: Annotated[list[str] | None, Query()] = None,
-    label: Annotated[list[str] | None, Query()] = None,
-    exclude_label: Annotated[list[str] | None, Query()] = None,
-) -> dict[str, Any]:
-    """Shared dependency for metadata filter query parameters."""
-    return {
-        "team": team or [],
-        "tier": tier or [],
-        "version": version or [],
-        "label": label or [],
-        "exclude_label": exclude_label or [],
-    }
-
-
-def _unpack_metadata_filters(
-    filters: dict[str, Any], endpoint: str
-) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
-    """Unpack metadata filter dict and log at DEBUG level."""
-    team, tier, version, label, exclude_label = (
-        filters["team"],
-        filters["tier"],
-        filters["version"],
-        filters["label"],
-        filters["exclude_label"],
-    )
-    logger.debug(
-        "%s: team=%r, tier=%r, version=%r, label=%r, exclude_label=%r",
-        endpoint,
-        team,
-        tier,
-        version,
-        label,
-        exclude_label,
-    )
-    return team, tier, version, label, exclude_label
-
-
 @app.get(
     "/api/filters/facets",
     operation_id="getFilterFacets",
@@ -24993,14 +24891,31 @@ async def get_filter_facets() -> dict[str, Any]:
 
 @app.get("/api/jobs/metadata", operation_id="listJobsMetadata")
 async def list_jobs_metadata(
-    filters: Annotated[dict[str, Any], Depends(_metadata_filters)],
+    team: Annotated[list[str] | None, Query()] = None,
+    tier: Annotated[list[str] | None, Query()] = None,
+    version: Annotated[list[str] | None, Query()] = None,
+    label: Annotated[list[str] | None, Query()] = None,
 ) -> list[dict[str, Any]]:
     """List all job metadata, optionally filtered by team, tier, version, or labels."""
-    team, tier, version, label, _exclude_label = _unpack_metadata_filters(
-        filters, "GET /api/jobs/metadata"
+    try:
+        team_list = list(job_filters.parse_filter_list(team))
+        tier_list = list(job_filters.parse_filter_list(tier))
+        version_list = list(job_filters.parse_filter_list(version))
+        label_list = list(job_filters.parse_filter_list(label))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logger.debug(
+        "GET /api/jobs/metadata: team=%r, tier=%r, version=%r, label=%r",
+        team_list,
+        tier_list,
+        version_list,
+        label_list,
     )
     return await storage.list_jobs_with_metadata(
-        team=team, tier=tier, version=version, labels=label or None
+        team=team_list,
+        tier=tier_list,
+        version=version_list,
+        labels=label_list or None,
     )
 
 
@@ -25199,129 +25114,135 @@ async def preview_metadata_rules(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _normalize_submitters(values: list[str] | None) -> set[str] | None:
-    """Normalise ``submitted_by`` query values; empty means no filter.
-
-    Values are trimmed and deduplicated but never lowercased: the case fold
-    happens in SQL, where SQLite's ASCII-only ``lower()`` matches the stored
-    names. There is deliberately no character whitelist — usernames legitimately
-    contain ``+``, spaces and non-ASCII characters.
-    """
-    if not values:
-        return None
-    cleaned = [value.strip() for value in values if value.strip()]
-    if len(cleaned) > 50:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Too many submitted_by values ({len(cleaned)}, max 50)",
-        )
-    too_long = [
-        value for value in cleaned if len(value) > storage.MAX_SUBMITTED_BY_LENGTH
-    ]
-    if too_long:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"submitted_by value too long ({len(too_long[0])} chars, "
-                f"max {storage.MAX_SUBMITTED_BY_LENGTH})"
-            ),
-        )
-    return set(cleaned) or None
-
-
-@app.get("/api/dashboard/filtered", operation_id="apiDashboardFiltered")
-async def api_dashboard_filtered(
-    filters: Annotated[dict[str, Any], Depends(_metadata_filters)],
-    search: str = Query(default="", description="Search job name or ID"),
-    status: Annotated[list[str] | None, Query()] = None,
-    date_from: str = Query(default="", description="Start date (ISO)"),
-    date_to: str = Query(default="", description="End date (ISO)"),
-    review_status: str = Query(
-        default="all", description="Filter: all, reviewed, not_reviewed"
-    ),
-    analysis_state: str = Query(
-        default="",
-        description="Filter: submitted, analyzed (empty = all)",
-    ),
-    submitted_by: Annotated[list[str] | None, Query()] = None,
-    test_name: str = Query(
-        default="",
-        max_length=storage.MAX_TEST_NAME_LENGTH,
-        description=(
-            "Keep only jobs with a failing test whose name matches this text."
+def _parse_job_filters_query(
+    team: Annotated[
+        list[str] | None, Query(description="Filter by team (repeatable or CSV)")
+    ] = None,
+    tier: Annotated[
+        list[str] | None, Query(description="Filter by tier (repeatable or CSV)")
+    ] = None,
+    version: Annotated[
+        list[str] | None, Query(description="Filter by version (repeatable or CSV)")
+    ] = None,
+    label: Annotated[
+        list[str] | None,
+        Query(description="Include jobs with labels (repeatable or CSV)"),
+    ] = None,
+    exclude_label: Annotated[
+        list[str] | None,
+        Query(description="Exclude jobs with labels (repeatable or CSV)"),
+    ] = None,
+    search: Annotated[str, Query(description="Search job name or ID")] = "",
+    status: Annotated[
+        list[str] | None, Query(description="Filter by status (repeatable or CSV)")
+    ] = None,
+    date_from: Annotated[str, Query(description="Start date (ISO)")] = "",
+    date_to: Annotated[str, Query(description="End date (ISO)")] = "",
+    review_status: Annotated[
+        str, Query(description="Filter: all, reviewed, not_reviewed (empty = all)")
+    ] = "",
+    analysis_state: Annotated[
+        str, Query(description="Filter: submitted, analyzed (empty = all)")
+    ] = "",
+    submitted_by: Annotated[
+        list[str] | None,
+        Query(description="Filter by submitter (repeatable, substring match)"),
+    ] = None,
+    test_name: Annotated[
+        str,
+        Query(
+            max_length=job_filters.MAX_TEST_NAME_LENGTH,
+            description="Keep only jobs with a failing test whose name matches this text.",
         ),
-    ),
-    test_name_mode: str = Query(
-        default="contains",
-        description="One of: " + ", ".join(storage.TEST_NAME_MODES),
-    ),
-    limit: int = Query(default=500, ge=0, description="Max results (0 = no limit)"),
-    offset: int = Query(default=0, ge=0, description="Rows to skip"),
-) -> dict[str, Any]:
-    """Return dashboard job list filtered by metadata.
+    ] = "",
+    test_name_mode: Annotated[
+        str,
+        Query(description="One of: " + ", ".join(job_filters.TEST_NAME_MODES)),
+    ] = job_filters.DEFAULT_TEST_NAME_MODE,
+    # Legacy read aliases — accepted on both dashboard and reports for backwards compatibility.
+    legacy_from: Annotated[str, Query(alias="from", include_in_schema=False)] = "",
+    legacy_to: Annotated[str, Query(alias="to", include_in_schema=False)] = "",
+    legacy_tags: Annotated[
+        list[str] | None, Query(alias="tags", include_in_schema=False)
+    ] = None,
+    legacy_exclude_tags: Annotated[
+        list[str] | None, Query(alias="exclude_tags", include_in_schema=False)
+    ] = None,
+) -> job_filters.JobFilters:
+    """Canonical FastAPI dependency parsing job filters for dashboard & reports.
 
-    Filters are applied in SQL before LIMIT, so older jobs are reachable
-    when filters match them. Returns ``{jobs, total}`` for pagination.
-    ``submitted_by`` is repeatable; each value is a case-insensitive (ASCII)
-    substring match on the original submitter of the job.
-
-    ``test_name`` is a different question from ``/api/dashboard/test-names``:
-    this endpoint answers *which jobs had a failing test matching this name*
-    (an ``EXISTS`` over ``test_entries`` scoped to ``status='failed'``), while
-    that one answers *which failing test names match this text*. ``test_name``
-    is literal — ``%``/``_``/backslash are escaped and ``*``/``?`` are not
-    wildcards — and its mode is one of ``storage.TEST_NAME_MODES``.
+    DB-free on purpose: FastAPI resolves this before route guards such as
+    ``_require_can_view_reports`` run, so it must never touch storage.
     """
-    if review_status not in ("all", "reviewed", "not_reviewed"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid review_status '{review_status}'. Must be one of: all, not_reviewed, reviewed",
-        )
-
-    team, tier, version, label, exclude_label = _unpack_metadata_filters(
-        filters, "GET /api/dashboard/filtered"
-    )
-
-    has_include_filters = bool(team or tier or version or label)
-
-    # Resolve metadata filters to job name sets
-    job_names: set[str] | None = None
-    exclude_job_names: set[str] | None = None
-
-    # Fetch all metadata once (unfiltered) — used for both include/exclude and display
-    all_metadata_unfiltered = await storage.list_jobs_with_metadata()
-    all_metadata_by_name = {m["job_name"]: m for m in all_metadata_unfiltered}
-
-    if has_include_filters:
-        filtered_metadata = await storage.list_jobs_with_metadata(
+    try:
+        return job_filters.parse_job_filters_query(
             team=team,
             tier=tier,
             version=version,
-            labels=label if label else None,
-        )
-        job_names = {m["job_name"] for m in filtered_metadata}
-
-    if exclude_label:
-        exclude_set = set(exclude_label)
-        exclude_job_names = set()
-        for m in all_metadata_unfiltered:
-            job_labels = set(m.get("labels") or [])
-            if job_labels & exclude_set:
-                exclude_job_names.add(m["job_name"])
-
-    try:
-        result = await list_results_for_dashboard_filtered(
-            job_names=job_names,
-            exclude_job_names=exclude_job_names,
+            label=label,
+            exclude_label=exclude_label,
+            tags=legacy_tags,
+            exclude_tags=legacy_exclude_tags,
             search=search,
             status=status,
             date_from=date_from,
             date_to=date_to,
+            legacy_from=legacy_from,
+            legacy_to=legacy_to,
             review_status=review_status,
             analysis_state=analysis_state,
-            submitters=_normalize_submitters(submitted_by),
+            submitted_by=submitted_by,
             test_name=test_name,
             test_name_mode=test_name_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# Module-level singleton matching the house Depends pattern (see _SETTINGS_DEP).
+_JOB_FILTERS_DEP = Depends(_parse_job_filters_query)
+
+
+def _log_job_filters(endpoint: str, filters: job_filters.JobFilters) -> None:
+    """Log parsed canonical job filters at DEBUG level."""
+    logger.debug(
+        "%s: team=%r, tier=%r, version=%r, labels=%r, exclude_labels=%r,"
+        " search=%r, status=%r, date_from=%r, date_to=%r, review_status=%r,"
+        " analysis_state=%r, submitted_by=%r, test_name=%r, test_name_mode=%r",
+        endpoint,
+        filters.team,
+        filters.tier,
+        filters.version,
+        filters.labels,
+        filters.exclude_labels,
+        filters.search,
+        filters.status,
+        filters.date_from,
+        filters.date_to,
+        filters.review_status,
+        filters.analysis_state,
+        sorted(filters.submitters),
+        filters.test_name,
+        filters.test_name_mode,
+    )
+
+
+@app.get("/api/dashboard/filtered", operation_id="apiDashboardFiltered")
+async def api_dashboard_filtered(
+    filters: job_filters.JobFilters = _JOB_FILTERS_DEP,
+    limit: int = Query(default=500, ge=0, description="Max results (0 = no limit)"),
+    offset: int = Query(default=0, ge=0, description="Rows to skip"),
+) -> dict[str, Any]:
+    """Return dashboard job list filtered by metadata and job dimensions.
+
+    Filters are compiled directly into SQL via ``rootcoz.job_filters`` before
+    LIMIT, so older jobs are reachable when filters match them. Returns
+    ``{jobs, total}`` for pagination.
+    """
+    _log_job_filters("GET /api/dashboard/filtered", filters)
+    try:
+        result = await list_results_for_dashboard_filtered(
+            filters=filters,
             limit=limit,
             offset=offset,
         )
@@ -25329,10 +25250,12 @@ async def api_dashboard_filtered(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     jobs = result["jobs"]
 
-    # Attach metadata to each job
+    metadata_by_name = await storage.get_job_metadata_bulk(
+        [job.get("job_name", "") for job in jobs]
+    )
     for job in jobs:
         jn = job.get("job_name", "")
-        job["metadata"] = all_metadata_by_name.get(jn, None)
+        job["metadata"] = metadata_by_name.get(jn, None)
 
     return {"jobs": jobs, "total": result["total"]}
 
@@ -25368,155 +25291,10 @@ async def list_dashboard_test_names(
 # --- Reports endpoints ---
 
 
-def _parse_csv_list(value: str, *, max_length: int = 2000) -> list[str] | None:
-    """Parse comma-separated string into deduplicated list, or None if empty."""
-    if not value:
-        return None
-    if len(value) > max_length:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Filter value too long ({len(value)} chars, max {max_length})",
-        )
-    items = list(dict.fromkeys(v.strip() for v in value.split(",") if v.strip()))
-    return items if items else None
-
-
-def _parse_report_metadata(
-    team: str, tier: str, version: str
-) -> tuple[list[str] | None, list[str] | None, list[str] | None]:
-    """Parse CSV metadata filters for report endpoints."""
-    return _parse_csv_list(team), _parse_csv_list(tier), _parse_csv_list(version)
-
-
-_VALID_REVIEW_STATUSES = {"", "reviewed", "not_reviewed"}
-
-
-def _validate_review_status(review_status: str) -> None:
-    """Reject invalid review_status values with HTTP 400."""
-    if review_status not in _VALID_REVIEW_STATUSES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid review_status '{review_status}'. Must be 'reviewed', 'not_reviewed', or empty.",
-        )
-
-
-class ReportFilters:
-    """Parsed, validated filters shared by the three reports endpoints (#546).
-
-    DB-free on purpose: FastAPI resolves this before ``_require_can_view_reports``
-    runs in the handler, so it must never touch storage that the guard protects.
-    """
-
-    __slots__ = (
-        "analysis_state",
-        "date_from",
-        "date_to",
-        "exclude_tags",
-        "review_status",
-        "status",
-        "submitters",
-        "tags",
-        "team",
-        "test_name",
-        "test_name_mode",
-        "tier",
-        "version",
-    )
-
-    def __init__(
-        self,
-        *,
-        team: list[str] | None,
-        tier: list[str] | None,
-        version: list[str] | None,
-        date_from: str,
-        date_to: str,
-        status: list[str] | None,
-        tags: list[str] | None,
-        exclude_tags: list[str] | None,
-        review_status: str,
-        submitters: set[str] | None,
-        analysis_state: str,
-        test_name: str,
-        test_name_mode: str,
-    ) -> None:
-        self.team = team
-        self.tier = tier
-        self.version = version
-        self.date_from = date_from
-        self.date_to = date_to
-        self.status = status
-        self.tags = tags
-        self.exclude_tags = exclude_tags
-        self.review_status = review_status
-        self.submitters = submitters
-        self.analysis_state = analysis_state
-        self.test_name = test_name
-        self.test_name_mode = test_name_mode
-
-
-def _report_filters(
-    team: Annotated[str, Query()] = "",
-    tier: Annotated[str, Query()] = "",
-    version: Annotated[str, Query()] = "",
-    date_from: Annotated[str, Query(description="Start date (ISO)")] = "",
-    date_to: Annotated[str, Query(description="End date (ISO)")] = "",
-    status: Annotated[str, Query()] = "",
-    tags: Annotated[str, Query()] = "",
-    exclude_tags: Annotated[str, Query()] = "",
-    review_status: Annotated[str, Query()] = "",
-    submitted_by: Annotated[list[str] | None, Query()] = None,
-    analysis_state: Annotated[str, Query()] = "",
-    test_name: Annotated[str, Query(max_length=storage.MAX_TEST_NAME_LENGTH)] = "",
-    test_name_mode: Annotated[str, Query()] = "contains",
-    legacy_from: Annotated[str, Query(alias="from", include_in_schema=False)] = "",
-    legacy_to: Annotated[str, Query(alias="to", include_in_schema=False)] = "",
-) -> ReportFilters:
-    """The one reports filter parser: canonical dates, legacy aliases on read."""
-    _validate_review_status(review_status)
-    if analysis_state and analysis_state not in storage.VALID_ANALYSIS_STATES:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Invalid analysis_state '{analysis_state}'. "
-                f"Must be {', '.join(sorted(storage.VALID_ANALYSIS_STATES))}."
-            ),
-        )
-    if test_name_mode not in storage.TEST_NAME_MODES:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Invalid test_name_mode '{test_name_mode}'. "
-                f"Must be one of: {', '.join(storage.TEST_NAME_MODES)}."
-            ),
-        )
-    team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
-    return ReportFilters(
-        team=team_list,
-        tier=tier_list,
-        version=version_list,
-        date_from=date_from or legacy_from,
-        date_to=date_to or legacy_to,
-        status=_parse_csv_list(status),
-        tags=_parse_csv_list(tags),
-        exclude_tags=_parse_csv_list(exclude_tags),
-        review_status=review_status,
-        submitters=_normalize_submitters(submitted_by),
-        analysis_state=analysis_state,
-        test_name=test_name,
-        test_name_mode=test_name_mode,
-    )
-
-
-# A module-level singleton, the house pattern for a dependency whose call would
-# otherwise sit in a default argument (see `_SETTINGS_DEP`).
-_REPORT_FILTERS_DEP = Depends(_report_filters)
-
-
 @app.get("/api/reports/totals", operation_id="reportsTotals")
 async def reports_totals(
     request: Request,
-    filters: ReportFilters = _REPORT_FILTERS_DEP,
+    filters: job_filters.JobFilters = _JOB_FILTERS_DEP,
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -25525,38 +25303,9 @@ async def reports_totals(
     Requires admin or can_view_reports.
     """
     _require_can_view_reports(request)
-    logger.debug(
-        "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r,"
-        " status=%r, tags=%r, exclude_tags=%r, review_status=%r, submitted_by=%r,"
-        " analysis_state=%r, test_name=%r, test_name_mode=%r",
-        filters.team,
-        filters.tier,
-        filters.version,
-        filters.date_from,
-        filters.date_to,
-        filters.status,
-        filters.tags,
-        filters.exclude_tags,
-        filters.review_status,
-        sorted(filters.submitters or ()),
-        filters.analysis_state,
-        filters.test_name,
-        filters.test_name_mode,
-    )
+    _log_job_filters("GET /api/reports/totals", filters)
     return await storage.get_report_totals(
-        team=filters.team,
-        tier=filters.tier,
-        version=filters.version,
-        date_from=filters.date_from,
-        date_to=filters.date_to,
-        status=filters.status,
-        tags=filters.tags,
-        exclude_tags=filters.exclude_tags,
-        review_status=filters.review_status,
-        submitters=filters.submitters,
-        analysis_state=filters.analysis_state,
-        test_name=filters.test_name,
-        test_name_mode=filters.test_name_mode,
+        filters=filters,
         limit=limit,
         offset=offset,
     )
@@ -25568,7 +25317,7 @@ async def reports_totals(
 )
 async def reports_classification_overrides(
     request: Request,
-    filters: ReportFilters = _REPORT_FILTERS_DEP,
+    filters: job_filters.JobFilters = _JOB_FILTERS_DEP,
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -25577,38 +25326,9 @@ async def reports_classification_overrides(
     Requires admin or can_view_reports.
     """
     _require_can_view_reports(request)
-    logger.debug(
-        "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r,"
-        " from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r, review_status=%r,"
-        " submitted_by=%r, analysis_state=%r, test_name=%r, test_name_mode=%r",
-        filters.team,
-        filters.tier,
-        filters.version,
-        filters.date_from,
-        filters.date_to,
-        filters.status,
-        filters.tags,
-        filters.exclude_tags,
-        filters.review_status,
-        sorted(filters.submitters or ()),
-        filters.analysis_state,
-        filters.test_name,
-        filters.test_name_mode,
-    )
+    _log_job_filters("GET /api/reports/classification-overrides", filters)
     return await storage.get_report_classification_overrides(
-        team=filters.team,
-        tier=filters.tier,
-        version=filters.version,
-        date_from=filters.date_from,
-        date_to=filters.date_to,
-        status=filters.status,
-        tags=filters.tags,
-        exclude_tags=filters.exclude_tags,
-        review_status=filters.review_status,
-        submitters=filters.submitters,
-        analysis_state=filters.analysis_state,
-        test_name=filters.test_name,
-        test_name_mode=filters.test_name_mode,
+        filters=filters,
         limit=limit,
         offset=offset,
     )
@@ -25617,7 +25337,7 @@ async def reports_classification_overrides(
 @app.get("/api/reports/issues-created", operation_id="reportsIssuesCreated")
 async def reports_issues_created(
     request: Request,
-    filters: ReportFilters = _REPORT_FILTERS_DEP,
+    filters: job_filters.JobFilters = _JOB_FILTERS_DEP,
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -25626,38 +25346,9 @@ async def reports_issues_created(
     Requires admin or can_view_reports.
     """
     _require_can_view_reports(request)
-    logger.debug(
-        "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r,"
-        " to=%r, status=%r, tags=%r, exclude_tags=%r, review_status=%r,"
-        " submitted_by=%r, analysis_state=%r, test_name=%r, test_name_mode=%r",
-        filters.team,
-        filters.tier,
-        filters.version,
-        filters.date_from,
-        filters.date_to,
-        filters.status,
-        filters.tags,
-        filters.exclude_tags,
-        filters.review_status,
-        sorted(filters.submitters or ()),
-        filters.analysis_state,
-        filters.test_name,
-        filters.test_name_mode,
-    )
+    _log_job_filters("GET /api/reports/issues-created", filters)
     return await storage.get_report_issues_created(
-        team=filters.team,
-        tier=filters.tier,
-        version=filters.version,
-        date_from=filters.date_from,
-        date_to=filters.date_to,
-        status=filters.status,
-        tags=filters.tags,
-        exclude_tags=filters.exclude_tags,
-        review_status=filters.review_status,
-        submitters=filters.submitters,
-        analysis_state=filters.analysis_state,
-        test_name=filters.test_name,
-        test_name_mode=filters.test_name_mode,
+        filters=filters,
         limit=limit,
         offset=offset,
     )
