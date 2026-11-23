@@ -1791,7 +1791,32 @@ class ChatRuntime:
         """Retry tombstones left by a failed sidecar deletion on the next cleanup."""
         await self._call_revoke_ai_sessions(await storage.list_revoked_ai_sessions())
 
-    # -- Shared session persistence for init --
+    # -- Shared credential scoping and session persistence for init & turns --
+
+    @staticmethod
+    async def _credential_generation_for_source(
+        username: str, ai_provider: str, credential_source: str
+    ) -> int | None:
+        """Resolve the user's credential generation for user-keyed sessions."""
+        if credential_source == "server":
+            return None
+        return await storage.get_user_ai_credential_generation(username, ai_provider)
+
+    @asynccontextmanager
+    async def _scoped_chat_init_context(
+        self, username: str, ai_provider: str, credential_source: str
+    ) -> AsyncIterator[int | None]:
+        """Resolve credential generation and scope ai_username + chat_session_source."""
+        credential_generation = await self._credential_generation_for_source(
+            username, ai_provider, credential_source
+        )
+        token = ai_username.set(username)
+        source_token = ai_client.chat_session_source.set(credential_source)
+        try:
+            yield credential_generation
+        finally:
+            ai_client.chat_session_source.reset(source_token)
+            ai_username.reset(token)
 
     async def _persist_init_session(
         self,
@@ -1955,17 +1980,10 @@ class ChatRuntime:
                     wait_for_index=False,
                 )
                 custom_tools = session.custom
-                credential_generation = (
-                    None
-                    if credential_source == "server"
-                    else await storage.get_user_ai_credential_generation(
-                        username, ai_provider
-                    )
-                )
-                token = ai_username.set(username)
-                source_token = ai_client.chat_session_source.set(credential_source)
-                self._call_set_chat_prep_phase(job_id, username, "starting_session")
-                try:
+                async with self._scoped_chat_init_context(
+                    username, ai_provider, credential_source
+                ) as credential_generation:
+                    self._call_set_chat_prep_phase(job_id, username, "starting_session")
                     session_id = await chat_engine.init_chat_session(
                         job_id=job_id,
                         job_name=result_data.get("job_name", "unknown"),
@@ -1979,9 +1997,6 @@ class ChatRuntime:
                         issue_repos=tuple(sorted(issue_repos)),
                         tracker_unavailable=tracker_unavailable,
                     )
-                finally:
-                    ai_client.chat_session_source.reset(source_token)
-                    ai_username.reset(token)
                 if job_id in self.chat_jobs_deleting and session_id:
                     await self._call_discard_unsaved_ai_session(
                         session_id, username, ai_provider
@@ -2256,30 +2271,21 @@ class ChatRuntime:
                             status_code=403, detail="Admin access required"
                         )
 
-                credential_generation = (
-                    None
-                    if credential_source == "server"
-                    else await storage.get_user_ai_credential_generation(
-                        username, ai_provider
-                    )
-                )
-                token = ai_username.set(username)
-                source_token = ai_client.chat_session_source.set(credential_source)
-                try:
-                    session_id = await chat_engine.init_admin_chat_session(
-                        ai_provider=ai_provider,
-                        ai_model=ai_model,
-                        repo_path=workspace,
-                        custom_tools=custom_tools,
-                        tracker_unavailable=tracker_unavailable,
-                    )
-                except SessionCreationRefused as exc:
-                    raise HTTPException(status_code=422, detail=str(exc)) from None
-                except httpx.HTTPStatusError as exc:
-                    raise chat_start_sidecar_error(exc) from None
-                finally:
-                    ai_client.chat_session_source.reset(source_token)
-                    ai_username.reset(token)
+                async with self._scoped_chat_init_context(
+                    username, ai_provider, credential_source
+                ) as credential_generation:
+                    try:
+                        session_id = await chat_engine.init_admin_chat_session(
+                            ai_provider=ai_provider,
+                            ai_model=ai_model,
+                            repo_path=workspace,
+                            custom_tools=custom_tools,
+                            tracker_unavailable=tracker_unavailable,
+                        )
+                    except SessionCreationRefused as exc:
+                        raise HTTPException(status_code=422, detail=str(exc)) from None
+                    except httpx.HTTPStatusError as exc:
+                        raise chat_start_sidecar_error(exc) from None
                 session_id = await self._persist_init_session(
                     conversation_id=ADMIN_CHAT_JOB_ID,
                     username=username,
@@ -2506,10 +2512,8 @@ class ChatRuntime:
                             )
 
                             credential_generation = (
-                                None
-                                if credential_source == "server"
-                                else await storage.get_user_ai_credential_generation(
-                                    username, ai_provider
+                                await self._credential_generation_for_source(
+                                    username, ai_provider, credential_source
                                 )
                             )
 
