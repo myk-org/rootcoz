@@ -254,8 +254,15 @@ def capture_main_logs(
     it would leave the outer capture empty, and every assertion after it vacuous.
     """
     named = (logger,) if isinstance(logger, (str, logging.Logger)) else tuple(logger)
+    expanded: list[str | logging.Logger] = []
+    for item in named:
+        expanded.append(item)
+        if item == _MAIN_LOGGER or (
+            isinstance(item, logging.Logger) and item.name == _MAIN_LOGGER
+        ):
+            expanded.append("rootcoz.engine.chat_runtime")
     loggers = [
-        logging.getLogger(item) if isinstance(item, str) else item for item in named
+        logging.getLogger(item) if isinstance(item, str) else item for item in expanded
     ]
     handler_level = caplog.handler.level
     levels = {target: target.level for target in loggers}

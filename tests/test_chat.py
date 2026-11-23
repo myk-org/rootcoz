@@ -2816,18 +2816,20 @@ async def test_chat_routes_share_one_lock_scope_and_translation(monkeypatch) -> 
     from contextlib import asynccontextmanager
 
     from rootcoz import main as main_mod
+    from rootcoz.engine import chat_runtime
     from rootcoz.temp_paths import PathStateUnknown
 
-    source = inspect.getsource(main_mod)
-    assert source.count("async with chat_workspace_lock(") == 1
-    assert source.count("except PathStateUnknown") == 1
+    runtime_source = inspect.getsource(chat_runtime)
+    main_source = inspect.getsource(main_mod)
+    assert runtime_source.count("async with chat_engine.chat_workspace_lock(") == 1
+    assert runtime_source.count("except PathStateUnknown") == 1
+    assert "chat_workspace_lock(" not in main_source
     for route in (
-        main_mod._init_chat_under_barrier,
-        main_mod._process_chat_message,
-        main_mod.init_admin_chat,
-        main_mod._process_admin_chat_message,
+        chat_runtime.ChatRuntime.init_job_chat_under_barrier,
+        chat_runtime.ChatRuntime.init_admin_chat,
+        chat_runtime.ChatRuntime.process_turn,
     ):
-        assert "_enter_chat_workspace(" in inspect.getsource(route), route.__name__
+        assert "_call_enter_chat_workspace(" in inspect.getsource(route), route.__name__
 
     @asynccontextmanager
     async def unknown(job_id, username=""):

@@ -104,6 +104,9 @@ src/rootcoz/
                             # JSON response parsing, deduplication. Has ZERO knowledge
                             # of any specific CI system.
     chat.py                 # Chat engine: workspace, AI session, prompt builder
+    chat_runtime.py         # Unified chat runtime: session lifecycle, locks, barriers,
+                            # aborts, prep handshakes, delta streaming, unified turn loop
+                            # (JobChatAdapter & AdminChatAdapter)
   sources/                  # CI source plugins (data fetching)
     base.py                 # CISource ABC, CISourceResult, WorkspaceFile, and shared workspace setup helpers
     jenkins_source.py       # Jenkins plugin: JenkinsSource, analyze_job, analyze_child_job,

@@ -35,11 +35,6 @@ from collections.abc import (
 )
 from compression import zstd
 from contextlib import asynccontextmanager
-
-# `field` is also a loop variable in three request-param helpers below, so the
-# dataclasses helper is imported under a name of its own.
-from dataclasses import dataclass
-from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from html.parser import HTMLParser
@@ -83,10 +78,8 @@ from rootcoz import (
 )
 from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
-    CHAT_BUILTIN_TOOLS,
     SESSION_REFUSAL_MARKER,
     RejectedUserKeyError,
-    SessionCreationRefused,
     _cached_catalog_provider_ids,
     _setup_usage_recorder,
     ai_username,
@@ -94,7 +87,6 @@ from rootcoz.ai_client import (
     build_friendly_catalog,
     call_ai_once,
     format_ai_diagnostic,
-    format_chat_ai_user_error,
     list_models,
     model_listing_status,
     normalize_provider,
@@ -150,12 +142,28 @@ from rootcoz.encryption import (
     decrypt_sensitive_fields,
     decrypt_value_or_none,
     encrypt_sensitive_fields,
-    get_hmac_secret,
     strip_sensitive_from_response,
 )
+from rootcoz.engine import chat_runtime as _chat_runtime_mod
 from rootcoz.engine.chat import (
     CHAT_TOOL_REJECTED_FIELDS,
     CHAT_TOOL_REJECTED_TEMPLATE,
+)
+from rootcoz.engine.chat_runtime import (
+    _UNSET_SESSION,
+    ADMIN_CHAT_JOB_ID,
+    AdminChatAdapter,
+    ChatInitHandshake,
+    ChatPreparation,
+    ChatRuntime,
+    ChatRuntimeHost,
+    JobChatAdapter,
+    _PayloadBroadcast,
+    _PayloadSubscription,
+    chat_start_sidecar_error,
+    redacted_error,
+    render_chat_frame,
+    resolve_chat_ai_config,
 )
 from rootcoz.engine.core import (
     ROOTCOZ_ISSUE_PROMPT_FILENAME,
@@ -393,9 +401,7 @@ from rootcoz.tag_facets import (
     serialize_tag_facets,
 )
 from rootcoz.temp_paths import (
-    CleanupOutcome,
     DeleteResult,
-    PathStateUnknown,
     cleanup_off_loop,
     cleanup_path_off_loop,
     delete_tree,
@@ -1204,8 +1210,114 @@ _comment_listeners: dict[str, set[asyncio.Event]] = {}
 # Token usage change notifications
 _token_usage_listeners: set[asyncio.Event] = set()
 
-# Per-job chat change notifications
-_chat_listeners: dict[str, set[asyncio.Event]] = {}
+# Unified chat runtime (owns locks, barriers, aborts, preparation, streaming, and turns).
+_chat_runtime = ChatRuntime(
+    ChatRuntimeHost(
+        get_settings=lambda: get_settings(),
+        get_result=lambda job_id, **kwargs: get_result(job_id, **kwargs),
+        resolve_display_build_id=resolve_display_build_id,
+        setup_ci_workspace=lambda workspace, params, **kwargs: (
+            source_chat_workspace.setup_ci_build_workspace(workspace, params, **kwargs)
+        ),
+        create_ai_auth_header=lambda username, **kwargs: _create_ai_auth_header(
+            username, **kwargs
+        ),
+        cleanup_ai_session=lambda auth_header: _cleanup_ai_session(auth_header),
+        ai_admin_role_current=lambda username: _ai_admin_role_current(username),
+        account_has_profile=lambda username: _account_has_profile(username),
+        build_internal_server_url=lambda: _build_internal_server_url(),
+        chat_tracker_state=lambda *args, **kwargs: _chat_tracker_state(*args, **kwargs),
+        settings_github_repo_available=lambda settings: _settings_github_repo_available(
+            settings
+        ),
+        job_issue_repo_slugs=lambda params: _job_issue_repo_slugs(params),
+        issue_blocked_notice=lambda **kwargs: _issue_blocked_notice(**kwargs),
+        post_server_notice=lambda **kwargs: _post_server_notice(**kwargs),
+        validate_catalog_pair=lambda provider, model: _validate_catalog_pair(
+            provider, model
+        ),
+        spawn_background=lambda coro: _spawn_background(coro),
+        resolve_admin_artifacts_owner_id=lambda username: (
+            _resolve_admin_artifacts_owner_id(username)
+        ),
+        cleanup_admin_artifacts=lambda username, owner_id: cleanup_off_loop(
+            ADMIN_CHAT_JOB_ID,
+            partial(_cleanup_admin_artifacts, username, owner_id=owner_id),
+        ),
+        cleanup_path_off_loop=lambda *args, **kwargs: cleanup_path_off_loop(
+            *args, **kwargs
+        ),
+        on_notify_chat_changed=lambda job_id, username="": notify_chat_changed(
+            job_id, username=username
+        ),
+        on_set_chat_prep_phase=lambda job_id, username, phase, detail="": (
+            set_chat_prep_phase(job_id, username, phase, detail)
+        ),
+        on_schedule_chat_index=lambda workspace, repos=None, job_id="", deadline=None: (
+            _schedule_chat_index(
+                workspace, repos=repos, job_id=job_id, deadline=deadline
+            )
+        ),
+        on_validate_chat_selection=lambda body, username: _validate_chat_selection(
+            body, username
+        ),
+        on_normalize_and_validate_ai_params=lambda ai_provider, ai_model, *, username: (
+            _normalize_and_validate_ai_params(ai_provider, ai_model, username=username)
+        ),
+        on_resolve_chat_credentials=lambda decrypted_params, username: (
+            _resolve_chat_credentials(decrypted_params, username)
+        ),
+        on_enter_chat_workspace=lambda job_id, username, what: _enter_chat_workspace(
+            job_id, username, what
+        ),
+        on_current_chat_choice=lambda job_id, username: _current_chat_choice(
+            job_id, username
+        ),
+        on_check_chat_session_choice=lambda job_id, username, provider, model, source, *, allow_empty=False: (
+            _check_chat_session_choice(
+                job_id,
+                username,
+                provider,
+                model,
+                source,
+                allow_empty=allow_empty,
+            )
+        ),
+        on_discard_unsaved_ai_session=lambda session_id, username, provider: (
+            _discard_unsaved_ai_session(session_id, username, provider)
+        ),
+        on_revoke_ai_sessions=lambda sessions: _revoke_ai_sessions(sessions),
+    )
+)
+
+# Direct references to runtime-owned state maps/sets so SSE multiplexing and
+# existing tests inspect live runtime state with zero divergence.
+_chat_listeners = _chat_runtime.chat_listeners
+_chat_deltas = _chat_runtime.chat_deltas
+_chat_partials = _chat_runtime.chat_partials
+_chat_prep_phases = _chat_runtime.chat_prep_phases
+_chat_prep_tasks = _chat_runtime.chat_prep_tasks
+_chat_locks = _chat_runtime.chat_locks
+_chat_lock_refs = _chat_runtime.chat_lock_refs
+_chat_job_barriers = _chat_runtime.chat_job_barriers
+_chat_jobs_deleting = _chat_runtime.chat_jobs_deleting
+_chat_job_tasks = _chat_runtime.chat_job_tasks
+_chat_abort_signals = _chat_runtime.chat_abort_signals
+_chat_session_tracker_targets = _chat_runtime.chat_session_tracker_targets
+_ChatInitHandshake = ChatInitHandshake
+_ChatPreparation = ChatPreparation
+_settle_chat_preparation = _chat_runtime.settle_chat_preparation
+_chat_start_sidecar_error = chat_start_sidecar_error
+_redacted_error = redacted_error
+_render_chat_frame = render_chat_frame
+_resolve_chat_ai_config = resolve_chat_ai_config
+_SSE_QUEUE_MAXSIZE = _chat_runtime_mod._SSE_QUEUE_MAXSIZE
+_CHAT_PAIR_CONFLICT_DETAIL = _chat_runtime_mod._CHAT_PAIR_CONFLICT_DETAIL
+_CHAT_PREP_CANCELLED_DETAIL = _chat_runtime_mod._CHAT_PREP_CANCELLED_DETAIL
+_CHAT_PREP_FAILED_DETAIL = _chat_runtime_mod._CHAT_PREP_FAILED_DETAIL
+_TRANSIENT_CHAT_START_DETAIL = _chat_runtime_mod._TRANSIENT_CHAT_START_DETAIL
+CHAT_BUILTIN_TOOLS = _chat_runtime_mod.CHAT_BUILTIN_TOOLS
+CHAT_INDEX_DEADLINE_SECONDS = _chat_runtime_mod.CHAT_INDEX_DEADLINE_SECONDS
 
 # Live SSE connections: one increment per stream, so a client subscribed to ten
 # topics is one client, not ten.
@@ -1227,13 +1339,13 @@ def _sse_client_count() -> int:
         _sse_connections
         + _log_broadcast.listener_count
         + _audit_broadcast.listener_count
-        + sum(channel.listener_count for channel in _chat_deltas.values())
+        + _chat_runtime.chat_delta_listener_count()
     )
 
 
 def _chat_turns_in_flight() -> int:
     """Chat init/message tasks running right now (one per turn)."""
-    return sum(len(tasks) for tasks in _chat_job_tasks.values())
+    return _chat_runtime.chat_turns_in_flight()
 
 
 def notify_dashboard_changed() -> None:
@@ -1294,172 +1406,34 @@ def notify_token_usage_changed() -> None:
 
 
 def _chat_channel_key(job_id: str, username: str) -> str:
-    """The one key both chat channels use: listeners (notifications) and fragments.
-
-    This is the *SSE channel* key only. The per-user work serialization sites
-    (`_hold_chat_lock`, `_chat_prep_phases`, `_get_chat_abort_signal`,
-    `_cleanup_chat_state`) are a different namespace and keep their unconditional
-    `f"{job_id}:{username}"`. The empty-username fallback exists for the historical
-    notification form, never for content: no fragment channel is created without a
-    username (`_chat_delta_channel` is called only after `_require_authenticated`).
-    """
-    return f"{job_id}:{username}" if username else job_id
+    """SSE channel key shared by chat notifications and fragment streams."""
+    return _chat_runtime.chat_channel_key(job_id, username)
 
 
 def notify_chat_changed(job_id: str, username: str = "") -> None:
     """Signal SSE listeners for a specific job+user that chat messages changed."""
-    key = _chat_channel_key(job_id, username)
-    for event in _chat_listeners.get(key, set()).copy():
-        event.set()
-    # The dedicated chat streams carry the same notice on their payload channel, so
-    # a tab that lost a fragment burst still learns the reply is stored.
-    publish_chat_delta(key, {"type": "refresh"})
-
-
-# Payload-carrying SSE broadcast: the notification *is* the payload (audit
-# events, log lines, and chat change/delta frames), so each listener owns a queue
-# instead of an Event.
-# Listeners are (owning_loop, subscription) so a write from a non-asyncio thread
-# can wake the correct loop via call_soon_threadsafe.
-_SSE_QUEUE_MAXSIZE = 1000
-
-
-class _PayloadSubscription:
-    """One subscriber's queue plus how many payloads it had to drop.
-
-    ``dropped`` is only touched on the subscriber's own loop, so it needs no
-    lock; the reader drains it with :meth:`take_dropped` once it catches up.
-    """
-
-    def __init__(self) -> None:
-        self.queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_SSE_QUEUE_MAXSIZE)
-        self.dropped = 0
-
-    def take_dropped(self) -> int:
-        """Return the drops since the last call and reset the counter."""
-        dropped, self.dropped = self.dropped, 0
-        return dropped
-
-
-class _PayloadBroadcast:
-    """One payload broadcast channel: the SSE subscribers of a single stream."""
-
-    def __init__(self) -> None:
-        self._listeners: set[tuple[asyncio.AbstractEventLoop, _PayloadSubscription]] = (
-            set()
-        )
-        self._lock = threading.Lock()
-
-    @property
-    def has_listeners(self) -> bool:
-        """Cheap check so a hot producer skips work when nobody is listening."""
-        return bool(self._listeners)
-
-    @property
-    def listener_count(self) -> int:
-        """Number of live subscribers (server status reports this)."""
-        with self._lock:
-            return len(self._listeners)
-
-    def publish(self, payload: Any) -> None:
-        """Push one payload to every subscriber (thread-safe)."""
-        with self._lock:
-            if not self._listeners:
-                return
-            listeners = list(self._listeners)
-
-        def _enqueue(subscription: _PayloadSubscription) -> None:
-            try:
-                subscription.queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                # Counted, not silently forgotten: the reader reports the gap
-                # as its own event so a slow admin sees the stream is missing
-                # payloads instead of trusting a gapped feed.
-                subscription.dropped += 1
-
-        for loop, subscription in listeners:
-            try:
-                loop.call_soon_threadsafe(_enqueue, subscription)
-            except RuntimeError:
-                logger.debug("SSE payload dropped: subscriber loop is closed")
-
-    @asynccontextmanager
-    async def subscribe(self) -> AsyncIterator[_PayloadSubscription]:
-        """Register the calling connection for this channel's payloads."""
-        subscription = _PayloadSubscription()
-        listener = (asyncio.get_running_loop(), subscription)
-        with self._lock:
-            self._listeners.add(listener)
-        try:
-            yield subscription
-        finally:
-            with self._lock:
-                self._listeners.discard(listener)
+    _chat_runtime.notify_chat_changed(job_id, username=username)
 
 
 _log_broadcast = _PayloadBroadcast()
 _audit_broadcast = _PayloadBroadcast()
 
-# One channel per authenticated (job_id, username) — never per job: model output
-# must not be shared between users. In-process only, like `_chat_listeners` and
-# `_hold_chat_lock`'s refcount, so no lock is needed (all touched from the loop).
-_chat_deltas: dict[str, _PayloadBroadcast] = {}
-# The turn in flight per channel: its assistant row id and the text published so
-# far. A stream that subscribes a tick after the turn started is caught up with
-# one `snapshot` frame — replaying the deltas would double the text when the
-# browser's EventSource reconnects. Display only: `turn_end.text` is the reply.
-_chat_partials: dict[str, tuple[int, str]] = {}
-
 
 def _chat_delta_channel(job_id: str, username: str) -> _PayloadBroadcast:
-    """The fragment channel for one authenticated user's turn.
-
-    Claimed by the turn's publisher and by the stream generator, both after their
-    own gate, so `username` is always non-empty.
-    """
-    return _chat_deltas.setdefault(
-        _chat_channel_key(job_id, username), _PayloadBroadcast()
-    )
+    """The fragment channel for one authenticated user's turn."""
+    return _chat_runtime.chat_delta_channel(job_id, username)
 
 
 def publish_chat_delta(key: str, frame: dict[str, Any]) -> None:
-    """Push one chat frame to that channel's streams; no channel means no delivery.
-
-    The running turn's text is kept whether or not a stream is attached, so a tab
-    that lost its connection mid-turn is caught up when it comes back.
-    """
-    message_id = frame.get("id")
-    if isinstance(message_id, int) and isinstance(frame.get("delta"), str):
-        held_id, held = _chat_partials.get(key, (message_id, ""))
-        _chat_partials[key] = (
-            message_id,
-            held + frame["delta"] if held_id == message_id else frame["delta"],
-        )
-    else:
-        _chat_partials.pop(key, None)  # a change notice: the turn is over
-    channel = _chat_deltas.get(key)
-    if channel is not None:
-        channel.publish(frame)
-
-
-def _render_chat_frame(frame: Any) -> str | None:
-    """One connection carries both frames: a change notice, or a fragment."""
-    if isinstance(frame, dict) and frame.get("type") == "refresh":
-        return "event: chat-changed\ndata: refresh\n\n"
-    return f"event: chat-delta\ndata: {json.dumps(frame)}\n\n"
+    """Push one chat frame to that channel's streams."""
+    _chat_runtime.publish_chat_delta(key, frame)
 
 
 def _chat_delta_publisher(
     job_id: str, username: str, message_id: int
 ) -> Callable[[str], None]:
-    """The `on_delta` callable for one turn: fragments tagged with their row id."""
-    key = _chat_channel_key(job_id, username)
-    # Claim the channel before the first fragment, so a browser stream that
-    # subscribes after the turn started still has something to catch up from, and
-    # drop the previous turn's text: this turn's buffer starts empty.
-    _chat_delta_channel(job_id, username)
-    _chat_partials.pop(key, None)
-    return lambda delta: publish_chat_delta(key, {"id": message_id, "delta": delta})
+    """The ``on_delta`` callable for one turn: fragments tagged with their row id."""
+    return _chat_runtime.chat_delta_publisher(job_id, username, message_id)
 
 
 def notify_audit_event(event: dict[str, Any]) -> None:
@@ -1506,23 +1480,16 @@ async def _queue_sse_events(
             yield chunk
 
 
-# Workspace-preparation phase per job+user, reported to the chat UI while
-# /init runs. In-memory only: init is request-scoped and the chat UI refetches
-# it from GET /api/chat/{job_id} whenever notify_chat_changed fires.
-_chat_prep_phases: dict[str, dict[str, Any]] = {}
-
-
 def set_chat_prep_phase(
     job_id: str, username: str, phase: str, detail: str = ""
 ) -> None:
     """Record the current chat workspace-preparation phase and notify listeners."""
-    _chat_prep_phases[f"{job_id}:{username}"] = {"phase": phase, "detail": detail}
-    notify_chat_changed(job_id, username=username)
+    _chat_runtime.set_chat_prep_phase(job_id, username, phase, detail)
 
 
 def clear_chat_prep_phase(job_id: str, username: str) -> None:
     """Drop the preparation phase once init finished (or failed)."""
-    _chat_prep_phases.pop(f"{job_id}:{username}", None)
+    _chat_runtime.clear_chat_prep_phase(job_id, username)
 
 
 def _make_sse_stream(
@@ -2905,13 +2872,6 @@ _job_tasks: dict[str, asyncio.Task[Any]] = {}
 #: it, because a second copy under a "must match" comment is a number nothing
 #: checks.
 SHUTDOWN_DRAIN_SECONDS = 40
-
-#: How long one chat preparation may spend indexing. Chat only: an analysis
-#: workspace is indexed with no deadline, and a graph is an optimisation either
-#: way. ``graft.BUILD_SECONDS`` is 120 s per repository, so 180 s admits about one
-#: and a half builds — past that the marginal graph is worth less than another
-#: minute without a session.
-CHAT_INDEX_DEADLINE_SECONDS = 180
 
 
 def _remove_job_task(job_id: str) -> Callable[[asyncio.Task[object]], None]:
@@ -12672,99 +12632,25 @@ def _chat_tracker_targets(
     )[0]
 
 
-# Tracker targets a chat session was created with, keyed by sidecar session id.
-_chat_session_tracker_targets: dict[str, tuple[str, ...]] = {}
-
-
-#: The fingerprint entry a session carries when it was created with the code
-#: graph. Chat indexes after the first turn, so a session started before the
-#: graph existed can never see it — this is what makes it stale and lets the
-#: next turn start one that can.
-_GRAPH_TOOL_FINGERPRINT = "code-graph"
-
-
 def _chat_tool_fingerprint(
     targets: tuple[str, ...], tools: list[dict[str, Any]]
 ) -> tuple[str, ...]:
     """The creation-time tool set a resumed chat session has to match."""
-    if any(tool.get("name", "").startswith("graft_") for tool in tools):
-        return (*targets, _GRAPH_TOOL_FINGERPRINT)
-    return targets
+    return _chat_runtime.chat_tool_fingerprint(targets, tools)
 
 
 def _enable_tools_for_session(
     session_id: str | None, targets: tuple[str, ...]
 ) -> str | None:
-    """The session to resume, or ``None`` when its tools are out of date.
-
-    A resumed sidecar session keeps the tools and system prompt it was created
-    with, so a token saved (or a tracker enabled/disabled) after the session
-    started never reaches the model in it. Rather than resume with a stale tool
-    list, hand back ``None`` so the caller builds a fresh session from the
-    current tools — the conversation itself comes from stored history either
-    way. The one asymmetry: an entry already present is never dropped for a
-    turn whose graph read came back empty, because that read is inconclusive
-    while a build holds the workspace.
-
-    The creation-time set lives in memory: after a restart it is unknown, so the
-    session is adopted at its current targets (no forced session churn) and a
-    later change still rebuilds it.
-
-    shortcut: a change made across a restart is only picked up on the next one,
-    upgrade to a persisted per-session value if chats commonly survive restarts.
-    """
-    if not session_id:
-        return None
-    known = _chat_session_tracker_targets.get(session_id)
-    if known is None:
-        _chat_session_tracker_targets[session_id] = targets
-        return session_id
-    if known == targets:
-        return session_id
-    if (
-        _GRAPH_TOOL_FINGERPRINT in known
-        and _GRAPH_TOOL_FINGERPRINT not in targets
-        # Only the graph entry is unknowable, so the exception covers only it:
-        # the tracker targets beside it come from settings, and a change there
-        # is decisive even while a build holds the workspace.
-        and tuple(item for item in known if item != _GRAPH_TOOL_FINGERPRINT) == targets
-    ):
-        # The graph entry comes from a bounded read of the workspace, which
-        # cannot tell "no graph" from "a build holds the lock" — both return no
-        # tools. Rebuilding on that replays the whole history the moment the
-        # build finishes, and tears it down again on the next turn, so a session
-        # that has the graph keeps it; the graph tools report their own freshness.
-        logger.info(
-            "Chat: no graph tools this turn (%s); keeping session %s rather than "
-            "rebuilding it — the graph read is inconclusive while a build runs",
-            targets,
-            session_id,
-        )
-        return session_id
-    logger.info(
-        "Chat: tool set changed (%s -> %s); starting a fresh session instead of "
-        "resuming %s",
-        known,
-        targets,
-        session_id,
-    )
-    # Keep the stale entry: a failed or aborted rebuild never records the new
-    # session, so the next turn must still see this session as stale rather
-    # than as "unknown after a restart" and adopt its old tools.
-    return None
+    """The session to resume, or ``None`` when its tools are out of date."""
+    return _chat_runtime.enable_tools_for_session(session_id, targets)
 
 
 def _remember_chat_session_tools(
     session_id: str | None, targets: tuple[str, ...]
 ) -> None:
     """Record the tracker tools a fresh chat session was created with."""
-    if not session_id:
-        return
-    # Bounded like the other in-memory chat maps: old sessions are unreachable
-    # once their chat has moved on.
-    if len(_chat_session_tracker_targets) > 512:
-        _chat_session_tracker_targets.clear()
-    _chat_session_tracker_targets[session_id] = targets
+    _chat_runtime.remember_chat_session_tools(session_id, targets)
 
 
 def _github_repo_slug(repo_url: Any) -> str:
@@ -19238,48 +19124,26 @@ async def _discard_unsaved_chat_response(
     label: str,
 ) -> None:
     """Revoke an unsaved response and fail only an open placeholder."""
-    if session_id:
-        await _discard_unsaved_ai_session(session_id, username, provider)
-    logger.info(
-        "%s: discarded response for message %d (stale credentials or closed placeholder)",
-        label,
-        message_id,
+    await _chat_runtime.discard_unsaved_chat_response(
+        message_id, job_id, username, provider, session_id, label
     )
-    if await storage.fail_pending_chat_message(
-        message_id, "AI credentials changed during processing. Please try again."
-    ):
-        notify_chat_changed(job_id, username=username)
 
 
 async def _discard_unsaved_ai_session(
     session_id: str, username: str, provider: str
 ) -> None:
     """Tombstone an owned unsaved session before best-effort sidecar deletion."""
-    if await storage.revoke_ai_session_source(
-        session_id, username=username, provider=provider
-    ):
-        await _revoke_ai_sessions([session_id])
+    await _chat_runtime.discard_unsaved_ai_session(session_id, username, provider)
 
 
 async def _revoke_ai_sessions(sessions: list[str]) -> None:
     """Delete revoked sessions without racing a replacement using the same ID."""
-    from pi_sidecar_client import get_sidecar_client
-
-    for session_id in sessions:
-        try:
-            await storage.delete_revoked_ai_session(
-                session_id,
-                get_sidecar_client().delete_session,
-            )
-        except Exception:
-            logger.exception("Failed to delete revoked AI session", exc_info=False)
-    if sessions:
-        logger.info("Revoked %d AI sessions", len(sessions))
+    await _chat_runtime.revoke_ai_sessions(sessions)
 
 
 async def _cleanup_revoked_ai_sessions() -> None:
     """Retry tombstones left by a failed sidecar deletion on the next cleanup."""
-    await _revoke_ai_sessions(await storage.list_revoked_ai_sessions())
+    await _chat_runtime.cleanup_revoked_ai_sessions()
 
 
 class AiCredentialInput(BaseModel):
@@ -25977,152 +25841,41 @@ async def create_feedback(
     )
 
 
-# -- Chat helpers --
+# -- Chat runtime adapters & HTTP/SSE routes --
+
+
+def _job_chat_adapter(
+    job_id: str, *, stored_result: dict[str, Any] | None = None
+) -> JobChatAdapter:
+    return JobChatAdapter(job_id, stored_result=stored_result)
+
+
+def _admin_chat_adapter() -> AdminChatAdapter:
+    return AdminChatAdapter()
 
 
 def _build_ci_workspace_params(
     decrypted_params: dict[str, Any], result_data: dict[str, Any]
 ) -> dict[str, Any]:
-    """Build params dict for CI chat workspace setup from stored request params."""
-    return {
-        **decrypted_params,
-        "job_name": result_data.get("job_name", ""),
-        "build_number": resolve_display_build_id(result_data),
-        "analysis_type": decrypted_params.get(
-            "analysis_type", result_data.get("analysis_type", "jenkins")
-        ),
-    }
+    return _chat_runtime.build_ci_workspace_params(decrypted_params, result_data)
 
 
 async def _validate_chat_selection(
     body: ChatInitRequest, username: str
 ) -> tuple[str, str]:
-    """Validate the chosen pair as this user, never as the analysis job."""
-    provider, model = await _normalize_and_validate_ai_params(
-        body.ai_provider,
-        body.ai_model,
-        username=username,
-    )
-    if not provider or not model:
-        raise HTTPException(status_code=422, detail="Select an AI provider and model")
-    from rootcoz.ai_client import _selected_credential_source
-
-    source = _selected_credential_source.get()
-    if source == "server":
-        token = ai_username.set(username)
-        try:
-            from rootcoz.ai_client import (
-                InactiveServerProviderError,
-                require_server_provider_grant,
-            )
-
-            await require_server_provider_grant(provider, model)
-        except InactiveServerProviderError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        finally:
-            ai_username.reset(token)
-    elif source != "user":
-        raise HTTPException(
-            status_code=422, detail="Chat credential source unavailable"
-        )
-    logger.debug(
-        "Chat selection validated for user=%s provider=%s source=%s",
-        username,
-        provider,
-        source,
-    )
-    return provider, model
-
-
-# Sentinel for "caller did not supply the latest-session row".
-_UNSET_SESSION: Any = object()
+    return await _chat_runtime.validate_chat_selection(body, username)
 
 
 async def _available_chat_session(
     job_id: str, username: str, session: Any = _UNSET_SESSION
 ) -> dict[str, str] | None:
-    """Describe only a session the current owner can still use.
-
-    ``session`` reuses an already-read latest-session row (including "no
-    session") so a history read does not re-query it and risk straddling a
-    concurrent Start.
-    """
-    active = (
-        await storage.get_latest_chat_session(job_id, username)
-        if session is _UNSET_SESSION
-        else session
-    )
-    if not active:
-        return None
-    try:
-        source = await storage.get_ai_session_source(
-            active["session_id"], username, active["ai_provider"]
-        )
-        if source == "server":
-            # Same rule Start applies, rechecked per read: the full server
-            # grant, or the free grant for a pair that is still declared
-            # free (a removed pair retires its sessions too).
-            from rootcoz.ai_client import require_server_provider_grant
-
-            token = ai_username.set(username)
-            try:
-                await require_server_provider_grant(
-                    active["ai_provider"], active["ai_model"]
-                )
-            except ValueError:
-                return None
-            finally:
-                ai_username.reset(token)
-        elif source == "user":
-            # A provider can stop accepting user keys after the session started
-            # (e.g. it was added to AMBIENT_AUTH_PROVIDERS). Retire the session
-            # only on a confirmed loss: a failed discovery (None) preserves it
-            # instead of failing every user session during a sidecar hiccup.
-            from rootcoz.ai_client import provider_accepts_user_keys
-
-            if await provider_accepts_user_keys(active["ai_provider"]) is False:
-                return None
-            from pi_sidecar_client import _validate_api_key
-
-            key, generation = await storage.get_user_ai_credential_with_generation(
-                username, active["ai_provider"]
-            )
-            if not key or generation is None or _validate_api_key(key):
-                return None
-        else:
-            return None
-    except ValueError, LookupError, OSError:
-        logger.debug("Chat session unavailable for user=%s", username)
-        return None
-    return {
-        "ai_provider": active["ai_provider"],
-        "ai_model": active["ai_model"],
-        "credential_source": source,
-    }
+    return await _chat_runtime.available_chat_session(job_id, username, session=session)
 
 
 async def _current_chat_choice(
     job_id: str, username: str
 ) -> tuple[dict[str, Any], str]:
-    """Load the selected session and its persisted credential source."""
-    active = await storage.get_latest_chat_session(job_id, username)
-    if not active:
-        raise HTTPException(status_code=409, detail="Start a new chat session first")
-    try:
-        source = await storage.get_ai_session_source(
-            active["session_id"], username, active["ai_provider"]
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=409, detail="Chat session unavailable; start a new chat"
-        ) from exc
-    if source not in ("user", "server"):
-        raise HTTPException(
-            status_code=409, detail="Chat session unavailable; start a new chat"
-        )
-    return active, source
+    return await _chat_runtime.current_chat_choice(job_id, username)
 
 
 async def _check_chat_session_choice(
@@ -26134,214 +25887,210 @@ async def _check_chat_session_choice(
     *,
     allow_empty: bool = False,
 ) -> tuple[str, str]:
-    """Pin chat turns to the last Start's owner, model and credential source."""
-    if allow_empty and not await _available_chat_session(job_id, username):
-        return "", ""
-    active, active_source = await _current_chat_choice(job_id, username)
-    if (provider, model) != (active["ai_provider"], active["ai_model"]) or (
-        source is not None and source != active_source
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="Clear chat and Start a new session to change model or credentials",
-        )
-    return active["session_id"], active_source
-
-
-# Sentinel for "the user SELECTED a Jira credential but it is unusable"
-# (mode "none" connection). Distinct from None (= no selection at all):
-# build_chat_custom_tools treats None as permission to resolve the user's
-# other stored credentials — a failed selected connection must not fall
-# through to that fallback.
-_JIRA_CHAT_SELECTION_FAILED = JiraConnection(
-    mode="none",
-    api_base="",
-    browse_base="",
-    site_url="",
-    auth=None,
-)
+    return await _chat_runtime.check_chat_session_choice(
+        job_id, username, provider, model, source, allow_empty=allow_empty
+    )
 
 
 async def _resolve_chat_credentials(
     decrypted_params: dict[str, Any], username: str
 ) -> tuple[str, str, JiraConnection | None, str, str]:
-    """Resolve Jira and GitHub credentials for chat.
-
-    Jira uses user-scoped tokens only. GitHub uses user-scoped tokens
-    only. Server deployment tokens and job-stored tokens are
-    never exposed to chat sessions.
-
-    Returns:
-        (jira_email, jira_token, jira_connection, github_token,
-        github_repo). ``jira_connection`` is the resolved (and, for service
-        accounts, cloud-ID-completed) connection — ``None`` when the user
-        selected NO Jira credential at all, or the
-        ``_JIRA_CHAT_SELECTION_FAILED`` sentinel (a mode-``"none"``
-        connection) when a selected credential exists but is unusable —
-        chat tool building must not fall back to the user's OTHER stored
-        credential after the selected one failed. Each method reads its
-        own server-level URL and TLS verification (URLs are not
-        credentials).
-    """
-    import re
-
-    settings = get_settings()
-    user_tokens = await storage.get_user_tokens(username)
-
-    # Extract github repo from tests_repo_url (repo name is not a credential)
-    github_repo = ""
-    tests_repo_url = decrypted_params.get("tests_repo_url", "")
-    if tests_repo_url:
-        match = re.search(
-            r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?/?$", str(tests_repo_url)
-        )
-        if match:
-            github_repo = match.group(1)
-
-    # User-scoped credentials only — never job-stored or server deployment tokens
-    jira_email = user_tokens.get("jira_email", "")
-    jira_token = user_tokens.get("jira_token", "")
-    jira_sa_token = user_tokens.get("jira_sa_token", "")
-    github_token = (user_tokens.get("github_token") or "").strip()
-
-    jira_connection: JiraConnection | None = None
-    if jira_token or jira_sa_token:
-        # Cloud ID, site URL, per-method URLs/SSL flags, and the OAuth 2.0
-        # credential's client ID are server-level non-secrets — safe to
-        # reuse for user-scoped secret resolution (the user secret +
-        # server client ID must belong to the same Atlassian OAuth 2.0
-        # credential). The user's field choice pins the method; each
-        # method then reads its own URL. Prefix detection wins over field
-        # placement (#327 semantics): an ATOA-prefixed secret or an
-        # ATST-prefixed scoped token saved in the regular jira_token field
-        # routes to the oauth/atst path so chat agrees with validation and
-        # effective settings (which detect the prefixes). The
-        # service-account field wins when both fields carry classified
-        # values.
-        regular_token = jira_token.strip()
-        sa_secret = jira_sa_token.strip()
-        atst_token = ""
-        sa_kind = classify_jira_secret(sa_secret)
-        token_kind = classify_jira_secret(regular_token)
-        if sa_kind == "atst":
-            atst_token = sa_secret
-            sa_secret = ""
-        elif not sa_kind and token_kind:
-            if token_kind == "oauth":
-                sa_secret = regular_token
-            else:
-                atst_token = regular_token
-            regular_token = ""
-        jira_connection = resolve_jira_connection_from_params(
-            jira_cloud_url=settings.jira_cloud_url,
-            jira_server_url=settings.jira_server_url,
-            jira_email=jira_email,
-            jira_token=regular_token,
-            jira_oauth_client_secret=sa_secret,
-            atlassian_oauth_client_id=str(settings.atlassian_oauth_client_id or ""),
-            atlassian_oauth_cloud_id=str(settings.atlassian_oauth_cloud_id or ""),
-            jira_site_url=str(settings.jira_site_url or ""),
-            jira_atst_token=atst_token,
-            jira_cloud_ssl_verify=settings.jira_cloud_ssl_verify,
-            jira_server_ssl_verify=settings.jira_server_ssl_verify,
-            jira_oauth_ssl_verify=settings.jira_oauth_ssl_verify,
-        )
-        if jira_connection.mode == "none":
-            # The selected fields cannot form a usable method (e.g. an
-            # OAuth secret without a server client ID) — a FAILED
-            # selection, not an absent one.
-            jira_connection = _JIRA_CHAT_SELECTION_FAILED
-        else:
-            if jira_connection.mode in ("sa", "atst"):
-                # Complete BEFORE treating an empty api_base as unusable:
-                # complete_jira_connection resolves the cloud ID from the
-                # site URL (tenant_info) when none is configured (and mints
-                # the access token for oauth-mode SA connections).
-                try:
-                    jira_connection = await complete_jira_connection(jira_connection)
-                except JiraOAuthMintError as exc:
-                    logger.warning("Chat credentials: %s; Jira tools unavailable", exc)
-                    jira_connection = _JIRA_CHAT_SELECTION_FAILED
-            if jira_connection.mode != "none" and not jira_connection.api_base:
-                logger.warning(
-                    "Chat credentials: could not resolve the selected Jira "
-                    "method's API base; Jira tools unavailable"
-                )
-                jira_connection = _JIRA_CHAT_SELECTION_FAILED
-
-    return (
-        jira_email,
-        jira_token,
-        jira_connection,
-        github_token,
-        github_repo,
-    )
-
-
-# -- Chat endpoints --
+    return await _chat_runtime.resolve_chat_credentials(decrypted_params, username)
 
 
 def _chat_session_version(job_id: str, username: str, session_id: str | None) -> str:
-    """Opaque, scoped version for conditional chat clears; never expose session IDs."""
-    payload = json.dumps([job_id, username, session_id], separators=(",", ":"))
-    return hmac.new(
-        get_hmac_secret().encode(), payload.encode(), hashlib.sha256
-    ).hexdigest()
+    return _chat_runtime.chat_session_version(job_id, username, session_id)
 
 
 async def _current_chat_session_version(job_id: str, username: str) -> str:
-    active = await storage.get_latest_chat_session(job_id, username)
-    return _chat_session_version(
-        job_id, username, active["session_id"] if active else None
-    )
+    return await _chat_runtime.current_chat_session_version(job_id, username)
 
 
 async def _require_chat_clear_version(
     job_id: str, username: str, request: Request
 ) -> None:
-    """Call while holding the per-user chat lock shared with Start."""
-    supplied = request.headers.get("if-match", "")
-    current = await _current_chat_session_version(job_id, username)
-    if not supplied or not hmac.compare_digest(supplied, current):
-        logger.info("Chat clear conflict for job %s, user %s", job_id, username)
-        raise HTTPException(
-            status_code=409,
-            detail="Chat session changed; refresh history before clearing",
-        )
+    await _chat_runtime.require_chat_clear_version(
+        job_id, username, request.headers.get("if-match", "")
+    )
 
 
 async def _read_chat_history_payload(
     job_id: str, username: str, *, limit: int, offset: int
 ) -> dict[str, Any]:
-    """Read chat history from one SQLite WAL snapshot without blocking on chat locks.
+    return await _chat_runtime.read_chat_history_payload(
+        job_id, username, limit=limit, offset=offset
+    )
 
-    Active turns and workspace preparations hold ``_hold_chat_lock`` across
-    multi-minute AI calls and git clones. Acquiring that lock here blocked
-    ``GET /api/chat/{job_id}`` and ``GET /api/admin/chat`` until reverse proxies
-    returned 504 Gateway Time-out. ``get_chat_history_snapshot`` pins a single
-    WAL read transaction so messages, total, active_session, and version stay
-    consistent while reads return immediately.
-    """
-    messages, total, session = await storage.get_chat_history_snapshot(
-        job_id, limit=limit, offset=offset, username=username
+
+def _schedule_chat_index(
+    workspace: Path,
+    repos: dict[str, Path] | None = None,
+    job_id: str = "",
+    deadline: float | None = None,
+) -> None:
+    _chat_runtime.schedule_chat_index(
+        workspace, repos=repos, job_id=job_id, deadline=deadline
     )
-    # Filter out hidden init messages (empty content + completed status, used for session_id storage)
-    # Keep pending messages even if empty (they show "Thinking..." in the UI)
-    messages = [
-        {k: v for k, v in m.items() if k != "session_id"}
-        for m in messages
-        if m.get("content") or m.get("status") in ("pending", "failed")
-    ]
-    active = await _available_chat_session(job_id, username, session=session)
-    version = _chat_session_version(
-        job_id, username, session["session_id"] if session else None
+
+
+def _chat_workspace_unknown_message(job_id: str, username: str) -> str:
+    return _chat_runtime.chat_workspace_unknown_message(job_id, username)
+
+
+async def _enter_chat_workspace(job_id: str, username: str, what: str) -> Path | None:
+    return await _chat_runtime.enter_chat_workspace(job_id, username, what)
+
+
+async def _init_chat_under_barrier(
+    job_id: str,
+    username: str,
+    body: ChatInitRequest,
+    *,
+    handshake: ChatInitHandshake | None = None,
+) -> dict[str, Any]:
+    return await _chat_runtime.init_job_chat_under_barrier(
+        job_id, username, body, handshake=handshake
     )
-    return {
-        "messages": messages,
-        "total": total,
-        "active_session": active,
-        "active_session_version": version,
-    }
+
+
+async def _run_chat_preparation(
+    job_id: str,
+    username: str,
+    body: ChatInitRequest,
+    handshake: ChatInitHandshake,
+) -> None:
+    await _chat_runtime.run_chat_preparation(job_id, username, body, handshake)
+
+
+def _refuse_while_preparing(job_id: str, username: str) -> None:
+    _chat_runtime.refuse_while_preparing(job_id, username)
+
+
+async def _abort_chat_turn(job_id: str, username: str, *, admin: bool = False) -> int:
+    return await _chat_runtime.abort_chat_turn(job_id, username, admin=admin)
+
+
+def _get_chat_lock(job_id: str) -> asyncio.Lock:
+    return _chat_runtime.get_chat_lock(job_id)
+
+
+def _hold_chat_lock(key: str) -> contextlib.AbstractAsyncContextManager[asyncio.Lock]:
+    return _chat_runtime.hold_chat_lock(key)
+
+
+def _get_chat_job_barrier(job_id: str) -> asyncio.Lock:
+    return _chat_runtime.get_chat_job_barrier(job_id)
+
+
+def _discard_idle_chat_job_barrier(job_id: str) -> None:
+    _chat_runtime.discard_idle_chat_job_barrier(job_id)
+
+
+def _raise_if_chat_job_deleted(job_id: str) -> None:
+    _chat_runtime.raise_if_chat_job_deleted(job_id)
+
+
+def _track_chat_job_task(job_id: str) -> contextlib.AbstractAsyncContextManager[None]:
+    return _chat_runtime.track_chat_job_task(job_id)
+
+
+async def _cancel_tracked_chat_job_tasks(job_id: str) -> None:
+    await _chat_runtime.cancel_tracked_chat_job_tasks(job_id)
+
+
+async def _fail_chat_assistant_placeholder(
+    assistant_msg_id: int,
+    job_id: str,
+    username: str,
+    content: str,
+) -> None:
+    await _chat_runtime.fail_chat_assistant_placeholder(
+        assistant_msg_id, job_id, username, content
+    )
+
+
+async def _store_chat_turn_warning(
+    job_id: str, username: str, warnings: Sequence[str]
+) -> None:
+    await _chat_runtime.store_chat_turn_warning(job_id, username, warnings)
+
+
+async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> bool:
+    return await _chat_runtime.cleanup_deleted_job_chat_workspaces(job_id)
+
+
+def _get_chat_abort_signal(key: str) -> asyncio.Event:
+    return _chat_runtime.get_chat_abort_signal(key)
+
+
+def _cleanup_chat_state(key: str) -> None:
+    _chat_runtime.cleanup_chat_state(key)
+
+
+async def _normalize_and_validate_ai_params(
+    ai_provider: str | None,
+    ai_model: str | None,
+    *,
+    username: str,
+) -> tuple[str | None, str | None]:
+    return await _chat_runtime.normalize_and_validate_ai_params(
+        ai_provider, ai_model, username=username
+    )
+
+
+def _chat_sse_response(
+    request: Request,
+    username: str,
+    job_id: str,
+    *,
+    auth_check: Callable[[], Awaitable[bool]] | None = None,
+) -> StreamingResponse:
+    """Thin SSE framing adapter over ``ChatRuntime.subscribe_chat_stream``."""
+
+    async def event_generator() -> AsyncIterator[str]:
+        async with _chat_runtime.subscribe_chat_stream(
+            job_id, username
+        ) as subscription:
+            async for chunk in _queue_sse_events(
+                request,
+                subscription,
+                _render_chat_frame,
+                gap_event="chat-changed",
+                auth_check=auth_check,
+            ):
+                yield chunk
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+async def _process_chat_message(
+    *,
+    job_id: str,
+    user_msg_id: int,
+    assistant_msg_id: int,
+    message: str,
+    ai_provider_override: str | None,
+    ai_model_override: str | None,
+    username: str,
+    is_admin: bool = False,
+    credential_source: str | None = None,
+) -> None:
+    """Background task delegate for job chat turns."""
+    await _chat_runtime.process_turn(
+        _job_chat_adapter(job_id),
+        user_msg_id=user_msg_id,
+        assistant_msg_id=assistant_msg_id,
+        message=message,
+        ai_provider_override=ai_provider_override,
+        ai_model_override=ai_model_override,
+        username=username,
+        is_admin=is_admin,
+        credential_source=credential_source,
+    )
 
 
 @app.get("/api/chat/{job_id}", operation_id="getChatHistory")
@@ -26359,618 +26108,18 @@ async def get_chat_history(
 
     username = getattr(request.state, "username", "")
     preparing = _chat_prep_phases.get(f"{job_id}:{username}")
-    payload = await _read_chat_history_payload(
+    payload = await _chat_runtime.read_chat_history_payload(
         job_id, username, limit=limit, offset=offset
     )
     payload["preparing"] = preparing
     return strip_sensitive_from_response(payload)
 
 
-def _schedule_chat_index(
-    workspace: Path,
-    repos: dict[str, Path] | None = None,
-    job_id: str = "",
-    deadline: float | None = None,
-) -> None:
-    """Start a chat's graph build in the background and return at once.
-
-    A chat turn is not a place to wait for a graph: twelve clones were indexed
-    before the first answer, which took 132 s against 5 s for the model call
-    that followed, and every message queued behind the build's workspace lock.
-    The build goes through ``session_tools.schedule_workspace_index``, the one
-    guarded entry point, so a later session build joins it instead of repeating
-    the work.
-    """
-    from rootcoz.engine.session_tools import schedule_workspace_index
-
-    schedule_workspace_index(workspace, job_id=job_id, repos=repos, deadline=deadline)
-
-
-def _chat_workspace_unknown_message(job_id: str, username: str) -> str:
-    """What to tell a user whose chat workspace could not be established.
-
-    ``PathStateUnknown`` means a leftover workspace is still owned by a live
-    graph build, or an interrupted delete left paths in it, so starting a chat
-    into it would corrupt the tree. The user cannot clear it, so the text names
-    the path and says who has to remove it.
-    """
-    from rootcoz.engine.chat import get_chat_workspace
-
-    return (
-        "The chat workspace could not be prepared: "
-        f"{get_chat_workspace(job_id, username)} is still in use by a running "
-        "workspace build, or a cleanup could not delete all of it. Wait for the "
-        "build to finish and try again. If it keeps failing, an administrator has "
-        "to remove that directory."
-    )
-
-
-async def _enter_chat_workspace(job_id: str, username: str, what: str) -> Path | None:
-    """Create the chat workspace under its path lock, or ``None`` if it cannot be.
-
-    One lock scope and one ``PathStateUnknown`` translation for every chat route:
-    the lock has to cover the create/reuse decision, and the exception means a
-    live builder owns the tree or an interrupted delete left paths in it, so
-    nothing may build on it. Only the vehicle that tells the user differs, so
-    the caller picks it; ``what`` names the route in the warning.
-    """
-    from rootcoz.engine.chat import chat_workspace_lock, ensure_chat_workspace
-
-    try:
-        async with chat_workspace_lock(job_id, username):
-            return ensure_chat_workspace(job_id, username=username)
-    except PathStateUnknown:
-        logger.warning(
-            "%s blocked by an unestablished workspace for job %s, user %s",
-            what,
-            job_id,
-            username,
-        )
-        return None
-
-
-async def _init_chat_under_barrier(
-    job_id: str,
-    username: str,
-    body: ChatInitRequest,
-    *,
-    handshake: _ChatInitHandshake | None = None,
-) -> dict[str, Any]:
-    """Run the chat preflight inline and the preparation under the chat lock.
-
-    The preflight is the only part that can answer a 4xx, so it stays on the
-    caller's path and signals ``handshake`` the moment the slow work is about to
-    start. Everything after that — clone, index, CI data, session — runs under
-    the per-user chat lock, which is what keeps a turn and a preparation from
-    interleaving over one workspace. It takes no job barrier: a turn holds that
-    barrier across its own clone phase, so waiting for it here would put the
-    router timeout back on the Start request.
-    """
-    from rootcoz.engine.chat import (
-        build_chat_custom_tools,
-        build_welcome_message,
-        clone_chat_repos,
-        init_chat_session,
-    )
-    from rootcoz.engine.graft_http import cloned_graph_roots
-    from rootcoz.sources.chat_workspace import setup_ci_build_workspace
-
-    _raise_if_chat_job_deleted(job_id)
-    stored = await get_result(job_id, strip_sensitive=False)
-    if not stored or not stored.get("result"):
-        raise HTTPException(status_code=404, detail="Job not found")
-    result_data = stored["result"]
-    params = result_data.get("request_params", {})
-    ai_provider, ai_model = await _validate_chat_selection(body, username)
-    from rootcoz.ai_client import _selected_credential_source
-
-    credential_source = _selected_credential_source.get()
-    existing_session_id, _ = await _check_chat_session_choice(
-        job_id,
-        username,
-        ai_provider,
-        ai_model,
-        credential_source,
-        allow_empty=True,
-    )
-
-    # The four reads above write nothing, so they need no barrier: deletion sets
-    # ``_chat_jobs_deleting`` before it cancels, and the checks around them give
-    # the same ordering guarantee.
-    _raise_if_chat_job_deleted(job_id)
-    workspace = await _enter_chat_workspace(job_id, username, "Chat init")
-    if workspace is None:
-        raise HTTPException(
-            status_code=409,
-            detail=_chat_workspace_unknown_message(job_id, username),
-        )
-
-    decrypted_params: dict[str, Any] = {}
-    try:
-        decrypted_params = decrypt_sensitive_fields(dict(params))
-    except Exception:
-        logger.warning("Failed to decrypt request_params for chat init", exc_info=True)
-
-    _settings = get_settings()
-
-    (
-        jira_email,
-        jira_token,
-        jira_connection,
-        github_token,
-        github_repo,
-    ) = await _resolve_chat_credentials(decrypted_params, username)
-
-    # The preflight is over: the caller can answer, everything below is slow.
-    if handshake is not None:
-        handshake.started = True
-        handshake.settled.set()
-
-    async with _hold_chat_lock(f"{job_id}:{username}"):
-        session_id: str | None = existing_session_id
-        _raise_if_chat_job_deleted(job_id)
-        failed_repos: list[str] = []
-        await clone_chat_repos(
-            workspace,
-            decrypted_params,
-            user_repo_token=github_token,
-            on_repo=lambda name: set_chat_prep_phase(job_id, username, "cloning", name),
-            failed=failed_repos,
-        )
-        repos_available = bool(await asyncio.to_thread(cloned_graph_roots, workspace))
-        _raise_if_chat_job_deleted(job_id)
-        set_chat_prep_phase(job_id, username, "fetching_build_data")
-        ci_build_data_available = await setup_ci_build_workspace(
-            workspace,
-            _build_ci_workspace_params(decrypted_params, result_data),
-            github_token=github_token,
-            settings=_settings,
-        )
-        _raise_if_chat_job_deleted(job_id)
-        if not await _available_chat_session(job_id, username):
-            custom_tools: list[dict[str, Any]] = []
-            issue_repos = _job_issue_repo_slugs(decrypted_params)[1]
-            tracker_targets, tracker_unavailable = _chat_tracker_state(
-                _settings,
-                await storage.get_user_tokens(username),
-                # This run's own repos are a destination too: a deployment with no
-                # TESTS_REPO_URL can still file into the job's test repo.
-                github_repo_available=bool(issue_repos),
-                has_profile=await _account_has_profile(username),
-                job_chat=True,
-            )
-            auth_header = await _create_ai_auth_header(
-                username, refuse_storage_fault=True
-            )
-            if auth_header:
-                server_url = _build_internal_server_url()
-                custom_tools = build_chat_custom_tools(
-                    server_url=server_url,
-                    auth_token=auth_header.removeprefix("Bearer ").strip(),
-                    job_id=job_id,
-                    jira_cloud_url=_settings.jira_cloud_url,
-                    jira_server_url=_settings.jira_server_url,
-                    jira_email=jira_email,
-                    jira_token=jira_token,
-                    github_token=github_token,
-                    github_repo=github_repo,
-                    jira_connection=jira_connection,
-                    tracker_targets=tracker_targets,
-                    issue_repos=tuple(sorted(issue_repos)),
-                )
-            else:
-                logger.warning(
-                    "Chat init: internal tools token unavailable for %s — "
-                    "the chat starts without internal tools",
-                    username,
-                )
-
-            _raise_if_chat_job_deleted(job_id)
-            from rootcoz.engine.session_tools import build_session_tools
-
-            session = await build_session_tools(
-                builtin=list(CHAT_BUILTIN_TOOLS),
-                custom_base=custom_tools,
-                workspace=workspace,
-                job_id=job_id,
-                # The graph is built after this preparation, not before it: the
-                # session starts with whatever graphs exist and the next turn
-                # gets the rest once the background build lands.
-                wait_for_index=False,
-            )
-            custom_tools = session.custom
-            credential_generation = (
-                None
-                if credential_source == "server"
-                else await storage.get_user_ai_credential_generation(
-                    username, ai_provider
-                )
-            )
-            from rootcoz.ai_client import chat_session_source
-
-            token = ai_username.set(username)
-            source_token = chat_session_source.set(credential_source)
-            set_chat_prep_phase(job_id, username, "starting_session")
-            try:
-                session_id = await init_chat_session(
-                    job_id=job_id,
-                    job_name=result_data.get("job_name", "unknown"),
-                    build_number=resolve_display_build_id(result_data),
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    repo_path=workspace,
-                    custom_tools=custom_tools,
-                    repos_available=repos_available,
-                    ci_build_data_available=ci_build_data_available,
-                    issue_repos=tuple(sorted(issue_repos)),
-                    tracker_unavailable=tracker_unavailable,
-                )
-            finally:
-                chat_session_source.reset(source_token)
-                ai_username.reset(token)
-            if job_id in _chat_jobs_deleting and session_id:
-                await _discard_unsaved_ai_session(session_id, username, ai_provider)
-            _raise_if_chat_job_deleted(job_id)
-            if session_id:
-                _remember_chat_session_tools(
-                    session_id, _chat_tool_fingerprint(tracker_targets, custom_tools)
-                )
-                saved = await storage.add_chat_message(
-                    job_id=job_id,
-                    role="assistant",
-                    content="",
-                    username=username,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    session_id=session_id,
-                    status="completed",
-                    credential_generation=credential_generation,
-                )
-                if not saved:
-                    await _discard_unsaved_ai_session(session_id, username, ai_provider)
-                    session_id = None
-            welcome_text = build_welcome_message(
-                job_name=result_data.get("job_name", "unknown"),
-                build_number=resolve_display_build_id(result_data),
-                repos_available=repos_available,
-                ci_build_data_available=ci_build_data_available,
-                jira_available=bool(jira_connection),
-                github_available=bool(github_token and github_repo),
-            )
-            if session_id:
-                # The previous session is gone, so its welcome is stale chrome.
-                # A dead session's welcome would otherwise accumulate in history on
-                # every credential or grant change. No session_id here: the init
-                # placeholder above is the session marker, and a welcome carrying one
-                # would take over as the latest Start.
-                await storage.delete_chat_welcome_messages(job_id, username)
-                await storage.add_chat_message(
-                    job_id=job_id,
-                    role="assistant",
-                    content=welcome_text,
-                    username=username,
-                    status="completed",
-                )
-
-    if repos_available:
-        # Only now, with the session created and its tools installed: the build
-        # takes the workspace lock for its whole run, so starting it earlier put
-        # the preparation — and the message waiting on it — back behind it.
-        _schedule_chat_index(
-            workspace,
-            job_id=job_id,
-            deadline=_time.monotonic() + CHAT_INDEX_DEADLINE_SECONDS,
-        )
-
-    if session_id and failed_repos:
-        # A chat starts without a repository it could not clone, so the
-        # transcript is what says which one is missing — for a new session and a
-        # re-used one alike.
-        await storage.add_chat_message(
-            job_id=job_id,
-            role="system",
-            content=(
-                "Not in this workspace: "
-                + ", ".join(sorted(failed_repos))
-                + ". The chat still works; start a new session once it can be cloned."
-            ),
-            username=username,
-            status="completed",
-        )
-
-    logger.info(
-        "Chat init for job %s: workspace=%s, repos=%s, session=%s",
-        job_id,
-        workspace,
-        repos_available,
-        session_id,
-    )
-    return {"session_id": session_id or ""}
-
-
-_TRANSIENT_CHAT_START_DETAIL = "The AI service is rate limited or timed out. Try again."
-
-
-def _chat_start_sidecar_error(exc: httpx.HTTPStatusError) -> HTTPException:
-    """Shape a transient session-creation failure for both chat-start routes.
-
-    A 408/425/429 never becomes a refusal sentence, because that marker is the
-    non-retryable signal the analysis engine stops on. Chat start has no retry
-    loop of its own, so it is the caller that has to name one: the user is told
-    to try again instead of receiving a 500. Any other status is a real error
-    and keeps the path it had before.
-    """
-    from rootcoz.ai_client import _TRANSIENT_SESSION_STATUSES
-
-    if exc.response.status_code not in _TRANSIENT_SESSION_STATUSES:
-        raise exc
-    logger.warning(
-        "Chat start: sidecar answered a transient status %s",
-        exc.response.status_code,
-    )
-    return HTTPException(status_code=503, detail=_TRANSIENT_CHAT_START_DETAIL)
-
-
-@dataclass
-class _ChatInitHandshake:
-    """What a Start request waits on: the slow phase, or the end of the task."""
-
-    settled: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
-    error: BaseException | None = None
-    #: The preflight finished and the slow work began — the one state in which
-    #: the route answers ``202``. Without it, "settled without a signal" and
-    #: "signalled and finished" would be the same observation.
-    started: bool = False
-
-
-@dataclass
-class _ChatPreparation:
-    """One live preparation per job+user, as the refusals and dedupe see it."""
-
-    pair: tuple[str, str]
-    task: asyncio.Task[Any]
-
-
-#: Live preparations, keyed ``<job_id>:<username>``. Written by the route before
-#: the task exists, so there is no window in which a preparation runs invisible.
-_chat_prep_tasks: dict[str, _ChatPreparation] = {}
-
-_CHAT_PAIR_CONFLICT_DETAIL = (
-    "Clear chat and Start a new session to change model or credentials"
-)
-_CHAT_PREP_FAILED_DETAIL = "The chat workspace could not be prepared. Start it again."
-_CHAT_PREP_CANCELLED_DETAIL = (
-    "Chat preparation was interrupted before it started. Try again."
-)
-_CHAT_PREPARING_DETAIL = "Chat is being prepared ({phase}). Wait for it to be ready."
-
-
-def _live_chat_prep_phase(key: str) -> dict[str, Any]:
-    """The phase a client may act on; a live preparation always has one."""
-    return _chat_prep_phases.get(key) or {"phase": "preparing", "detail": ""}
-
-
-def _end_chat_preparation(
-    job_id: str, username: str, task: asyncio.Task[Any] | None
-) -> None:
-    """Drop a finished preparation's registry entry and phase — only its own.
-
-    Both the coroutine's ``finally`` and the task's done-callback call this, and
-    it acts only when the stored entry is *this* task. Without the guard, a late
-    callback for preparation A would drop the entry of a runnable preparation B
-    for the same key: B then has no dedupe, Clear deletes a workspace a live
-    clone is writing, and the phase disappears while B still prepares.
-    """
-    key = f"{job_id}:{username}"
-    entry = _chat_prep_tasks.get(key)
-    if entry is None or entry.task is not task:
-        return
-    _chat_prep_tasks.pop(key, None)
-    clear_chat_prep_phase(job_id, username)
-
-
-def _settle_chat_preparation(
-    job_id: str, username: str, handshake: _ChatInitHandshake, task: asyncio.Task[Any]
-) -> None:
-    """Settle every exit a preparation can take, then end it.
-
-    Settlement is driven by task state, not by coroutine unwind: a task cancelled
-    before its first step never enters the body, so its ``finally`` never runs and
-    this callback is the only thing that can answer the route and clear the phase.
-    ``task.exception()`` also *raises* for a cancelled task, hence the guard.
-    """
-    if not handshake.settled.is_set() and not task.cancelled():
-        handshake.error = task.exception()
-    handshake.settled.set()
-    _end_chat_preparation(job_id, username, task)
-
-
-def _redacted_error(exc: BaseException) -> str:
-    """Class, errno and a credential-free message — never a raw traceback."""
-    errno_value = getattr(exc, "errno", None)
-    suffix = f" (errno {errno_value})" if errno_value else ""
-    # Free text with possibly several URLs, so the all-occurrence helper (not
-    # ``mask_url_value``), pre-stripped like every other masked site.
-    # shortcut: the free-text regex is lowercase-scheme-only, upgrade if git or
-    # httpx ever echo an uppercase scheme.
-    return (
-        f"{type(exc).__name__}{suffix}: "
-        f"{mask_url_credentials_in_text(strip_nonprintable(str(exc)))}"
-    )
-
-
-async def _chat_prep_failure_row(job_id: str, username: str, sentence: str) -> None:
-    """One failed assistant row carrying a constant, redacted sentence.
-
-    Best-effort, like ``_fail_chat_assistant_placeholder``: the caller's job is to
-    tell the browser, and a store that refuses the row must not also silence the
-    push — that is the failure this path exists to report.
-    """
-    try:
-        await storage.add_chat_message(
-            job_id=job_id,
-            role="assistant",
-            content=sentence,
-            username=username,
-            status="failed",
-        )
-    except Exception:
-        logger.exception(
-            "Chat preparation could not record its failed row for job %s, user %s",
-            job_id,
-            username,
-        )
-
-
-async def _run_chat_preparation(
-    job_id: str,
-    username: str,
-    body: ChatInitRequest,
-    handshake: _ChatInitHandshake,
-) -> None:
-    """Prepare one chat workspace off the request, and report how it ended.
-
-    ``_track_chat_job_task`` opens *inside* this coroutine on purpose: it registers
-    ``asyncio.current_task()``, so wrapping the spawn in the route would register
-    the route's own task and leave the preparation invisible to job deletion.
-    """
-    notify = False
-    async with _track_chat_job_task(job_id):
-        try:
-            try:
-                prepared = await _init_chat_under_barrier(
-                    job_id, username, body, handshake=handshake
-                )
-                session_id = prepared["session_id"]
-            except asyncio.CancelledError:
-                # #458: the drain needs the cancellation to keep propagating, and
-                # an operator needs to know which preparation it interrupted.
-                logger.info(
-                    "Chat preparation cancelled for job %s, user %s (phase=%s)",
-                    job_id,
-                    username,
-                    _chat_prep_phases.get(f"{job_id}:{username}", {}).get(
-                        "phase", "none"
-                    ),
-                )
-                raise
-            except HTTPException as exc:
-                if not handshake.settled.is_set():
-                    # A precondition the caller can fix: the route answers it, and
-                    # the job must not gain a chat row it never asked for. Logged
-                    # because when nothing reads the handshake this exit is the
-                    # preparation's whole story — it used to leave no trace at all.
-                    logger.info(
-                        "Chat preparation refused before it started for job %s, "
-                        "user %s: %s",
-                        job_id,
-                        username,
-                        exc.status_code,
-                    )
-                    handshake.error = exc
-                    handshake.settled.set()
-                elif job_id in _chat_jobs_deleting:
-                    # Deleted mid-preparation: never resurrect its transcript.
-                    logger.info(
-                        "Chat preparation stopped for deleted job %s, user %s",
-                        job_id,
-                        username,
-                    )
-                else:
-                    logger.warning(
-                        "Chat preparation failed for job %s, user %s: %s",
-                        job_id,
-                        username,
-                        exc.status_code,
-                    )
-                    await _chat_prep_failure_row(
-                        job_id, username, _CHAT_PREP_FAILED_DETAIL
-                    )
-                    notify = True
-            except SessionCreationRefused as exc:
-                # Written for the user: its sentence passes through unchanged, and
-                # logged because a failed row write would otherwise lose the cause.
-                logger.warning(
-                    "Chat preparation refused for job %s, user %s: %s",
-                    job_id,
-                    username,
-                    _redacted_error(exc),
-                )
-                await _chat_prep_failure_row(job_id, username, str(exc))
-                notify = True
-            except httpx.HTTPStatusError as exc:
-                # A transient sidecar status is a retry, and the session is what
-                # the agent needs; it lands in the transcript, not as a 5xx.
-                await _chat_prep_failure_row(
-                    job_id, username, _chat_start_sidecar_error(exc).detail
-                )
-                notify = True
-            except Exception as exc:  # noqa: BLE001 - report, never escape silently
-                if not handshake.settled.is_set():
-                    handshake.error = exc
-                    handshake.settled.set()
-                else:
-                    # Never ``str(exc)``: it can carry a token-bearing remote.
-                    logger.warning(
-                        "Chat preparation failed for job %s, user %s: %s",
-                        job_id,
-                        username,
-                        _redacted_error(exc),
-                    )
-                    await _chat_prep_failure_row(
-                        job_id, username, _CHAT_PREP_FAILED_DETAIL
-                    )
-                    notify = True
-            else:
-                if not session_id:
-                    # No exception and no session: "nothing to notify" is how a
-                    # Start that produced nothing looked successful.
-                    logger.warning(
-                        "Chat preparation for job %s, user %s produced no session",
-                        job_id,
-                        username,
-                    )
-                    await _chat_prep_failure_row(
-                        job_id, username, _CHAT_PREP_FAILED_DETAIL
-                    )
-                # A session — newly created or re-used — is what enables the
-                # composer, and the push is the only thing that tells the browser.
-                notify = True
-        finally:
-            _end_chat_preparation(job_id, username, asyncio.current_task())
-    if notify:
-        notify_chat_changed(job_id, username=username)
-
-
-def _refuse_while_preparing(job_id: str, username: str) -> None:
-    """Answer ``425`` while a preparation owns this job's workspace.
-
-    One owner for the check, the sentence and its order: callers run it after
-    authorization and the job-existence ``404`` and before they take the chat
-    lock, so a denied caller never sees an availability answer naming a
-    repository, and a send never waits behind a clone.
-    """
-    key = f"{job_id}:{username}"
-    if _chat_prep_tasks.get(key) is None:
-        return
-    phase = _live_chat_prep_phase(key)
-    label = phase["phase"] + (f" {phase['detail']}" if phase.get("detail") else "")
-    raise HTTPException(
-        status_code=425, detail=_CHAT_PREPARING_DETAIL.format(phase=label)
-    )
-
-
 @app.post("/api/chat/{job_id}/init", status_code=202, operation_id="initChat")
 async def init_chat(
     job_id: str, request: Request, body: ChatInitRequest | None = None
 ) -> dict[str, Any]:
-    """Start preparing a chat workspace; the workspace work runs in the background.
-
-    The request waits only for the preflight — the checks that can answer a
-    ``4xx`` — so a workspace that legitimately takes minutes to clone is no longer
-    a router timeout. Progress is reported by ``GET /api/chat/{job_id}``, and the
-    browser is pushed when the preparation ends.
-    """
+    """Start preparing a chat workspace; the workspace work runs in the background."""
     _check_allow_list(request)
     _require_reviewer(request)
     if body is None:
@@ -26978,116 +26127,16 @@ async def init_chat(
             status_code=422, detail="Select provider, model and credential source"
         )
     username = getattr(request.state, "username", "")
-    key = f"{job_id}:{username}"
-    from rootcoz.ai_client import public_provider_name
-
-    pair = (public_provider_name(body.ai_provider), body.ai_model)
-    live = _chat_prep_tasks.get(key)
-    if live is not None and not live.task.done():
-        if live.pair != pair:
-            raise HTTPException(status_code=409, detail=_CHAT_PAIR_CONFLICT_DETAIL)
-        # Same request, already running: idempotent, and it starts nothing.
-        return {"ready": False, "preparing": _live_chat_prep_phase(key)}
-
-    set_chat_prep_phase(job_id, username, "preparing")
-    # The body carries the phase this route seeded, not whatever the preparation
-    # has reached by the time it answers: the phase is replaced, never mutated, so
-    # this is a snapshot and the assertion is not a scheduling race.
-    seeded = _live_chat_prep_phase(key)
-    handshake = _ChatInitHandshake()
-    task = _spawn_background(_run_chat_preparation(job_id, username, body, handshake))
-    _chat_prep_tasks[key] = _ChatPreparation(pair=pair, task=task)
-    task.add_done_callback(
-        partial(_settle_chat_preparation, job_id, username, handshake)
-    )
-
-    await handshake.settled.wait()
-    if handshake.error is not None:
-        if isinstance(handshake.error, HTTPException):
-            raise handshake.error
-        # Today's 500, with the cause logged and redacted: a disk-full Start must
-        # not be reported as a retryable cancellation with the cause consumed.
-        logger.warning(
-            "Chat init failed before preparation for job %s, user %s: %s",
-            job_id,
-            username,
-            _redacted_error(handshake.error),
-        )
-        raise HTTPException(status_code=500, detail=_CHAT_PREP_FAILED_DETAIL)
-    if not handshake.started:
-        # It ended without ever reaching its slow phase: cancelled under the
-        # preflight. A deleted job answers 404, not a retry that must fail.
-        if job_id in _chat_jobs_deleting:
-            raise HTTPException(status_code=404, detail="Job not found")
-        raise HTTPException(status_code=503, detail=_CHAT_PREP_CANCELLED_DETAIL)
-    return {"ready": False, "preparing": seeded}
+    return await _chat_runtime.start_job_chat_init(job_id, username, body)
 
 
 @app.post("/api/chat/{job_id}/close", operation_id="closeChat")
 async def close_chat(job_id: str, request: Request) -> dict[str, Any]:
-    """Signal that a user left the chat page.
-
-    Does NOT clean up the workspace — other users/tabs may still be active.
-    Workspace cleanup only happens on DELETE /api/chat/{job_id} (clear history).
-    """
+    """Signal that a user left the chat page."""
     _check_allow_list(request)
     _require_reviewer(request)
     logger.info("Chat: user left chat page for job %s", job_id)
     return {"status": "ok"}
-
-
-async def _abort_chat_turn(job_id: str, username: str, *, admin: bool = False) -> int:
-    """Abort one user's live turn — the whole Stop body, for both chats.
-
-    The session is resolved from `get_latest_chat_session`, the same source the
-    turn itself uses: the pending placeholder is inserted with an empty
-    `session_id`, and the old ten-row scan misses once a few failed or aborted
-    turns fill the window — which left the sidecar turn running, billing without a
-    usage row, and answering the next message `409 "Session … is busy"`.
-    """
-    _get_chat_abort_signal(f"{job_id}:{username}").set()
-
-    pending = await storage.get_pending_chat_messages(job_id, username=username)
-    for msg in pending:
-        await _fail_chat_assistant_placeholder(
-            msg["id"], job_id, username, "Aborted by user."
-        )
-
-    target_session_id = None
-    for msg in pending:
-        if msg.get("session_id"):
-            target_session_id = msg["session_id"]
-            break
-    if not target_session_id:
-        active = await storage.get_latest_chat_session(job_id, username)
-        if active:
-            target_session_id = active["session_id"]
-    if not target_session_id:
-        # Fallback: the most recent session-bearing assistant row.
-        total = await storage.count_chat_messages(job_id, username=username)
-        if total > 0:
-            tail_offset = max(total - 10, 0)
-            recent = await storage.get_chat_messages(
-                job_id, username=username, limit=10, offset=tail_offset
-            )
-            for msg in reversed(recent):
-                if msg.get("role") == "assistant" and msg.get("session_id"):
-                    target_session_id = msg["session_id"]
-                    break
-
-    if target_session_id:
-        try:
-            from pi_sidecar_client import get_sidecar_client
-
-            client = get_sidecar_client()
-            await client.abort(target_session_id)
-            if admin:
-                logger.debug("Admin chat: aborted sidecar session")
-            else:
-                logger.debug("Chat: aborted sidecar session for job %s", job_id)
-        except Exception:
-            logger.debug("Chat: sidecar abort best-effort failed", exc_info=True)
-    return len(pending)
 
 
 @app.post("/api/chat/{job_id}/abort", operation_id="abortChat")
@@ -27097,338 +26146,7 @@ async def abort_chat(job_id: str, request: Request) -> dict[str, Any]:
     _require_reviewer(request)
     username = request.state.username
     logger.info("Chat: user %s aborted chat for job %s", username, job_id)
-    return {"aborted": await _abort_chat_turn(job_id, username)}
-
-
-# Per-job chat processing locks — ensures sequential message processing
-_chat_locks: dict[str, asyncio.Lock] = {}
-_chat_lock_refs: dict[str, int] = {}
-# Per-job lifecycle barrier: init, message processing, and deletion share this
-# so a late init cannot create MCP state after job deletion has begun.
-_chat_job_barriers: dict[str, asyncio.Lock] = {}
-_chat_jobs_deleting: set[str] = set()
-_chat_job_tasks: dict[str, set[asyncio.Task[Any]]] = {}
-
-ADMIN_CHAT_JOB_ID = "__admin_chat__"
-
-
-def _get_chat_lock(job_id: str) -> asyncio.Lock:
-    """Get or create a per-job chat processing lock."""
-    if job_id not in _chat_locks:
-        _chat_locks[job_id] = asyncio.Lock()
-        _chat_lock_refs[job_id] = 0
-    return _chat_locks[job_id]
-
-
-@asynccontextmanager
-async def _hold_chat_lock(key: str) -> AsyncIterator[asyncio.Lock]:
-    """Acquire the per-user chat lock without dropping waiters from the registry.
-
-    Callers increment the refcount before ``acquire``, so a later ``_get_chat_lock``
-    cannot replace the lock object while another task is queued on it.
-    """
-    lock = _get_chat_lock(key)
-    _chat_lock_refs[key] = _chat_lock_refs.get(key, 0) + 1
-    try:
-        async with lock:
-            yield lock
-    finally:
-        refs = _chat_lock_refs.get(key, 1) - 1
-        if refs > 0:
-            _chat_lock_refs[key] = refs
-        else:
-            _chat_lock_refs.pop(key, None)
-            stored = _chat_locks.get(key)
-            if stored is lock and not lock.locked():
-                _chat_locks.pop(key, None)
-
-
-def _get_chat_job_barrier(job_id: str) -> asyncio.Lock:
-    """Lock that serializes chat init/messages against job deletion."""
-    if job_id not in _chat_job_barriers:
-        _chat_job_barriers[job_id] = asyncio.Lock()
-    return _chat_job_barriers[job_id]
-
-
-def _discard_idle_chat_job_barrier(job_id: str) -> None:
-    """Drop unused per-job barriers so the registry cannot grow forever."""
-    lock = _chat_job_barriers.get(job_id)
-    if lock is not None and not lock.locked():
-        _chat_job_barriers.pop(job_id, None)
-
-
-def _raise_if_chat_job_deleted(job_id: str) -> None:
-    if job_id in _chat_jobs_deleting:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-
-@asynccontextmanager
-async def _track_chat_job_task(job_id: str) -> AsyncIterator[None]:
-    """Register the current task so job deletion can cancel in-flight chat work."""
-    task = asyncio.current_task()
-    if task is None:
-        yield
-        return
-    _chat_job_tasks.setdefault(job_id, set()).add(task)
-    try:
-        yield
-    finally:
-        remaining = _chat_job_tasks.get(job_id)
-        if remaining is not None:
-            remaining.discard(task)
-            if not remaining:
-                _chat_job_tasks.pop(job_id, None)
-
-
-async def _cancel_tracked_chat_job_tasks(job_id: str) -> None:
-    """Cancel in-flight chat init/message tasks so deletion is not blocked."""
-    current = asyncio.current_task()
-    tasks = [
-        task
-        for task in tuple(_chat_job_tasks.get(job_id, ()))
-        if task is not current and not task.done()
-    ]
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def _fail_chat_assistant_placeholder(
-    assistant_msg_id: int,
-    job_id: str,
-    username: str,
-    content: str,
-) -> None:
-    """Best-effort: mark a pending assistant row failed so it is never left pending."""
-    try:
-        await storage.update_chat_message_content(assistant_msg_id, content)
-        await storage.update_chat_message_status(assistant_msg_id, "failed")
-        notify_chat_changed(job_id, username=username)
-    except Exception:
-        logger.exception(
-            "Failed to update error status for chat msg %d",
-            assistant_msg_id,
-        )
-
-
-async def _store_chat_turn_warning(
-    job_id: str, username: str, warnings: Sequence[str]
-) -> None:
-    """Best-effort: record an accepted-but-incomplete turn as a visible notice.
-
-    The answer is already stored whole; this server-authored ``system`` row renders
-    under it, so a partial reply never reads as a finished one (#569). The notice
-    goes through :func:`_post_server_notice` — there is one writer of ``system``
-    rows — and it names the detail as the provider's own sanitized error, so the
-    row never reads as a server verdict on the answer. The caller announces the
-    change; one ``notify_chat_changed`` per change, not one per writer.
-    """
-    if not warnings:
-        return
-    try:
-        await _post_server_notice(
-            conversation=job_id,
-            username=username,
-            content=(
-                "This reply may be incomplete — the AI provider reported: "
-                + "; ".join(warnings)
-            ),
-        )
-    except Exception:
-        logger.exception("Failed to store the turn warning for %s", job_id)
-
-
-async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> bool:
-    """Remove chat MCP state after a job delete, serialized with in-flight chat.
-
-    Marks the job as deleting first so init/message work that has not yet
-    entered the lifecycle barrier will 404. In-flight init and AI tasks are
-    cancelled (instead of holding the barrier across clone/AI timeouts), then
-    filesystem cleanup runs in a worker thread so contended MCP ``flock`` does
-    not block the event loop. After cleanup the deleting marker and idle
-    barrier are dropped; the job row is already gone so a later init cannot
-    recreate workspace state.
-
-    Returns ``True`` when the workspace was cleared. Today this only logs its own
-    errors; the ``bool`` is what lets results retention report and retry a
-    cleanup it could not finish.
-    """
-    from rootcoz.engine.chat import cleanup_chat_workspace, get_chat_workspace
-
-    _chat_jobs_deleting.add(job_id)
-    try:
-        await _cancel_tracked_chat_job_tasks(job_id)
-        async with _get_chat_job_barrier(job_id):
-            # Marker + per-path lock are inside the helper: this path is
-            # deterministic and reused, so a queued delete must finish before the
-            # next session creates into it, and a partial one must not be reused.
-            outcome = await cleanup_path_off_loop(
-                job_id,
-                get_chat_workspace(job_id),
-                partial(cleanup_chat_workspace, job_id),
-            )
-    except Exception:
-        logger.warning("Failed to cleanup chat workspace for %s", job_id, exc_info=True)
-        return False
-    finally:
-        _chat_jobs_deleting.discard(job_id)
-        _chat_job_tasks.pop(job_id, None)
-        _discard_idle_chat_job_barrier(job_id)
-    return outcome is CleanupOutcome.CLEAN
-
-
-# Per-job:user abort signals — set to cancel in-progress chat processing
-_chat_abort_signals: dict[str, asyncio.Event] = {}
-
-
-def _get_chat_abort_signal(key: str) -> asyncio.Event:
-    """Get or create an abort signal for a job:user chat."""
-    if key not in _chat_abort_signals:
-        _chat_abort_signals[key] = asyncio.Event()
-    return _chat_abort_signals[key]
-
-
-def _cleanup_chat_state(key: str) -> None:
-    """Remove the abort signal for a key to prevent unbounded dict growth.
-
-    Per-user locks stay in ``_chat_locks`` until ``_hold_chat_lock`` refcount
-    hits zero, so waiters keep the same lock object.
-    """
-    _chat_abort_signals.pop(key, None)
-    # The turn is over: nothing is left for a late stream to catch up from, and a
-    # channel this turn claimed is dropped unless a stream is still reading it.
-    _chat_partials.pop(key, None)
-    channel = _chat_deltas.get(key)
-    if channel is not None and not channel.has_listeners:
-        _chat_deltas.pop(key, None)
-
-
-async def _normalize_and_validate_ai_params(
-    ai_provider: str | None,
-    ai_model: str | None,
-    *,
-    username: str,
-) -> tuple[str | None, str | None]:
-    """Normalize and validate AI provider/model from request body.
-
-    Returns (provider, model) with whitespace stripped, provider names
-    lowercased, and blanks as None. Raises HTTPException 422 for invalid
-    providers, or when only one of provider/model is set (avoids pairing UI
-    provider with settings model).
-    """
-    provider_raw = (ai_provider or "").strip()
-    provider = (normalize_provider(provider_raw) or None) if provider_raw else None
-    model = (ai_model or "").strip() or None
-    if (provider and not model) or (model and not provider):
-        raise HTTPException(
-            status_code=422,
-            detail="Both ai_provider and ai_model are required when either is set",
-        )
-    if provider and model:
-        from rootcoz.ai_client import _selected_credential_source
-
-        _selected_credential_source.set("")
-        user_token = ai_username.set(username)
-        try:
-            return await _validate_catalog_pair(provider, model)
-        finally:
-            ai_username.reset(user_token)
-    return provider, model
-
-
-def _resolve_chat_ai_config(
-    *,
-    override_provider: str | None,
-    override_model: str | None,
-    settings_provider: str,
-    settings_model: str,
-    result_data: dict[str, Any] | None = None,
-    request_params: dict[str, Any] | None = None,
-    is_admin: bool = False,
-) -> tuple[str, str]:
-    """Resolve provider/model for job and admin chat background processors.
-
-    Prefer an explicit override pair; otherwise fall back to result /
-    request_params / settings. Raises RuntimeError on partial override or
-    missing final config. Missing-config errors are role-aware.
-    """
-    if override_provider and override_model:
-        return override_provider, override_model
-    if override_provider or override_model:
-        raise RuntimeError(
-            "Both AI provider and model are required. Select both before sending."
-        )
-    result = result_data or {}
-    params = request_params or {}
-    provider = (
-        result.get("ai_provider", "")
-        or params.get("ai_provider", "")
-        or settings_provider
-    )
-    model = result.get("ai_model", "") or params.get("ai_model", "") or settings_model
-    if not provider or not model:
-        if is_admin:
-            raise RuntimeError(
-                "No AI provider/model configured. Select provider and model "
-                "in chat, or set defaults in Server Settings → AI."
-            )
-        raise RuntimeError(
-            "No AI provider/model configured. Select provider and model "
-            "in chat, or contact a server administrator to configure AI settings."
-        )
-    return provider, model
-
-
-def _chat_sse_response(
-    request: Request,
-    username: str,
-    job_id: str,
-    *,
-    auth_check: Callable[[], Awaitable[bool]] | None = None,
-) -> StreamingResponse:
-    """The one chat stream: claimed, subscribed, rendered and released in one place.
-
-    Sending still goes through `_require_reviewer`/`_require_admin`; this only
-    carries frames to a caller that already passed the route's own gate (the gate
-    stays in the handler body, because `StreamingResponse` sends the response
-    start before the first `anext`, so a raise here could never be a 401).
-    """
-    key = _chat_channel_key(job_id, username)
-
-    async def event_generator() -> AsyncIterator[str]:
-        # First statement, and no `await` between the claim and the subscribe:
-        # `_chat_delta_channel` is sync and `subscribe()`'s `__aenter__` runs to its
-        # yield without awaiting, so no sibling stream's `finally` can observe this
-        # channel as listener-less and evict it between the two statements.
-        channel = _chat_delta_channel(job_id, username)
-        try:
-            async with channel.subscribe() as subscription:
-                held = _chat_partials.get(key)
-                if held and held[1]:
-                    # One frame, not the deltas: a reconnect must not double the text.
-                    subscription.queue.put_nowait({"id": held[0], "snapshot": held[1]})
-                async for chunk in _queue_sse_events(
-                    request,
-                    subscription,
-                    _render_chat_frame,
-                    gap_event="chat-changed",
-                    auth_check=auth_check,
-                ):
-                    yield chunk
-        finally:
-            # The broadcast owns its own listener count: drop the channel only when
-            # the last subscriber has gone, and nothing awaits in between. The text
-            # so far stays: a reconnect mid-turn catches up from it instead of
-            # losing the fragments published while nobody was listening.
-            if not channel.has_listeners and _chat_deltas.get(key) is channel:
-                _chat_deltas.pop(key, None)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return {"aborted": await _chat_runtime.abort_chat_turn(job_id, username)}
 
 
 @app.get("/api/chat/{job_id}/stream", operation_id="chatStream")
@@ -27446,506 +26164,19 @@ async def send_chat_message(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
-    """Queue a chat message for AI processing.
-
-    Saves the user message immediately and kicks off background AI processing.
-    The response is delivered via SSE on /api/chat/{job_id}/stream.
-    """
+    """Queue a chat message for AI processing."""
     _check_allow_list(request)
     _require_reviewer(request)
     stored = await get_result(job_id, strip_sensitive=False)
     if not stored or not stored.get("result"):
         raise HTTPException(status_code=404, detail="Job not found")
-    _refuse_while_preparing(job_id, request.state.username)
-    async with _hold_chat_lock(f"{job_id}:{request.state.username}"):
-        if bool(body.ai_provider) != bool(body.ai_model):
-            raise HTTPException(
-                status_code=422, detail="Select both provider and model"
-            )
-        session, _ = await _current_chat_choice(job_id, request.state.username)
-        ai_provider, ai_model = await _normalize_and_validate_ai_params(
-            body.ai_provider or session["ai_provider"],
-            body.ai_model or session["ai_model"],
-            username=request.state.username,
-        )
-        if ai_provider is None or ai_model is None:
-            raise HTTPException(
-                status_code=422, detail="Select both provider and model"
-            )
-        from rootcoz.ai_client import _selected_credential_source
-
-        credential_source = _selected_credential_source.get()
-        await _check_chat_session_choice(
-            job_id,
-            request.state.username,
-            ai_provider,
-            ai_model,
-            credential_source,
-        )
-        user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
-            job_id=job_id,
-            user_content=body.message,
-            username=request.state.username,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            notice=await _issue_blocked_notice(
-                message=body.message,
-                username=request.state.username,
-                settings=get_settings(),
-                # This run's own repos are a destination too, exactly as the
-                # background task reads them for the tool list.
-                github_repo_available=bool(
-                    _job_issue_repo_slugs(
-                        (stored.get("result") or {}).get("request_params", {})
-                    )[1]
-                ),
-                job_chat=True,
-            ),
-        )
-    logger.info("Chat: queued user message %d for job %s", user_msg_id, job_id)
-
-    notify_chat_changed(job_id, username=request.state.username)
-
-    # Kick off background processing with the pre-created assistant placeholder
-    background_tasks.add_task(
-        _process_chat_message,
-        job_id=job_id,
-        user_msg_id=user_msg_id,
-        assistant_msg_id=assistant_msg_id,
-        message=body.message,
-        ai_provider_override=ai_provider,
-        ai_model_override=ai_model,
+    return await _chat_runtime.enqueue_message(
+        _job_chat_adapter(job_id, stored_result=stored),
+        body=body,
         username=request.state.username,
         is_admin=bool(getattr(request.state, "is_admin", False)),
-        credential_source=credential_source,
+        background_tasks=background_tasks,
     )
-
-    return {
-        "user_message": {
-            "id": user_msg_id,
-            "role": "user",
-            "content": body.message,
-            "username": request.state.username,
-            "status": "completed",
-        },
-        "assistant_message_id": assistant_msg_id,
-    }
-
-
-async def _process_chat_message(
-    *,
-    job_id: str,
-    user_msg_id: int,
-    assistant_msg_id: int,
-    message: str,
-    ai_provider_override: str | None,
-    ai_model_override: str | None,
-    username: str,
-    is_admin: bool = False,
-    credential_source: str | None = None,
-) -> None:
-    """Background task: process a single chat message with AI."""
-    ai_username.set(username)
-    from rootcoz.ai_client import chat_session_source
-    from rootcoz.engine.chat import (
-        build_chat_custom_tools,
-        chat_with_ai,
-        clone_chat_repos,
-    )
-    from rootcoz.sources.chat_workspace import setup_ci_build_workspace
-
-    auth_header = ""
-    source_token = None
-
-    async with _track_chat_job_task(job_id):
-        try:
-            async with _hold_chat_lock(f"{job_id}:{username}"):
-                try:
-                    async with _get_chat_job_barrier(job_id):
-                        if job_id in _chat_jobs_deleting:
-                            logger.info(
-                                "Chat: skip processing for deleted job %s user %s",
-                                job_id,
-                                username,
-                            )
-                            await _fail_chat_assistant_placeholder(
-                                assistant_msg_id,
-                                job_id,
-                                username,
-                                "Job was deleted.",
-                            )
-                            return
-                        stored = await get_result(job_id, strip_sensitive=False)
-                        if not stored or not stored.get("result"):
-                            raise RuntimeError(
-                                f"Job {job_id} not found during chat processing"
-                            )
-
-                        result_data = stored["result"]
-                        params = result_data.get("request_params", {})
-
-                        _chat_settings = get_settings()
-                        ai_provider, ai_model = ai_provider_override, ai_model_override
-                        if not ai_provider or not ai_model:
-                            raise ValueError("Chat selection missing")
-                        (
-                            session_id,
-                            credential_source,
-                        ) = await _check_chat_session_choice(
-                            job_id,
-                            username,
-                            ai_provider,
-                            ai_model,
-                            credential_source,
-                        )
-                        source_token = chat_session_source.set(credential_source)
-
-                        credential_generation = (
-                            None
-                            if credential_source == "server"
-                            else await storage.get_user_ai_credential_generation(
-                                username, ai_provider
-                            )
-                        )
-                        # Get conversation history
-                        msg_count = await storage.count_chat_messages(
-                            job_id, username=username
-                        )
-                        all_history = await storage.get_chat_messages(
-                            job_id, username=username, limit=max(msg_count, 1)
-                        )
-                        # Filter to only completed messages for context
-                        history = [
-                            m
-                            for m in all_history
-                            if m.get("status") != "pending" and m.get("content")
-                        ]
-
-                        # Find session_id from the last completed assistant message
-                        # Scan all_history (not filtered history) because the init
-                        # message has empty content but carries the session_id
-                        last_session_id: str | None = session_id
-                        for msg in reversed(all_history):
-                            if (
-                                msg.get("role") == "assistant"
-                                and msg.get("session_id")
-                                and msg.get("ai_provider") == ai_provider
-                                and msg.get("ai_model") == ai_model
-                            ):
-                                last_session_id = msg["session_id"]
-                                logger.debug(
-                                    "Chat: found session %s from history (provider=%s, model=%s)",
-                                    last_session_id,
-                                    ai_provider,
-                                    ai_model,
-                                )
-                                break
-
-                        workspace = await _enter_chat_workspace(
-                            job_id, username, "Chat message"
-                        )
-                        if workspace is None:
-                            await _fail_chat_assistant_placeholder(
-                                assistant_msg_id,
-                                job_id,
-                                username,
-                                f"Error: {_chat_workspace_unknown_message(job_id, username)}",
-                            )
-                            return
-
-                        decrypted_params = {}
-                        try:
-                            decrypted_params = decrypt_sensitive_fields(dict(params))
-                        except Exception:
-                            logger.warning(
-                                "Failed to decrypt request_params for chat context",
-                                exc_info=True,
-                            )
-                        (
-                            jira_email,
-                            jira_token,
-                            jira_connection,
-                            github_token,
-                            github_repo,
-                        ) = await _resolve_chat_credentials(decrypted_params, username)
-
-                        repos_available = await clone_chat_repos(
-                            workspace, decrypted_params, user_repo_token=github_token
-                        )
-
-                        settings = get_settings()
-
-                        # Populate workspace with CI build data
-                        ci_build_data_available = await setup_ci_build_workspace(
-                            workspace,
-                            _build_ci_workspace_params(decrypted_params, result_data),
-                            github_token=github_token,
-                            settings=settings,
-                        )
-
-                        server_url = _build_internal_server_url()
-                        auth_header = await _create_ai_auth_header(username)
-
-                        issue_repos = _job_issue_repo_slugs(decrypted_params)[1]
-                        tracker_targets, tracker_unavailable = _chat_tracker_state(
-                            settings,
-                            await storage.get_user_tokens(username),
-                            github_repo_available=bool(issue_repos),
-                            has_profile=await _account_has_profile(username),
-                            job_chat=True,
-                        )
-                        custom_tools: list[dict[str, Any]] = []
-                        if auth_header:
-                            custom_tools = build_chat_custom_tools(
-                                server_url=server_url,
-                                auth_token=auth_header.removeprefix("Bearer ").strip(),
-                                job_id=job_id,
-                                jira_cloud_url=settings.jira_cloud_url,
-                                jira_server_url=settings.jira_server_url,
-                                jira_email=jira_email,
-                                jira_token=jira_token,
-                                github_token=github_token,
-                                github_repo=github_repo,
-                                jira_connection=jira_connection,
-                                tracker_targets=tracker_targets,
-                                issue_repos=tuple(sorted(issue_repos)),
-                            )
-                        else:
-                            logger.warning(
-                                "Chat: no auth token for %s — tools unavailable",
-                                username,
-                            )
-
-                        from rootcoz.engine.session_tools import build_session_tools
-
-                        session = await build_session_tools(
-                            builtin=list(CHAT_BUILTIN_TOOLS),
-                            custom_base=custom_tools,
-                            workspace=workspace,
-                            job_id=job_id,
-                            # Never build a graph on the turn: it was 132 s of
-                            # indexing before a 5 s answer. This turn uses the
-                            # graphs already on disk and the build runs after it.
-                            wait_for_index=False,
-                        )
-                        custom_tools = session.custom
-                        # A resumed session keeps its creation-time tools, so a
-                        # token saved, a tracker toggled mid-chat, or a code graph
-                        # that finished building after the session started only
-                        # reaches the model through a fresh session.
-                        last_session_id = _enable_tools_for_session(
-                            last_session_id,
-                            _chat_tool_fingerprint(tracker_targets, custom_tools),
-                        )
-
-                        abort_key = f"{job_id}:{username}"
-                        abort_signal = _get_chat_abort_signal(abort_key)
-                        if abort_signal.is_set():
-                            abort_signal.clear()
-                            await _fail_chat_assistant_placeholder(
-                                assistant_msg_id,
-                                job_id,
-                                username,
-                                "Aborted by user.",
-                            )
-                            logger.info(
-                                "Chat: aborted before AI call for job %s, user %s",
-                                job_id,
-                                username,
-                            )
-                            return
-
-                    # Lifecycle barrier is released before the AI call so job
-                    # deletion is not blocked behind chat_with_ai timeouts.
-                    if job_id in _chat_jobs_deleting:
-                        await _fail_chat_assistant_placeholder(
-                            assistant_msg_id,
-                            job_id,
-                            username,
-                            "Job was deleted.",
-                        )
-                        return
-
-                    turn_warnings: list[str] = []
-                    turn_started = _time.monotonic()
-                    success, response_text, new_session_id = await chat_with_ai(
-                        job_id=job_id,
-                        job_name=result_data.get("job_name", "unknown"),
-                        build_number=resolve_display_build_id(result_data),
-                        message=message,
-                        history=history,
-                        ai_provider=ai_provider,
-                        ai_model=ai_model,
-                        repo_path=workspace,
-                        ai_call_timeout=settings.ai_call_timeout,
-                        session_id=last_session_id,
-                        custom_tools=custom_tools,
-                        repos_available=repos_available,
-                        ci_build_data_available=ci_build_data_available,
-                        tracker_unavailable=tracker_unavailable,
-                        issue_repos=tuple(sorted(issue_repos)),
-                        # Display only: the stored reply is still the whole text.
-                        on_delta=_chat_delta_publisher(
-                            job_id, username, assistant_msg_id
-                        ),
-                        on_warning=turn_warnings.append,
-                    )
-                    turn_elapsed = _time.monotonic() - turn_started
-
-                    if abort_signal.is_set():
-                        abort_signal.clear()
-                        if new_session_id and new_session_id != last_session_id:
-                            await _discard_unsaved_ai_session(
-                                new_session_id, username, ai_provider
-                            )
-                        await _fail_chat_assistant_placeholder(
-                            assistant_msg_id,
-                            job_id,
-                            username,
-                            "Aborted by user.",
-                        )
-                        logger.info(
-                            "Chat: aborted after AI call for job %s, user %s",
-                            job_id,
-                            username,
-                        )
-                        return
-
-                    if not success:
-                        logger.error(
-                            "Chat AI call failed for job %s (provider=%s, model=%s, elapsed=%.1fs): %s",
-                            job_id,
-                            ai_provider,
-                            ai_model,
-                            turn_elapsed,
-                            response_text,
-                        )
-                        user_error = format_chat_ai_user_error(
-                            response_text,
-                            is_admin=is_admin,
-                            ai_provider=ai_provider,
-                            ai_model=ai_model,
-                        )
-                        await _fail_chat_assistant_placeholder(
-                            assistant_msg_id,
-                            job_id,
-                            username,
-                            f"Error: {user_error}",
-                        )
-                        return
-
-                    if credential_source == "server":
-                        # Same predicate Start applied (#582): the full grant,
-                        # or the free grant for a pair still declared free.
-                        from rootcoz.ai_client import require_server_provider_grant
-
-                        try:
-                            await require_server_provider_grant(ai_provider, ai_model)
-                        except ValueError as exc:
-                            logger.info(
-                                "Chat: %s/%s refused on server credentials for"
-                                " user=%s: %s",
-                                ai_provider,
-                                ai_model,
-                                username,
-                                exc,
-                            )
-                            await _fail_chat_assistant_placeholder(
-                                assistant_msg_id,
-                                job_id,
-                                username,
-                                str(exc),
-                            )
-                            return
-
-                    current_status = await storage.get_chat_message_status(
-                        assistant_msg_id
-                    )
-                    if current_status == "failed":
-                        if new_session_id and new_session_id != last_session_id:
-                            await _discard_unsaved_ai_session(
-                                new_session_id, username, ai_provider
-                            )
-                        logger.info(
-                            "Chat: message %d was aborted during processing, discarding response",
-                            assistant_msg_id,
-                        )
-                        return
-
-                    _remember_chat_session_tools(
-                        new_session_id,
-                        _chat_tool_fingerprint(tracker_targets, custom_tools),
-                    )
-                    saved = await storage.complete_chat_message_if_generation(
-                        assistant_msg_id,
-                        content=response_text,
-                        ai_provider=ai_provider,
-                        ai_model=ai_model,
-                        session_id=new_session_id or "",
-                        credential_generation=credential_generation,
-                        server_source=credential_source == "server",
-                    )
-                    if not saved:
-                        await _discard_unsaved_chat_response(
-                            assistant_msg_id,
-                            job_id,
-                            username,
-                            ai_provider,
-                            new_session_id
-                            if new_session_id != last_session_id
-                            else None,
-                            "Chat",
-                        )
-                        return
-                    logger.info(
-                        "Chat: message %d processed for job %s (session=%s, provider=%s, model=%s, elapsed=%.1fs)",
-                        assistant_msg_id,
-                        job_id,
-                        new_session_id,
-                        ai_provider,
-                        ai_model,
-                        turn_elapsed,
-                    )
-                    await _store_chat_turn_warning(job_id, username, turn_warnings)
-                    # The answer is stored and pushed; the graph is built from
-                    # here on, off the turn. Nothing the user waits for queues
-                    # behind it, and the next turn finds the tools. Scheduled
-                    # unconditionally: the build itself is what knows whether
-                    # this workspace has anything to index.
-                    _schedule_chat_index(
-                        workspace,
-                        job_id=job_id,
-                        deadline=_time.monotonic() + CHAT_INDEX_DEADLINE_SECONDS,
-                    )
-                    notify_chat_changed(job_id, username=username)
-
-                except Exception:
-                    logger.exception(
-                        "Chat processing failed for job %s, msg %d",
-                        job_id,
-                        assistant_msg_id,
-                    )
-                    await _fail_chat_assistant_placeholder(
-                        assistant_msg_id,
-                        job_id,
-                        username,
-                        "An error occurred while processing your message. Please try again.",
-                    )
-        except asyncio.CancelledError:
-            await _fail_chat_assistant_placeholder(
-                assistant_msg_id,
-                job_id,
-                username,
-                "Chat processing was cancelled.",
-            )
-            raise
-        finally:
-            if source_token is not None:
-                chat_session_source.reset(source_token)
-            _cleanup_chat_state(f"{job_id}:{username}")
-            _discard_idle_chat_job_barrier(job_id)
-            # Do NOT revoke auth_header — it's embedded in custom tool HTTP headers
-            # and must stay alive for the sidecar session lifetime
 
 
 @app.delete("/api/chat/{job_id}", operation_id="clearChatHistory")
@@ -27953,35 +26184,14 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
     """Clear chat messages for the current user on a job."""
     _check_allow_list(request)
     _require_reviewer(request)
-    from rootcoz.engine.chat import cleanup_chat_repos, get_chat_workspace
-
     stored = await get_result(job_id)
     if not stored:
         raise HTTPException(status_code=404, detail="Job not found")
-
-    username = request.state.username
-    _refuse_while_preparing(job_id, username)
-
-    # Acquire the per-user chat lock to prevent tearing down workspace
-    # while a background worker is still processing
-    async with _hold_chat_lock(f"{job_id}:{username}"):
-        await _require_chat_clear_version(job_id, username, request)
-        count = await storage.delete_chat_messages(job_id, username=username)
-        await _cleanup_revoked_ai_sessions()
-        notify_chat_changed(job_id, username=username)
-        # Marker-aware: the helper also drops the workspace itself (session dirs
-        # included), so a failed delete is re-created instead of reused.
-        await cleanup_path_off_loop(
-            job_id,
-            get_chat_workspace(job_id, username),
-            partial(cleanup_chat_repos, job_id, username=username),
-        )
-
-    _cleanup_chat_state(f"{job_id}:{username}")
-    logger.info(
-        "Chat: cleared %d messages for job %s, user %s", count, job_id, username
+    return await _chat_runtime.clear_history(
+        _job_chat_adapter(job_id),
+        username=request.state.username,
+        if_match=lambda: request.headers.get("if-match", ""),
     )
-    return {"deleted": count}
 
 
 # -- Admin DB endpoints (used by admin chat tools) --
@@ -28358,6 +26568,30 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
 # -- Admin chat endpoints --
 
 
+async def _process_admin_chat_message(
+    *,
+    user_msg_id: int,
+    assistant_msg_id: int,
+    message: str,
+    ai_provider_override: str | None,
+    ai_model_override: str | None,
+    username: str,
+    credential_source: str | None = None,
+) -> None:
+    """Background task delegate for admin chat turns."""
+    await _chat_runtime.process_turn(
+        _admin_chat_adapter(),
+        user_msg_id=user_msg_id,
+        assistant_msg_id=assistant_msg_id,
+        message=message,
+        ai_provider_override=ai_provider_override,
+        ai_model_override=ai_model_override,
+        username=username,
+        is_admin=True,
+        credential_source=credential_source,
+    )
+
+
 @app.get("/api/admin/chat", operation_id="getAdminChatHistory")
 async def get_admin_chat_history(
     request: Request,
@@ -28367,7 +26601,7 @@ async def get_admin_chat_history(
     """Get admin chat history."""
     _require_admin(request)
     username = getattr(request.state, "username", "")
-    payload = await _read_chat_history_payload(
+    payload = await _chat_runtime.read_chat_history_payload(
         ADMIN_CHAT_JOB_ID, username, limit=limit, offset=offset
     )
     return strip_sensitive_from_response(payload)
@@ -28383,123 +26617,8 @@ async def init_admin_chat(
         raise HTTPException(
             status_code=422, detail="Select provider, model and credential source"
         )
-    from rootcoz.engine.chat import (
-        build_admin_custom_tools,
-        init_admin_chat_session,
-    )
-
     username = getattr(request.state, "username", "")
-    session_id: str | None = ""
-    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
-        ai_provider, ai_model = await _validate_chat_selection(body, username)
-        from rootcoz.ai_client import _selected_credential_source
-
-        credential_source = _selected_credential_source.get()
-        session_id, _ = await _check_chat_session_choice(
-            ADMIN_CHAT_JOB_ID,
-            username,
-            ai_provider,
-            ai_model,
-            credential_source,
-            allow_empty=True,
-        )
-        workspace = await _enter_chat_workspace(
-            ADMIN_CHAT_JOB_ID, username, "Admin chat init"
-        )
-        if workspace is None:
-            raise HTTPException(
-                status_code=409,
-                detail=_chat_workspace_unknown_message(ADMIN_CHAT_JOB_ID, username),
-            )
-        if not await _available_chat_session(ADMIN_CHAT_JOB_ID, username):
-            custom_tools: list[dict[str, Any]] = []
-            tracker_targets, tracker_unavailable = _chat_tracker_state(
-                get_settings(),
-                await storage.get_user_tokens(username),
-                # An admin chat belongs to no run: only the deployment's own
-                # TESTS_REPO_URL is a destination it can rely on, and the
-                # tool list asks the same parser the create call uses.
-                github_repo_available=_settings_github_repo_available(get_settings()),
-                has_profile=await _account_has_profile(username),
-            )
-            try:
-                auth_header = await _create_ai_auth_header(
-                    username, is_admin=True, refuse_storage_fault=True
-                )
-            except Exception as exc:  # noqa: BLE001 - a fault, never a lock
-                # No preparation task to record this in: this route is
-                # synchronous, and an admin chat without db_query is a broken
-                # chat dressed as a working one, so the fault is the answer.
-                # Never ``str(exc)``: it can carry a token-bearing remote.
-                logger.warning(
-                    "Admin chat init: internal tools token failed for %s: %s",
-                    username,
-                    _redacted_error(exc),
-                )
-                raise HTTPException(
-                    status_code=500, detail=_CHAT_PREP_FAILED_DETAIL
-                ) from None
-            if auth_header:
-                server_url = _build_internal_server_url()
-                custom_tools = build_admin_custom_tools(
-                    server_url=server_url,
-                    auth_token=auth_header.removeprefix("Bearer ").strip(),
-                    tracker_targets=tracker_targets,
-                    conversation=ADMIN_CHAT_JOB_ID,
-                )
-            else:
-                logger.warning("Admin chat init: no auth token for %s", username)
-                if not await _ai_admin_role_current(username):
-                    raise HTTPException(status_code=403, detail="Admin access required")
-
-            credential_generation = (
-                None
-                if credential_source == "server"
-                else await storage.get_user_ai_credential_generation(
-                    username, ai_provider
-                )
-            )
-            from rootcoz.ai_client import chat_session_source
-
-            token = ai_username.set(username)
-            source_token = chat_session_source.set(credential_source)
-            try:
-                session_id = await init_admin_chat_session(
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    repo_path=workspace,
-                    custom_tools=custom_tools,
-                    # The first-turn prompt names why a tracker is missing, so an
-                    # admin chats with the real reason, not a placeholder.
-                    tracker_unavailable=tracker_unavailable,
-                )
-            except SessionCreationRefused as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from None
-            except httpx.HTTPStatusError as exc:
-                raise _chat_start_sidecar_error(exc) from None
-            finally:
-                chat_session_source.reset(source_token)
-                ai_username.reset(token)
-            if session_id:
-                _remember_chat_session_tools(session_id, tracker_targets)
-                saved = await storage.add_chat_message(
-                    job_id=ADMIN_CHAT_JOB_ID,
-                    role="assistant",
-                    content="",
-                    username=username,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    session_id=session_id,
-                    status="completed",
-                    credential_generation=credential_generation,
-                )
-                if not saved:
-                    await _discard_unsaved_ai_session(session_id, username, ai_provider)
-                    session_id = None
-    logger.info("Admin chat init: workspace=%s, session=%s", workspace, session_id)
-    if session_id:
-        notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
-    return {"ready": True, "session_id": session_id or ""}
+    return await _chat_runtime.init_admin_chat(username, body)
 
 
 @app.post("/api/admin/chat/close", operation_id="closeAdminChat")
@@ -28516,7 +26635,11 @@ async def abort_admin_chat(request: Request) -> dict[str, Any]:
     _require_admin(request)
     username = request.state.username
     logger.info("Admin chat: user %s aborted admin chat", username)
-    return {"aborted": await _abort_chat_turn(ADMIN_CHAT_JOB_ID, username, admin=True)}
+    return {
+        "aborted": await _chat_runtime.abort_chat_turn(
+            ADMIN_CHAT_JOB_ID, username, admin=True
+        )
+    }
 
 
 @app.get("/api/admin/chat/stream", operation_id="adminChatStream")
@@ -28540,369 +26663,13 @@ async def send_admin_chat_message(
 ) -> dict[str, Any]:
     """Queue an admin chat message for AI processing."""
     _require_admin(request)
-    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{request.state.username}"):
-        if bool(body.ai_provider) != bool(body.ai_model):
-            raise HTTPException(
-                status_code=422, detail="Select both provider and model"
-            )
-        session, _ = await _current_chat_choice(
-            ADMIN_CHAT_JOB_ID, request.state.username
-        )
-        ai_provider, ai_model = await _normalize_and_validate_ai_params(
-            body.ai_provider or session["ai_provider"],
-            body.ai_model or session["ai_model"],
-            username=request.state.username,
-        )
-        if ai_provider is None or ai_model is None:
-            raise HTTPException(
-                status_code=422, detail="Select both provider and model"
-            )
-        from rootcoz.ai_client import _selected_credential_source
-
-        credential_source = _selected_credential_source.get()
-        await _check_chat_session_choice(
-            ADMIN_CHAT_JOB_ID,
-            request.state.username,
-            ai_provider,
-            ai_model,
-            credential_source,
-        )
-        settings = get_settings()
-        user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
-            job_id=ADMIN_CHAT_JOB_ID,
-            user_content=body.message,
-            username=request.state.username,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            notice=await _issue_blocked_notice(
-                message=body.message,
-                username=request.state.username,
-                settings=settings,
-                github_repo_available=_settings_github_repo_available(settings),
-            ),
-        )
-    logger.info("Admin chat: queued user message %d", user_msg_id)
-
-    notify_chat_changed(ADMIN_CHAT_JOB_ID, username=request.state.username)
-
-    background_tasks.add_task(
-        _process_admin_chat_message,
-        user_msg_id=user_msg_id,
-        assistant_msg_id=assistant_msg_id,
-        message=body.message,
-        ai_provider_override=ai_provider,
-        ai_model_override=ai_model,
+    return await _chat_runtime.enqueue_message(
+        _admin_chat_adapter(),
+        body=body,
         username=request.state.username,
-        credential_source=credential_source,
+        is_admin=True,
+        background_tasks=background_tasks,
     )
-
-    return {
-        "user_message": {
-            "id": user_msg_id,
-            "role": "user",
-            "content": body.message,
-            "username": request.state.username,
-            "status": "completed",
-        },
-        "assistant_message_id": assistant_msg_id,
-    }
-
-
-async def _process_admin_chat_message(
-    *,
-    user_msg_id: int,
-    assistant_msg_id: int,
-    message: str,
-    ai_provider_override: str | None,
-    ai_model_override: str | None,
-    username: str,
-    credential_source: str | None = None,
-) -> None:
-    """Background task: process a single admin chat message with AI."""
-    from rootcoz.ai_client import chat_session_source
-    from rootcoz.engine.chat import (
-        admin_chat_with_ai,
-        build_admin_custom_tools,
-    )
-
-    auth_header = ""
-
-    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
-        _admin_settings = get_settings()
-        user_token = ai_username.set(username)
-        source_token = None
-        try:
-            ai_provider, ai_model = ai_provider_override, ai_model_override
-            if not ai_provider or not ai_model:
-                raise ValueError("Chat selection missing")
-            session_id, credential_source = await _check_chat_session_choice(
-                ADMIN_CHAT_JOB_ID,
-                username,
-                ai_provider,
-                ai_model,
-                credential_source,
-            )
-            source_token = chat_session_source.set(credential_source)
-
-            credential_generation = (
-                None
-                if credential_source == "server"
-                else await storage.get_user_ai_credential_generation(
-                    username, ai_provider
-                )
-            )
-            msg_count = await storage.count_chat_messages(
-                ADMIN_CHAT_JOB_ID, username=username
-            )
-            all_history = await storage.get_chat_messages(
-                ADMIN_CHAT_JOB_ID, username=username, limit=max(msg_count, 1)
-            )
-            history = [
-                m
-                for m in all_history
-                if m.get("status") != "pending" and m.get("content")
-            ]
-
-            last_session_id: str | None = session_id
-            for msg in reversed(all_history):
-                if (
-                    msg.get("role") == "assistant"
-                    and msg.get("session_id")
-                    and msg.get("ai_provider") == ai_provider
-                    and msg.get("ai_model") == ai_model
-                ):
-                    last_session_id = msg["session_id"]
-                    logger.debug(
-                        "Admin chat: found session %s from history (provider=%s, model=%s)",
-                        last_session_id,
-                        ai_provider,
-                        ai_model,
-                    )
-                    break
-
-            workspace = await _enter_chat_workspace(
-                ADMIN_CHAT_JOB_ID, username, "Admin chat message"
-            )
-            if workspace is None:
-                await _fail_chat_assistant_placeholder(
-                    assistant_msg_id,
-                    ADMIN_CHAT_JOB_ID,
-                    username,
-                    "Error: "
-                    + _chat_workspace_unknown_message(ADMIN_CHAT_JOB_ID, username),
-                )
-                return
-
-            settings = get_settings()
-
-            server_url = _build_internal_server_url()
-            auth_header = await _create_ai_auth_header(username, is_admin=True)
-            if not await _ai_admin_role_current(username):
-                await _cleanup_ai_session(auth_header)
-                logger.info(
-                    "Admin chat: access revoked before AI call for user %s", username
-                )
-                await _fail_chat_assistant_placeholder(
-                    assistant_msg_id,
-                    ADMIN_CHAT_JOB_ID,
-                    username,
-                    "Admin access required",
-                )
-                return
-
-            tracker_targets, tracker_unavailable = _chat_tracker_state(
-                settings,
-                await storage.get_user_tokens(username),
-                github_repo_available=_settings_github_repo_available(settings),
-                has_profile=await _account_has_profile(username),
-            )
-            # A resumed session keeps its creation-time tools (see
-            # _enable_tools_for_session): rebuild when this user's set changed.
-            last_session_id = _enable_tools_for_session(
-                last_session_id, tracker_targets
-            )
-            custom_tools = build_admin_custom_tools(
-                server_url=server_url,
-                auth_token=auth_header.removeprefix("Bearer ").strip()
-                if auth_header
-                else "",
-                tracker_targets=tracker_targets,
-                conversation=ADMIN_CHAT_JOB_ID,
-            )
-
-            abort_key = f"{ADMIN_CHAT_JOB_ID}:{username}"
-            abort_signal = _get_chat_abort_signal(abort_key)
-            if abort_signal.is_set():
-                abort_signal.clear()
-                await storage.update_chat_message_content(
-                    assistant_msg_id, "Aborted by user."
-                )
-                await storage.update_chat_message_status(assistant_msg_id, "failed")
-                notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
-                logger.info("Admin chat: aborted before AI call, user %s", username)
-                return
-
-            turn_warnings: list[str] = []
-            turn_started = _time.monotonic()
-            success, response_text, new_session_id = await admin_chat_with_ai(
-                message=message,
-                history=history,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                repo_path=workspace,
-                ai_call_timeout=settings.ai_call_timeout,
-                session_id=last_session_id,
-                custom_tools=custom_tools,
-                tracker_unavailable=tracker_unavailable,
-                on_delta=_chat_delta_publisher(
-                    ADMIN_CHAT_JOB_ID, username, assistant_msg_id
-                ),
-                on_warning=turn_warnings.append,
-            )
-            turn_elapsed = _time.monotonic() - turn_started
-
-            if abort_signal.is_set():
-                abort_signal.clear()
-                if new_session_id and new_session_id != last_session_id:
-                    await _discard_unsaved_ai_session(
-                        new_session_id, username, ai_provider
-                    )
-                await storage.update_chat_message_content(
-                    assistant_msg_id, "Aborted by user."
-                )
-                await storage.update_chat_message_status(assistant_msg_id, "failed")
-                notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
-                logger.info("Admin chat: aborted after AI call, user %s", username)
-                return
-
-            if not success:
-                logger.error(
-                    "Admin chat AI call failed (provider=%s, model=%s, elapsed=%.1fs): %s",
-                    ai_provider,
-                    ai_model,
-                    turn_elapsed,
-                    response_text,
-                )
-                user_error = format_chat_ai_user_error(
-                    response_text,
-                    is_admin=True,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                )
-                await storage.update_chat_message_content(
-                    assistant_msg_id, f"Error: {user_error}"
-                )
-                await storage.update_chat_message_status(assistant_msg_id, "failed")
-                notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
-                return
-
-            if not await _ai_admin_role_current(username):
-                if new_session_id and new_session_id != last_session_id:
-                    await _discard_unsaved_ai_session(
-                        new_session_id, username, ai_provider
-                    )
-                logger.info(
-                    "Admin chat: access revoked during AI call for user %s", username
-                )
-                await _fail_chat_assistant_placeholder(
-                    assistant_msg_id,
-                    ADMIN_CHAT_JOB_ID,
-                    username,
-                    "Admin access required",
-                )
-                return
-
-            if credential_source == "server":
-                # Same predicate Start applied (#582): the full grant, or the
-                # free grant for a pair still declared free.
-                from rootcoz.ai_client import require_server_provider_grant
-
-                try:
-                    await require_server_provider_grant(ai_provider, ai_model)
-                except ValueError as exc:
-                    logger.info(
-                        "Admin chat: %s/%s refused on server credentials for"
-                        " user=%s: %s",
-                        ai_provider,
-                        ai_model,
-                        username,
-                        exc,
-                    )
-                    await _fail_chat_assistant_placeholder(
-                        assistant_msg_id,
-                        ADMIN_CHAT_JOB_ID,
-                        username,
-                        str(exc),
-                    )
-                    return
-
-            # Check if message was aborted while AI was processing
-            current_status = await storage.get_chat_message_status(assistant_msg_id)
-            if current_status == "failed":
-                if new_session_id and new_session_id != last_session_id:
-                    await _discard_unsaved_ai_session(
-                        new_session_id, username, ai_provider
-                    )
-                logger.info(
-                    "Chat: message %d was aborted during processing, discarding response",
-                    assistant_msg_id,
-                )
-                return
-
-            _remember_chat_session_tools(new_session_id, tracker_targets)
-            saved = await storage.complete_chat_message_if_generation(
-                assistant_msg_id,
-                content=response_text,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                session_id=new_session_id or "",
-                credential_generation=credential_generation,
-                server_source=credential_source == "server",
-            )
-            if not saved:
-                await _discard_unsaved_chat_response(
-                    assistant_msg_id,
-                    ADMIN_CHAT_JOB_ID,
-                    username,
-                    ai_provider,
-                    new_session_id if new_session_id != last_session_id else None,
-                    "Admin chat",
-                )
-                return
-            logger.info(
-                "Admin chat: message %d processed (session=%s, provider=%s, model=%s, elapsed=%.1fs)",
-                assistant_msg_id,
-                new_session_id,
-                ai_provider,
-                ai_model,
-                turn_elapsed,
-            )
-            await _store_chat_turn_warning(ADMIN_CHAT_JOB_ID, username, turn_warnings)
-            notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
-
-        except Exception:
-            logger.exception(
-                "Admin chat processing failed for msg %d",
-                assistant_msg_id,
-            )
-            try:
-                await storage.update_chat_message_content(
-                    assistant_msg_id,
-                    "An error occurred while processing your message. Please try again.",
-                )
-                await storage.update_chat_message_status(assistant_msg_id, "failed")
-                notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
-            except Exception:
-                logger.exception(
-                    "Failed to update error status for admin chat msg %d",
-                    assistant_msg_id,
-                )
-        finally:
-            if source_token is not None:
-                chat_session_source.reset(source_token)
-            ai_username.reset(user_token)
-            _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
-            # Do NOT revoke auth_header — it's embedded in custom tool HTTP headers
 
 
 # -- Admin chat artifact helpers --
@@ -29528,31 +27295,11 @@ async def get_admin_chat_artifact(
 async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
     """Clear admin chat messages for the current user."""
     _require_admin(request)
-    from rootcoz.engine.chat import cleanup_chat_repos, get_chat_workspace
-
-    username = request.state.username
-    _ok, owner_id = await _resolve_admin_artifacts_owner_id(username)
-
-    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
-        await _require_chat_clear_version(ADMIN_CHAT_JOB_ID, username, request)
-        count = await storage.delete_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
-        await _cleanup_revoked_ai_sessions()
-        notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
-        # Marker-aware: the helper also drops the workspace itself (session dirs
-        # included), so a failed delete is re-created instead of reused.
-        await cleanup_path_off_loop(
-            ADMIN_CHAT_JOB_ID,
-            get_chat_workspace(ADMIN_CHAT_JOB_ID, username),
-            partial(cleanup_chat_repos, ADMIN_CHAT_JOB_ID, username=username),
-        )
-
-    await cleanup_off_loop(
-        ADMIN_CHAT_JOB_ID,
-        partial(_cleanup_admin_artifacts, username, owner_id=owner_id),
+    return await _chat_runtime.clear_history(
+        _admin_chat_adapter(),
+        username=request.state.username,
+        if_match=lambda: request.headers.get("if-match", ""),
     )
-    _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
-    logger.info("Admin chat: cleared %d messages for user %s", count, username)
-    return {"deleted": count}
 
 
 # SPA catch-all routes — must be AFTER all API routes

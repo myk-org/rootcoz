@@ -179,15 +179,15 @@ async def test_graph_can_be_disabled(stubbed, tmp_path: Path) -> None:
 def test_every_session_kind_uses_the_one_builder() -> None:
     """The invariant: no endpoint assembles tools by hand any more."""
     from rootcoz import main, peer_analysis
-    from rootcoz.engine import core
+    from rootcoz.engine import chat_runtime, core
 
-    for module in (core, peer_analysis, main):
+    for module in (core, peer_analysis, chat_runtime):
         source = inspect.getsource(module)
         assert "build_session_tools(" in source, module.__name__
 
     # The graph is reached only through the builder: no module outside it turns
     # graft_http's tools into a session's tool list on its own.
-    for module in (core, peer_analysis, main):
+    for module in (core, peer_analysis, chat_runtime, main):
         source = inspect.getsource(module)
         assert "graph_http_tools" not in source, module.__name__
 
