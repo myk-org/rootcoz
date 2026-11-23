@@ -78,19 +78,7 @@ _cold_catalog_attempt: asyncio.Task[list[dict[str, Any]] | None] | None = None
 
 # Only explicitly initiated AI tasks set this; unrelated request tasks never inherit credentials.
 ai_username: ContextVar[str] = ContextVar("ai_username", default="")
-_selected_credential_source: ContextVar[str] = ContextVar(
-    "selected_credential_source", default=""
-)
 chat_session_source: ContextVar[str] = ContextVar("chat_session_source", default="")
-model_listing_status: ContextVar[dict[str, dict[str, bool | int]] | None] = ContextVar(
-    "model_listing_status", default=None
-)
-# Providers whose key-scoped discovery failed because the provider rejected the
-# stored key itself (401/403), not for an unrelated reason (#592). Kept out of
-# ``model_listing_status`` because that dict is exposed by /api/ai-models.
-_rejected_user_keys: ContextVar[frozenset[str]] = ContextVar(
-    "rejected_user_keys", default=frozenset()
-)
 _selected_key_generation: ContextVar[tuple[str, str, str, int] | None] = ContextVar(
     "selected_key_generation", default=None
 )
@@ -545,10 +533,7 @@ async def require_server_provider_grant(provider: str = "", model: str = "") -> 
     A user without the full server grant may still run one admin-declared
     free provider+model pair when they hold the free-providers grant.
     """
-    await ai_catalog.enforce_server_provider_grant(ai_username.get(), provider, model)
-
-
-_DEFAULT_REQUIRE_SERVER_PROVIDER_GRANT = require_server_provider_grant
+    await ai_catalog.check_server_provider_grant(ai_username.get(), provider, model)
 
 
 async def is_free_ai_pair(provider: str, model: str) -> bool:
@@ -1640,21 +1625,12 @@ def _listing_entry_usable(entry: dict[str, Any]) -> bool:
 
 async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     """Return models usable by the active user or server, with source per pair."""
-    catalog = await ai_catalog.load_scoped_catalog(ai_username.get())
-    model_listing_status.set(catalog.provider_status)
-    _rejected_user_keys.set(catalog.rejected_user_keys)
-    return catalog.providers
-
-
-_DEFAULT_SCOPED_MODELS = scoped_models
+    return (await ai_catalog.load_scoped_catalog(ai_username.get())).providers
 
 
 async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     """Validate an exact pair, retaining only unambiguous legacy routes."""
     return (await ai_catalog.resolve_ai_selection(provider, model)).as_pair()
-
-
-_DEFAULT_RESOLVE_CATALOG_PAIR = resolve_catalog_pair
 
 
 class SessionCreationRefused(RuntimeError):
@@ -2840,13 +2816,7 @@ async def call_ai(
     """Call Pi-sidecar with a validated, unchanged catalog pair."""
     on_delta: Callable[[str], None] | None = kwargs.pop("on_delta", None)
     accept_turn: Callable[[str], bool] | None = kwargs.pop("accept_turn", None)
-    selection = await ai_catalog.resolve_selection_via(
-        resolve_catalog_pair,
-        ai_provider,
-        ai_model,
-        default_fn=_DEFAULT_RESOLVE_CATALOG_PAIR,
-        unspecified_source="user",
-    )
+    selection = await ai_catalog.resolve_ai_selection(ai_provider, ai_model)
     provider, model = selection.as_pair()
     # user key drives the credential source; a server key (#347) only
     # replaces the deployment's env/ambient credentials inside the session.
@@ -2910,7 +2880,7 @@ async def call_ai(
                 error="Chat credential unavailable; Start a new chat",
             )
     if source == "server":
-        await require_server_provider_grant(provider, model)
+        await ai_catalog.check_server_provider_grant(username, provider, model)
     if not session_id and source == "server":
         from rootcoz.storage import get_user_by_username
 
@@ -2996,7 +2966,7 @@ async def call_ai(
             )
     if source == "server" and result.success and chat_session_source.get():
         try:
-            await require_server_provider_grant(provider, model)
+            await ai_catalog.check_server_provider_grant(username, provider, model)
         except InactiveServerProviderError as exc:
             logger.info("Chat AI reply discarded: provider deactivated mid-chat")
             return AIResult(success=False, text=str(exc), error=str(exc))
@@ -3023,13 +2993,7 @@ async def call_ai_once(
 ) -> AIResult:
     """Call Pi-sidecar once with a validated, unchanged catalog pair."""
     accept_turn: Callable[[str], bool] | None = kwargs.pop("accept_turn", None)
-    selection = await ai_catalog.resolve_selection_via(
-        resolve_catalog_pair,
-        ai_provider,
-        ai_model,
-        default_fn=_DEFAULT_RESOLVE_CATALOG_PAIR,
-        unspecified_source="user",
-    )
+    selection = await ai_catalog.resolve_ai_selection(ai_provider, ai_model)
     provider, model = selection.as_pair()
     user_key = None
     pre_server_gen: int | None = None
@@ -3050,7 +3014,7 @@ async def call_ai_once(
         server_redact_keys = await _collect_server_redact_keys(provider, server_key)
         if server_key is not None:
             kwargs["api_key"] = server_key
-        await require_server_provider_grant(provider, model)
+        await ai_catalog.check_server_provider_grant(ai_username.get(), provider, model)
         # The library's call_ai_once wipes result.session_id before usage
         # recording sees it; use the multi-turn call and clean up here so
         # the session id survives for transcript correlation (#328).

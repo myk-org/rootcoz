@@ -202,6 +202,79 @@ describe('providerCatalog unified module', () => {
       expect(result.current.models.map((m) => m.id)).toEqual(['gpt-v2'])
       expect(openaiCallCount).toBe(2)
     })
+
+    it('still applies in-flight initial fetch when a concurrent refresh POST fails', async () => {
+      let resolveInitial!: (value: { models: Array<{ id: string; name: string }> }) => void
+      getMock.mockImplementation((url: string) => {
+        if (url === '/api/ai-models?provider=openai') {
+          return new Promise((resolve) => {
+            resolveInitial = resolve
+          })
+        }
+        throw new Error(`Unexpected GET ${url}`)
+      })
+      postMock.mockRejectedValueOnce(new Error('refresh failed'))
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      try {
+        const { result } = renderHook(() => useProviderModels('openai'))
+        expect(result.current.models).toEqual([])
+
+        await act(async () => {
+          await result.current.refresh()
+        })
+        expect(result.current.refreshing).toBe(false)
+
+        await act(async () => {
+          resolveInitial({ models: [{ id: 'gpt-4o', name: 'GPT-4o' }] })
+        })
+
+        expect(result.current.models.map((m) => m.id)).toEqual(['gpt-4o'])
+        expect(result.current.refreshing).toBe(false)
+        expect(errorSpy).toHaveBeenCalledTimes(1)
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
+
+    it('discards a late stale initial fetch when a concurrent refresh commits fresh models first', async () => {
+      let resolveInitial!: (value: { models: Array<{ id: string; name: string }> }) => void
+      let callCount = 0
+      getMock.mockImplementation((url: string) => {
+        if (url === '/api/ai-models?provider=openai') {
+          callCount++
+          if (callCount === 1) {
+            return new Promise((resolve) => {
+              resolveInitial = resolve
+            })
+          }
+          return Promise.resolve({
+            models: [
+              { id: 'gpt-4o', name: 'GPT-4o' },
+              { id: 'gpt-5', name: 'GPT-5' },
+            ],
+          })
+        }
+        throw new Error(`Unexpected GET ${url}`)
+      })
+      postMock.mockResolvedValueOnce({ ok: true })
+
+      const { result } = renderHook(() => useProviderModels('openai'))
+      expect(result.current.models).toEqual([])
+
+      await act(async () => {
+        await result.current.refresh()
+      })
+      expect(result.current.refreshing).toBe(false)
+      expect(result.current.models.map((m) => m.id)).toEqual(['gpt-4o', 'gpt-5'])
+
+      // Late stale initial fetch resolves after refresh has already committed.
+      await act(async () => {
+        resolveInitial({ models: [{ id: 'gpt-stale', name: 'GPT Stale' }] })
+      })
+
+      expect(result.current.models.map((m) => m.id)).toEqual(['gpt-4o', 'gpt-5'])
+    })
   })
 
   describe('mixed-case custom provider (EnMaaS) round-trip', () => {

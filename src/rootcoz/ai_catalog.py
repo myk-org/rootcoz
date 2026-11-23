@@ -3,18 +3,17 @@
 This module is the single architectural owner of:
 - User-scoped model catalog assembly (:class:`ScopedCatalog`, :func:`load_scoped_catalog`)
 - Explicit provider/model + credential-source resolution (:class:`ResolvedAiSelection`, :func:`resolve_ai_selection`)
-- Explicit server-provider and free-model grant enforcement (:func:`enforce_server_provider_grant`, :func:`check_server_provider_grant`)
+- Explicit server-provider and free-model grant enforcement (:func:`check_server_provider_grant`)
 - Ambient AI execution ContextVar scoping (:func:`scoped_ai_context`, :func:`current_pinned_credential_source`)
 
-Backward-compatible ContextVars stay declared on :mod:`rootcoz.ai_client` solely
-as backing storage for legacy callers and tests; all production callers outside
-this module pass explicit value objects instead of reading side-channel state.
+All production callers pass explicit value objects instead of reading or writing
+side-channel ContextVar state.
 """
 
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -157,35 +156,6 @@ def resolve_provider_model_values(
     provider = ai_client.normalize_provider(ai_provider or settings.ai_provider)
     model = ai_model or settings.ai_model
     return provider, model
-
-
-def _record_selection(selection: ResolvedAiSelection) -> ResolvedAiSelection:
-    """Mirror *selection* to the legacy ContextVar at this single write boundary."""
-    ai_client._selected_credential_source.set(selection.credential_source)
-    return selection
-
-
-def coerce_legacy_selection(
-    result: ResolvedAiSelection | tuple[str, str],
-    *,
-    unspecified_source: Literal["user", "server", ""] = "server",
-) -> ResolvedAiSelection:
-    """Adapt a ``ResolvedAiSelection`` or legacy ``(provider, model)`` tuple.
-
-    Used only when a test monkeypatches a legacy tuple-returning hook such as
-    ``resolve_catalog_pair``, ``_validate_catalog_pair``, or
-    ``_validate_chat_selection``.
-    """
-    if isinstance(result, ResolvedAiSelection):
-        return result
-    resolved_provider, resolved_model = result
-    raw_source = ai_client._selected_credential_source.get()
-    source = raw_source if raw_source in ("user", "server") else unspecified_source
-    return ResolvedAiSelection(
-        provider=resolved_provider,
-        model=resolved_model,
-        credential_source=cast(CredentialSource, source),
-    )
 
 
 async def load_scoped_catalog(username: str = "") -> ScopedCatalog:
@@ -392,7 +362,7 @@ async def load_scoped_catalog(username: str = "") -> ScopedCatalog:
     )
 
 
-async def enforce_server_provider_grant(
+async def check_server_provider_grant(
     username: str,
     provider: str = "",
     model: str = "",
@@ -433,22 +403,6 @@ async def enforce_server_provider_grant(
     raise ValueError("Server provider access requires an administrator grant")
 
 
-async def check_server_provider_grant(
-    username: str,
-    provider: str = "",
-    model: str = "",
-) -> None:
-    """Check server-provider grant for *username*, honoring test monkeypatches."""
-    if (
-        ai_client.require_server_provider_grant
-        is ai_client._DEFAULT_REQUIRE_SERVER_PROVIDER_GRANT
-    ):
-        await enforce_server_provider_grant(username, provider, model)
-        return
-    with scoped_ai_context(username):
-        await ai_client.require_server_provider_grant(provider, model)
-
-
 async def resolve_ai_selection(
     provider: str,
     model: str,
@@ -461,16 +415,7 @@ async def resolve_ai_selection(
     effective_user = ai_client.ai_username.get() if username is None else username
 
     if effective_user:
-        if ai_client.scoped_models is ai_client._DEFAULT_SCOPED_MODELS:
-            catalog = await load_scoped_catalog(effective_user)
-        else:
-            with scoped_ai_context(effective_user):
-                scoped_dict = await ai_client.scoped_models()
-                catalog = ScopedCatalog(
-                    providers=scoped_dict,
-                    provider_status=ai_client.model_listing_status.get() or {},
-                    rejected_user_keys=ai_client._rejected_user_keys.get(),
-                )
+        catalog = await load_scoped_catalog(effective_user)
         provider = catalog.resolve_provider_spelling(provider)
         status = catalog.provider_status
         # Key discovery failed for this provider: the caller's own key cannot
@@ -493,12 +438,10 @@ async def resolve_ai_selection(
                     model,
                     source,
                 )
-                return _record_selection(
-                    ResolvedAiSelection(
-                        provider=provider,
-                        model=model,
-                        credential_source=source,
-                    )
+                return ResolvedAiSelection(
+                    provider=provider,
+                    model=model,
+                    credential_source=source,
                 )
         if rejected_key:
             raise ai_client.RejectedUserKeyError(
@@ -526,12 +469,10 @@ async def resolve_ai_selection(
                 provider,
                 model,
             )
-            return _record_selection(
-                ResolvedAiSelection(
-                    provider=provider,
-                    model=model,
-                    credential_source="user",
-                )
+            return ResolvedAiSelection(
+                provider=provider,
+                model=model,
+                credential_source="user",
             )
         # scoped catalog withdrew this pair's server source — the administrator
         # deactivated the provider or deselected the model — so say why.
@@ -554,12 +495,10 @@ async def resolve_ai_selection(
     pairs = {(entry.get("provider"), entry.get("id")) for entry in raw_catalog}
     if (provider, model) in pairs:
         await check_server_provider_grant("", provider, model)
-        return _record_selection(
-            ResolvedAiSelection(
-                provider=provider,
-                model=model,
-                credential_source="server",
-            )
+        return ResolvedAiSelection(
+            provider=provider,
+            model=model,
+            credential_source="server",
         )
 
     # A stale catalog may not yet contain a newly discovered pair. Refresh once;
@@ -571,12 +510,10 @@ async def resolve_ai_selection(
     pairs = {(entry.get("provider"), entry.get("id")) for entry in raw_catalog}
     if (provider, model) in pairs:
         await check_server_provider_grant("", provider, model)
-        return _record_selection(
-            ResolvedAiSelection(
-                provider=provider,
-                model=model,
-                credential_source="server",
-            )
+        return ResolvedAiSelection(
+            provider=provider,
+            model=model,
+            credential_source="server",
         )
 
     # Legacy friendly IDs have one explicit destination each. Mapping only when
@@ -586,43 +523,9 @@ async def resolve_ai_selection(
     matches = [p for p in providers_for_model if targets and p.lower() in targets]
     if len(providers_for_model) == 1 and len(matches) == 1:
         await check_server_provider_grant("", matches[0], model)
-        return _record_selection(
-            ResolvedAiSelection(
-                provider=matches[0],
-                model=model,
-                credential_source="server",
-            )
+        return ResolvedAiSelection(
+            provider=matches[0],
+            model=model,
+            credential_source="server",
         )
     raise ValueError(f"Unknown Pi-sidecar provider/model pair: {provider}/{model}")
-
-
-async def resolve_selection_via(
-    resolver_fn: Callable[..., Awaitable[Any]],
-    provider: str,
-    model: str,
-    *,
-    username: str | None = None,
-    default_fn: Any = None,
-    reset_stale: bool = False,
-    unspecified_source: Literal["user", "server", ""] = "server",
-) -> ResolvedAiSelection:
-    """Resolve via :func:`resolve_ai_selection`, or bridge a monkeypatched hook.
-
-    When *resolver_fn* matches *default_fn*, bypasses legacy tuple/ContextVar
-    plumbing and calls :func:`resolve_ai_selection` directly. When a test
-    monkeypatched *resolver_fn*, runs it (scoping ``ai_username`` if *username*
-    is supplied) and wraps the returned pair using :func:`coerce_legacy_selection`.
-    """
-    if default_fn is not None and resolver_fn is default_fn:
-        if reset_stale:
-            ai_client._selected_credential_source.set("")
-        return await resolve_ai_selection(provider, model, username=username)
-
-    if reset_stale:
-        ai_client._selected_credential_source.set("")
-    if username is not None:
-        with scoped_ai_context(username):
-            result = await resolver_fn(provider, model)
-    else:
-        result = await resolver_fn(provider, model)
-    return coerce_legacy_selection(result, unspecified_source=unspecified_source)

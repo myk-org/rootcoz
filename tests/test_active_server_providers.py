@@ -98,12 +98,18 @@ async def test_deactivated_provider_mid_chat_gets_deactivation_message(
     tmp_path, monkeypatch
 ):
     """Post-reply recheck surfaces the deactivation message, not the grant one."""
+    from rootcoz import ai_catalog
+
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sessions.db")
     await storage.init_db()
     monkeypatch.setattr(
-        ai_client,
-        "resolve_catalog_pair",
-        AsyncMock(return_value=("cursor", "cursor-model")),
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(
+            return_value=ai_catalog.ResolvedAiSelection(
+                "cursor", "cursor-model", "server"
+            )
+        ),
     )
     monkeypatch.setattr(
         ai_client,
@@ -113,8 +119,8 @@ async def test_deactivated_provider_mid_chat_gets_deactivation_message(
     # First check (before the call) passes; the post-reply recheck sees the
     # admin deactivate the provider mid-chat.
     monkeypatch.setattr(
-        ai_client,
-        "require_server_provider_grant",
+        ai_catalog,
+        "check_server_provider_grant",
         AsyncMock(
             side_effect=[
                 None,
@@ -162,14 +168,15 @@ async def test_inactive_provider_still_usable_with_own_key(monkeypatch):
             }
         ),
     )
+    from rootcoz import ai_catalog
+
     _set_active(monkeypatch, "anthropic")
     token = ai_client.ai_username.set("alice")
     try:
-        assert await ai_client.resolve_catalog_pair("openai", "openai-model") == (
-            "openai",
-            "openai-model",
+        selection = await ai_catalog.resolve_ai_selection("openai", "openai-model")
+        assert selection == ai_catalog.ResolvedAiSelection(
+            "openai", "openai-model", "user"
         )
-        assert ai_client._selected_credential_source.get() == "user"
     finally:
         ai_client.ai_username.reset(token)
     # Direct server-catalog path (no user scope) is rejected.

@@ -204,16 +204,17 @@ async def test_no_listing_allows_manual_only_with_matching_key(monkeypatch):
     )
     discovery = AsyncMock(return_value={"models": [], "modelListingSupported": False})
     monkeypatch.setattr(ai_client, "models_for_api_key", discovery)
+    from rootcoz import ai_catalog
+
     token = ai_client.ai_username.set("alice")
     try:
         scoped = await ai_client.scoped_models()
         assert scoped["xai"]
         assert all(not m["verified"] for m in scoped["xai"])
-        assert await ai_client.resolve_catalog_pair("xai", "manual-model") == (
-            "xai",
-            "manual-model",
+        selection = await ai_catalog.resolve_ai_selection("xai", "manual-model")
+        assert selection == ai_catalog.ResolvedAiSelection(
+            "xai", "manual-model", "user"
         )
-        assert ai_client._selected_credential_source.get() == "user"
         with pytest.raises(ValueError):
             await ai_client.resolve_catalog_pair("openai", "manual-model")
         with pytest.raises(ValueError):
@@ -273,10 +274,13 @@ async def test_missing_upstream_does_not_guess_user_models(monkeypatch):
             )
         ),
     )
+    from rootcoz import ai_catalog
+
     token = ai_client.ai_username.set("alice")
     try:
-        assert await ai_client.scoped_models() == {}
-        assert ai_client.model_listing_status.get()["openai"]["unavailable"]
+        catalog = await ai_catalog.load_scoped_catalog("alice")
+        assert catalog.providers == {}
+        assert catalog.provider_status["openai"]["unavailable"]
         with pytest.raises(ValueError, match="Key-scoped model discovery unavailable"):
             await ai_client.resolve_catalog_pair("openai", "made-up")
         # The server-pool entry is consulted even though this key's discovery
@@ -431,21 +435,21 @@ async def test_status_reports_models_the_key_actually_yielded(monkeypatch):
             ],
         },
     )
-    token = ai_client.ai_username.set("alice")
-    try:
-        scoped = await ai_client.scoped_models()
-        assert [entry["id"] for entry in scoped["openai"]] == ["gpt-4o-mini"]
-        status = ai_client.model_listing_status.get()["openai"]
-        assert status["has_api_key"] is True
-        # One model survived the filter, so one is reported, not the two returned.
-        assert status["model_count"] == 1
-    finally:
-        ai_client.ai_username.reset(token)
+    from rootcoz import ai_catalog
+
+    catalog = await ai_catalog.load_scoped_catalog("alice")
+    assert [entry["id"] for entry in catalog.providers["openai"]] == ["gpt-4o-mini"]
+    status = catalog.provider_status["openai"]
+    assert status["has_api_key"] is True
+    # One model survived the filter, so one is reported, not the two returned.
+    assert status["model_count"] == 1
 
 
 @pytest.mark.asyncio
 async def test_status_counts_distinct_model_ids(monkeypatch):
     """A discovery response repeating an ID must not inflate model_count."""
+    from rootcoz import ai_catalog
+
     _mock_key_discovery(
         monkeypatch,
         "openai",
@@ -458,27 +462,28 @@ async def test_status_counts_distinct_model_ids(monkeypatch):
             ],
         },
     )
-    token = ai_client.ai_username.set("alice")
-    try:
-        scoped = await ai_client.scoped_models()
-        assert sorted(entry["id"] for entry in scoped["openai"]) == ["dup", "other"]
-        assert ai_client.model_listing_status.get()["openai"]["model_count"] == 2
-    finally:
-        ai_client.ai_username.reset(token)
+    catalog = await ai_catalog.load_scoped_catalog("alice")
+    assert sorted(entry["id"] for entry in catalog.providers["openai"]) == [
+        "dup",
+        "other",
+    ]
+    assert catalog.provider_status["openai"]["model_count"] == 2
 
 
 @pytest.mark.asyncio
 async def test_manual_only_key_reports_zero_without_listing_support(monkeypatch):
     """No listing + no suggestions means manual entry, not a dead key."""
+    from rootcoz import ai_catalog
+
     _mock_key_discovery(
         monkeypatch, "mystery", {"modelListingSupported": False, "models": []}
     )
     token = ai_client.ai_username.set("alice")
     try:
-        scoped = await ai_client.scoped_models()
+        catalog = await ai_catalog.load_scoped_catalog("alice")
         # Preserved as an empty bucket so the provider stays selectable.
-        assert scoped["mystery"] == []
-        status = ai_client.model_listing_status.get()["mystery"]
+        assert catalog.providers["mystery"] == []
+        status = catalog.provider_status["mystery"]
         assert status["modelListingSupported"] is False
         assert status["model_count"] == 0
         # Manual entry is still accepted, so the key is usable.
@@ -685,14 +690,16 @@ async def test_unflagged_key_listing_is_not_marked(monkeypatch):
         "_get_model_catalog",
         AsyncMock(return_value=[{"provider": "openai", "id": "gpt-5.6-luna"}]),
     )
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    from rootcoz import ai_catalog
+
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     models = await _provider_models(monkeypatch, "openai")
     entry = next(model for model in models if model["id"] == "gpt-5.6-luna")
     assert "session_supported" not in entry
     assert "session_unsupported_reason" not in entry
     # v4.5.0 guard: the pair still resolves, so nothing was gated.
     monkeypatch.setattr(
-        ai_client, "require_server_provider_grant", AsyncMock(return_value=None)
+        ai_catalog, "check_server_provider_grant", AsyncMock(return_value=None)
     )
     assert await ai_client.resolve_catalog_pair("openai", "gpt-5.6-luna") == (
         "openai",
@@ -1014,12 +1021,17 @@ async def test_rejected_personal_key_serves_pair_from_server_pool(
     await storage.create_user(
         "reviewer", role="reviewer", can_use_server_providers=True
     )
+    from rootcoz import ai_catalog
+
     token = ai_client.ai_username.set("reviewer")
     with capture_main_logs(caplog, logger=("rootcoz.main", "rootcoz.ai_client")):
         try:
-            pair = await ai_client.resolve_catalog_pair("enmaas", "rits/deepseek-v4")
-            assert pair == ("enmaas", "rits/deepseek-v4")
-            assert ai_client._selected_credential_source.get() == "server"
+            selection = await ai_catalog.resolve_ai_selection(
+                "enmaas", "rits/deepseek-v4"
+            )
+            assert selection == ai_catalog.ResolvedAiSelection(
+                "enmaas", "rits/deepseek-v4", "server"
+            )
         finally:
             ai_client.ai_username.reset(token)
     assert "enmaas" in caplog.text
@@ -1033,6 +1045,8 @@ async def test_rejected_personal_key_free_pair_succeeds_and_non_free_refuses(
     keyed_db, monkeypatch
 ):
     """#592: the free-pair gate still admits, and still refuses a non-free pair."""
+    from rootcoz import ai_catalog
+
     _set_free_models(monkeypatch, True)
     _rejected_user_key(
         monkeypatch,
@@ -1046,11 +1060,9 @@ async def test_rejected_personal_key_free_pair_succeeds_and_non_free_refuses(
     await storage.set_free_ai_models([("enmaas", "free-model")], "admin")
     token = ai_client.ai_username.set("reporter")
     try:
-        assert await ai_client.resolve_catalog_pair("enmaas", "free-model") == (
-            "enmaas",
-            "free-model",
-        )
-        assert ai_client._selected_credential_source.get() == "server"
+        assert await ai_catalog.resolve_ai_selection(
+            "enmaas", "free-model"
+        ) == ai_catalog.ResolvedAiSelection("enmaas", "free-model", "server")
         with pytest.raises(ValueError, match="administrator grant"):
             await ai_client.resolve_catalog_pair("enmaas", "paid-model")
     finally:

@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from pi_sidecar_client import AIResult, SidecarClient
 from pi_sidecar_client import call_ai as sidecar_real_call_ai
 
-from rootcoz import ai_client, encryption, issue_matching, main, storage
+from rootcoz import ai_catalog, ai_client, encryption, issue_matching, main, storage
 from rootcoz.ai_client import _call_ai as real_internal_call_ai
 from rootcoz.ai_client import call_ai as real_call_ai
 from rootcoz.ai_client import call_ai_once as real_call_ai_once
@@ -481,7 +481,9 @@ async def test_sidecar_exception_never_exposes_user_key(
     monkeypatch, caplog, sidecar_name, session_id
 ):
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(
         ai_client, "session_key", AsyncMock(return_value="secret-value")
@@ -525,7 +527,9 @@ async def test_failed_sidecar_result_redacted_before_chat_logging(
 ):
     secret = "user-test-key"  # pragma: allowlist secret
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     original = AIResult(
@@ -584,7 +588,9 @@ async def test_real_sidecar_http_error_never_logs_user_key(
     # ``call_ai`` here would silently skip rootcoz's server-keyed prompt path.
     monkeypatch.setattr(ai_client, "_call_ai", real_internal_call_ai)
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     token = ai_client.ai_username.set("alice")
@@ -645,7 +651,9 @@ async def test_real_sidecar_http_error_never_logs_server_key(
     monkeypatch.setattr(pi_sidecar_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "_call_ai", real_internal_call_ai)
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
     monkeypatch.setattr(
@@ -653,7 +661,7 @@ async def test_real_sidecar_http_error_never_logs_server_key(
         "server_provider_key_with_generation",
         AsyncMock(return_value=(secret, None)),
     )
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_catalog, "check_server_provider_grant", AsyncMock())
     monkeypatch.setattr(
         ai_client, "_collect_server_redact_keys", AsyncMock(return_value=(secret,))
     )
@@ -696,7 +704,9 @@ async def test_keyed_failure_preserves_safe_retry_and_auth_signal(
     monkeypatch, detail, expected
 ):
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="review/key"))
     monkeypatch.setattr(
@@ -717,7 +727,9 @@ async def test_failed_keyed_call_keeps_transcript_session_id(monkeypatch):
     after session cleanup has cleared ``session_id``.
     """
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="review/key"))
 
@@ -765,7 +777,9 @@ async def test_real_sidecar_encoded_prompt_error_never_logs_user_key(
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
@@ -803,7 +817,9 @@ async def test_chat_initial_creation_encoded_error_never_logs_user_key(
     monkeypatch.setattr(chat, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     monkeypatch.setattr(
-        chat, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
@@ -848,7 +864,9 @@ async def test_keyed_prompt_empty_text_usage_never_logs_encoded_key(
     )
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     token = ai_client.ai_username.set("alice")
@@ -902,7 +920,9 @@ async def test_keyed_prompt_http_200_error_keeps_usage_without_logging_response(
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     token = ai_client.ai_username.set("alice")
     try:
@@ -946,7 +966,9 @@ async def test_real_sidecar_creation_encoded_error_never_logs_user_key(
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
@@ -983,7 +1005,9 @@ async def test_real_sidecar_creation_error_never_logs_user_key(
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
@@ -1034,7 +1058,9 @@ async def test_real_sidecar_keyed_once_preserves_usage_and_cleans_up(
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="user-key"))
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     try:
         result = await real_call_ai_once(
@@ -1074,7 +1100,9 @@ async def test_real_sidecar_wrapper_logs_raw_resumed_exception(monkeypatch, capl
 async def test_failed_issue_filter_result_does_not_log_key(monkeypatch):
     secret = "user-test-key"  # pragma: allowlist secret
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     monkeypatch.setattr(
@@ -1116,7 +1144,9 @@ async def test_resumed_chat_failure_hides_rotated_key_from_log_and_response(
     await storage.save_ai_session_source("sid", "alice", "p", "user")
     old_key = "rotated-user-key"  # pragma: allowlist secret
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(
         ai_client,
@@ -1159,7 +1189,9 @@ async def test_resumed_success_redacts_current_key_and_denies_rotated_key(
     await storage.update_user_ai_credential("alice", "p", old)
     await storage.save_ai_session_source("sid", "alice", "p", "user")
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=old))
     prompt = AsyncMock(return_value=AIResult(success=True, text=f"echo {old}"))
@@ -1193,7 +1225,9 @@ async def test_resumed_chat_lost_session_still_retries(monkeypatch):
         AsyncMock(return_value=("server", None)),
     )
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
     sidecar = AsyncMock(
@@ -1225,7 +1259,9 @@ async def test_resumed_chat_lost_session_still_retries(monkeypatch):
 async def test_successful_sidecar_result_keeps_analysis_text(monkeypatch):
     secret = "user-test-key"  # pragma: allowlist secret
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     original = AIResult(success=True, text=f"analysis mentions {secret}")
@@ -1268,7 +1304,9 @@ async def test_real_sidecar_success_echo_is_not_logged_or_persisted(
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
@@ -1312,7 +1350,9 @@ async def test_real_sidecar_failed_new_chat_prompt_deletes_session(
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(chat, "call_ai", real_call_ai)
     try:
@@ -1358,7 +1398,9 @@ async def test_failed_prompt_cleanup_error_keeps_session_without_logging(
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     try:
         with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
@@ -1410,7 +1452,9 @@ async def test_call_ai_uses_key_only_for_new_sessions(tmp_path, monkeypatch):
     await storage.init_db()
     await storage.save_ai_session_source("sid", "alice", "p", "user")
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="secret"))
     sidecar_call = AsyncMock(return_value=AIResult(success=True, text="ok"))
@@ -1491,7 +1535,9 @@ async def test_rotating_credential_deletes_sidecar_session(tmp_path, monkeypatch
 @pytest.mark.asyncio
 async def test_invalid_user_key_does_not_fall_back_to_server(monkeypatch):
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="invalid"))
     sidecar_call = AsyncMock(side_effect=ValueError("invalid key"))
@@ -1523,12 +1569,13 @@ async def test_chat_session_creation_and_resumed_turn(
     )
     monkeypatch.setattr(chat, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(
-        chat, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(
         ai_client, "session_key", AsyncMock(return_value="secret-value")
     )
-    ai_client._selected_credential_source.set("user")
     assert (
         await chat._create_chat_session(
             system_prompt="system",
@@ -1542,7 +1589,9 @@ async def test_chat_session_creation_and_resumed_turn(
     assert expected_key.encode() in requests[0].content
 
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     sidecar_call = AsyncMock()
 
@@ -1830,7 +1879,9 @@ async def test_session_creation_logs_frames_not_secret(monkeypatch):
     client.create_session.side_effect = ValueError(secret)
     monkeypatch.setattr(chat, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(
-        chat, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     messages = []

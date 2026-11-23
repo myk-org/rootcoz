@@ -16,14 +16,12 @@ from pi_sidecar_client import get_sidecar_client
 
 from rootcoz import ai_catalog, get_child_logger
 from rootcoz.ai_client import (
-    _DEFAULT_RESOLVE_CATALOG_PAIR,
     CHAT_BUILTIN_TOOLS,
     SessionCreationRefused,
     _sanitize_diagnostic,
     call_ai,
     create_session_safely,
     format_ai_diagnostic,
-    resolve_catalog_pair,
 )
 from rootcoz.error_messages import tracker_credential_message, unavailable_sentence
 from rootcoz.jira import (
@@ -1885,13 +1883,7 @@ async def _create_chat_session(
     )
     try:
         client = get_sidecar_client()
-        selection = await ai_catalog.resolve_selection_via(
-            resolve_catalog_pair,
-            ai_provider,
-            ai_model,
-            default_fn=_DEFAULT_RESOLVE_CATALOG_PAIR,
-            unspecified_source="",
-        )
+        selection = await ai_catalog.resolve_ai_selection(ai_provider, ai_model)
         sidecar_provider, sidecar_model = selection.as_pair()
         ai_catalog.validate_pinned_source(selection)
         create_kwargs: dict[str, Any] = {

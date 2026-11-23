@@ -118,11 +118,12 @@ class Rig:
             main, "_create_ai_auth_header", AsyncMock(return_value="")
         )
 
-        async def validate(provider, model):
-            ai_client._selected_credential_source.set("user")
-            return provider, model
+        from rootcoz import ai_catalog
 
-        self.monkeypatch.setattr(main, "_validate_catalog_pair", validate)
+        async def validate(provider, model, *, username=None):
+            return ai_catalog.ResolvedAiSelection(provider, model, "user")
+
+        self.monkeypatch.setattr(main, "_validate_catalog_selection", validate)
 
         async def create_session(**kwargs):
             self.session_observed = dict(kwargs)
@@ -251,7 +252,6 @@ async def test_deactivated_provider_and_missing_grant_stay_inline(
     assert refused.value.status_code == 400
 
     async def no_grant(*_args, **_kwargs):
-        ai_client._selected_credential_source.set("")
         raise HTTPException(status_code=422, detail="grant required")
 
     rig.monkeypatch.setattr(main, "_validate_chat_selection", no_grant)

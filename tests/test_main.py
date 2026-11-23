@@ -19451,30 +19451,24 @@ class TestAiModelsListingStatus:
             )
         )
 
-    @staticmethod
-    def _patch_listing(monkeypatch, listing: dict[str, Any]) -> None:
-        """Point ``model_listing_status`` at a context var holding *listing*."""
-        from contextvars import ContextVar
-
-        from rootcoz import main
-
-        var: ContextVar[dict[str, Any]] = ContextVar("test_listing_status")
-        var.set(listing)
-        monkeypatch.setattr(main, "model_listing_status", var)
-
     @pytest.mark.parametrize("is_admin", [True, False])
     @pytest.mark.asyncio
     async def test_list_all_returns_providers_and_listing_status(
         self, monkeypatch, is_admin: bool
     ) -> None:
-        from rootcoz import main
+        from rootcoz import ai_catalog, main
 
         catalog = {"EnMaaS": [{"provider": "EnMaaS", "id": "m1"}]}
-        monkeypatch.setattr(
-            main, "scoped_models_for_request", AsyncMock(return_value=catalog)
-        )
         listing = {"EnMaaS": {"modelListingSupported": True}}
-        self._patch_listing(monkeypatch, listing)
+        monkeypatch.setattr(
+            main,
+            "scoped_models_for_request",
+            AsyncMock(
+                return_value=ai_catalog.ScopedCatalog(
+                    providers=catalog, provider_status=listing
+                )
+            ),
+        )
 
         data = await main.list_ai_models(self._request(is_admin=is_admin), provider="")
 
@@ -19485,14 +19479,18 @@ class TestAiModelsListingStatus:
     async def test_list_single_provider_has_no_provider_status(
         self, monkeypatch
     ) -> None:
-        from rootcoz import main
+        from rootcoz import ai_catalog, main
 
         monkeypatch.setattr(
             main,
             "scoped_models_for_request",
-            AsyncMock(return_value={"EnMaaS": [{"provider": "EnMaaS", "id": "m1"}]}),
+            AsyncMock(
+                return_value=ai_catalog.ScopedCatalog(
+                    providers={"EnMaaS": [{"provider": "EnMaaS", "id": "m1"}]},
+                    provider_status={},
+                )
+            ),
         )
-        self._patch_listing(monkeypatch, {})
 
         data = await main.list_ai_models(
             self._request(is_admin=True), provider="EnMaaS"
@@ -19564,7 +19562,7 @@ class TestAiModelsListingStatus:
 async def test_chat_send_validates_with_sender_credentials(
     monkeypatch, tmp_path, admin, credential_source
 ):
-    from rootcoz import ai_client, main
+    from rootcoz import ai_catalog, ai_client, main
     from rootcoz.models import ChatMessageRequest
 
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "send.db")
@@ -19597,13 +19595,11 @@ async def test_chat_send_validates_with_sender_credentials(
     monkeypatch.setattr(main, "notify_chat_changed", lambda *args, **kwargs: None)
     seen = []
 
-    async def validate(provider, model):
-        seen.append((ai_client.ai_username.get(), "validated"))
-        ai_client._selected_credential_source.set(credential_source)
-        return provider, model
+    async def validate(provider, model, *, username=None):
+        seen.append((username, "validated"))
+        return ai_catalog.ResolvedAiSelection(provider, model, credential_source)
 
-    monkeypatch.setattr(main, "resolve_catalog_pair", validate)
-    ai_client._selected_credential_source.set("")
+    monkeypatch.setattr(ai_catalog, "resolve_ai_selection", validate)
     send = main.send_admin_chat_message if admin else main.send_chat_message
     args = (
         ChatMessageRequest(
@@ -19616,13 +19612,13 @@ async def test_chat_send_validates_with_sender_credentials(
     try:
         result = await (send(*args) if admin else send("job", *args))
         assert result["assistant_message_id"] == 2
-        # The sender's identity is the scope for validation, then restored.
+        # The sender's identity is passed explicitly, without mutating ambient context.
         assert seen == [("alice", "validated")]
         assert ai_client.ai_username.get() == "previous"
 
         monkeypatch.setattr(
-            main,
-            "resolve_catalog_pair",
+            ai_catalog,
+            "resolve_ai_selection",
             AsyncMock(side_effect=ValueError("invalid model")),
         )
         with pytest.raises(HTTPException) as exc:
@@ -19635,7 +19631,7 @@ async def test_chat_send_validates_with_sender_credentials(
 
 @pytest.mark.asyncio
 async def test_admin_chat_init_uses_selected_source(monkeypatch, tmp_path):
-    from rootcoz import ai_client, main
+    from rootcoz import ai_catalog, ai_client, main
     from rootcoz.engine import chat
     from rootcoz.models import ChatInitRequest
 
@@ -19643,11 +19639,10 @@ async def test_admin_chat_init_uses_selected_source(monkeypatch, tmp_path):
     await storage.init_db()
     await storage.create_admin_user("alice")
 
-    async def validate(provider, model):
-        ai_client._selected_credential_source.set("server")
-        return provider, model
+    async def validate(provider, model, *, username=None):
+        return ai_catalog.ResolvedAiSelection(provider, model, "server")
 
-    monkeypatch.setattr(main, "_validate_catalog_pair", validate)
+    monkeypatch.setattr(main, "_validate_catalog_selection", validate)
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
     monkeypatch.setattr(main.storage, "get_chat_messages", AsyncMock(return_value=[]))
     monkeypatch.setattr(

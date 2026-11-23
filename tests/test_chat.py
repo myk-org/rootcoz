@@ -1940,10 +1940,14 @@ class TestTheNoticeRendersAboveTheAnswer:
                 return_value=({"ai_provider": "openai", "ai_model": "m"}, "user")
             ),
         )
+        from rootcoz import ai_catalog
+
         monkeypatch.setattr(
             main,
             "_normalize_and_validate_ai_params",
-            AsyncMock(return_value=("openai", "m")),
+            AsyncMock(
+                return_value=ai_catalog.ResolvedAiSelection("openai", "m", "user")
+            ),
         )
         monkeypatch.setattr(
             main, "_check_chat_session_choice", AsyncMock(return_value=("sid", "user"))
@@ -2023,10 +2027,14 @@ class TestTheNoticeRendersAboveTheAnswer:
                 return_value=({"ai_provider": "openai", "ai_model": "m"}, "user")
             ),
         )
+        from rootcoz import ai_catalog
+
         monkeypatch.setattr(
             main,
             "_normalize_and_validate_ai_params",
-            AsyncMock(return_value=("openai", "m")),
+            AsyncMock(
+                return_value=ai_catalog.ResolvedAiSelection("openai", "m", "user")
+            ),
         )
         monkeypatch.setattr(
             main, "_check_chat_session_choice", AsyncMock(return_value=("sid", "user"))
@@ -3303,10 +3311,14 @@ async def test_chat_init_prepares_outside_the_job_barrier(setup_test_db, monkeyp
     await storage.save_result(
         job_id, "", "completed", {"status": "completed", "summary": "t", "failures": []}
     )
+    from rootcoz import ai_catalog
+
     monkeypatch.setattr(
         main_mod,
         "_validate_chat_selection",
-        AsyncMock(return_value=("claude", "sonnet-4")),
+        AsyncMock(
+            return_value=ai_catalog.ResolvedAiSelection("claude", "sonnet-4", "server")
+        ),
     )
     init_task = asyncio.create_task(
         main_mod._init_chat_under_barrier(
@@ -3498,9 +3510,6 @@ class TestChatStorage:
 
 async def _seed_chat_session(job_id: str, username: str = "alice") -> None:
     """Persist an established server session for processor-only tests."""
-    from rootcoz.ai_client import _selected_credential_source
-
-    _selected_credential_source.set("server")
     session_id = f"session-{job_id}"
     await storage.save_ai_session_source(session_id, username, "claude", "server")
     await storage.add_chat_message(
@@ -4580,11 +4589,13 @@ async def test_rotation_does_not_reactivate_older_server_chat(
         )
         return "fresh-server"
 
+    from rootcoz import ai_catalog
+
     with (
         patch(
             "rootcoz.main._validate_chat_selection",
             new_callable=AsyncMock,
-            return_value=("claude", "sonnet-4"),
+            return_value=ai_catalog.ResolvedAiSelection("claude", "sonnet-4", "server"),
         ),
         patch(
             "rootcoz.main._create_ai_auth_header",
@@ -4634,13 +4645,14 @@ async def test_init_without_session_is_a_failed_row(
     path = "/api/admin/chat" if admin else f"/api/chat/{job_id}"
     if not admin:
         await _save_job(temp_db_path, job_id)
+    from rootcoz import ai_catalog
     from rootcoz import main as main_mod
 
     with (
         patch(
             "rootcoz.main._validate_chat_selection",
             new_callable=AsyncMock,
-            return_value=("claude", "sonnet-4"),
+            return_value=ai_catalog.ResolvedAiSelection("claude", "sonnet-4", "server"),
         ),
         patch(
             "rootcoz.main._create_ai_auth_header",
@@ -4735,10 +4747,9 @@ async def test_orphan_history_can_start_without_losing_messages(
 
     def select(*args, **kwargs):
         """Resolve as the real validator does: this pair comes from the server pool."""
-        from rootcoz import ai_client
+        from rootcoz import ai_catalog
 
-        ai_client._selected_credential_source.set("server")
-        return "claude", "sonnet-4"
+        return ai_catalog.ResolvedAiSelection("claude", "sonnet-4", "server")
 
     with (
         patch("rootcoz.main._validate_chat_selection", side_effect=select),
@@ -6304,9 +6315,13 @@ async def _chat_turn(monkeypatch, tmp_path, handler, session_id=None):
     await storage.create_admin_user("alice")
     await storage.update_user_ai_credential("alice", "openai", "user-chat-key")
     client, requests = _chat_sidecar(handler)
+    from rootcoz import ai_catalog
+
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("openai", "m", "user")),
     )
     monkeypatch.setattr(
         ai_client, "session_key", AsyncMock(return_value="user-chat-key")

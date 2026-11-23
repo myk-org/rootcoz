@@ -648,6 +648,7 @@ export function useProviderModels(provider: string) {
   const providerRef = useRef(normalized)
   const providerSeqRef = useRef(0)
   const refreshSeqRef = useRef(0)
+  const appliedRefreshSeqRef = useRef(0)
   const mountedRef = useRef(false)
 
   useEffect(() => {
@@ -662,15 +663,15 @@ export function useProviderModels(provider: string) {
     providerSeqRef.current++
     if (!normalized) return
     let ignore = false
-    const seq = refreshSeqRef.current
+    const appliedSeq = appliedRefreshSeqRef.current
     fetchModelsForProvider(normalized)
       .then((models) => {
-        if (!ignore && refreshSeqRef.current === seq) {
+        if (!ignore && appliedRefreshSeqRef.current === appliedSeq) {
           setState({ provider: normalized, models })
         }
       })
       .catch(() => {
-        if (!ignore && refreshSeqRef.current === seq) {
+        if (!ignore && appliedRefreshSeqRef.current === appliedSeq) {
           setState({ provider: normalized, models: [] })
         }
       })
@@ -701,6 +702,7 @@ export function useProviderModels(provider: string) {
           providerSeqRef.current === startProviderSeq &&
           refreshSeqRef.current === seq
         ) {
+          appliedRefreshSeqRef.current++
           setState({ provider: currentProvider, models })
         }
       }

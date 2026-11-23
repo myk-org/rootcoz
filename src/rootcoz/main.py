@@ -89,11 +89,9 @@ from rootcoz.ai_client import (
     call_ai_once,
     format_ai_diagnostic,
     list_models,
-    model_listing_status,
     normalize_provider,
     parse_ambient_auth_provider_ids,
     registered_provider_ids,
-    resolve_catalog_pair,
     supported_key_providers,
     update_model_catalog,
 )
@@ -5385,23 +5383,12 @@ async def _validate_catalog_selection(
     model: str,
     *,
     username: str | None = None,
-    reset_stale: bool = False,
 ) -> ai_catalog.ResolvedAiSelection:
     """Return a catalog-backed AI selection or a clear client error."""
-    from rootcoz.ai_client import (
-        _DEFAULT_RESOLVE_CATALOG_PAIR,
-        InactiveServerProviderError,
-    )
+    from rootcoz.ai_client import InactiveServerProviderError
 
     try:
-        return await ai_catalog.resolve_selection_via(
-            resolve_catalog_pair,
-            provider,
-            model,
-            username=username,
-            default_fn=_DEFAULT_RESOLVE_CATALOG_PAIR,
-            reset_stale=reset_stale,
-        )
+        return await ai_catalog.resolve_ai_selection(provider, model, username=username)
     except InactiveServerProviderError as exc:
         logger.info(
             "Rejected server credentials for deactivated provider: %s/%s",
@@ -5430,9 +5417,6 @@ async def _validate_catalog_selection(
 async def _validate_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     """Return a catalog-backed AI pair or a clear client error."""
     return (await _validate_catalog_selection(provider, model)).as_pair()
-
-
-_DEFAULT_VALIDATE_CATALOG_PAIR = _validate_catalog_pair
 
 
 async def _resolve_ai_config(
@@ -17769,16 +17753,7 @@ async def list_ai_models(
     _require_authenticated(request)
     logger.debug("GET /api/ai-models provider=%s", provider)
     try:
-        scoped = await scoped_models_for_request(request)
-        if isinstance(scoped, ai_catalog.ScopedCatalog):
-            catalog = scoped
-        else:
-            # Compatibility bridge for tests monkeypatching scoped_models_for_request
-            # to return a plain provider dict alongside model_listing_status.
-            catalog = ai_catalog.ScopedCatalog(
-                providers=scoped,
-                provider_status=model_listing_status.get() or {},
-            )
+        catalog = await scoped_models_for_request(request)
         if provider:
             exact_provider, models, status_entry = catalog.models_for(provider)
             if not models and status_entry is None:

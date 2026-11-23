@@ -16,11 +16,17 @@ from rootcoz.token_tracking import build_token_usage_summary
 
 @pytest.mark.asyncio
 async def test_mixed_calls_resume_and_legacy(tmp_path, monkeypatch):
+    from rootcoz import ai_catalog
+
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "usage.db")
     await storage.init_db()
     await storage.create_admin_user("alice")
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "model"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(
+            return_value=ai_catalog.ResolvedAiSelection("openai", "model", "user")
+        ),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="secret"))
     monkeypatch.setattr(
@@ -41,7 +47,13 @@ async def test_mixed_calls_resume_and_legacy(tmp_path, monkeypatch):
     try:
         user = await real_call_ai("one", ai_provider="openai", ai_model="model")
         await storage.save_ai_session_source("user-sid", "alice", "openai", "user")
-        ai_client._selected_credential_source.set("server")
+        monkeypatch.setattr(
+            ai_catalog,
+            "resolve_ai_selection",
+            AsyncMock(
+                return_value=ai_catalog.ResolvedAiSelection("openai", "model", "server")
+            ),
+        )
         server = await real_call_ai("two", ai_provider="openai", ai_model="model")
         # The current key no longer determines a resumed session's source.
         resumed = await real_call_ai(
@@ -128,9 +140,13 @@ async def test_keyed_session_creation_survives_key_rotation(tmp_path, monkeypatc
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "keyed.db")
     await storage.init_db()
     await storage.create_admin_user("alice")
+    from rootcoz import ai_catalog
+
     await storage.update_user_ai_credential("alice", "openai", "user-key")
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("openai", "m", "user")),
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="user-key"))
 
@@ -387,10 +403,14 @@ async def test_clear_chat_revokes_only_deleted_user_session(tmp_path, monkeypatc
 
 @pytest.mark.asyncio
 async def test_lookup_failure_never_prompts(tmp_path, monkeypatch):
+    from rootcoz import ai_catalog
+
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "missing.db")
     await storage.init_db()
     monkeypatch.setattr(
-        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+        ai_catalog,
+        "resolve_ai_selection",
+        AsyncMock(return_value=ai_catalog.ResolvedAiSelection("p", "m", "server")),
     )
     monkeypatch.setattr(
         storage,

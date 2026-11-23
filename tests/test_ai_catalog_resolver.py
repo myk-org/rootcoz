@@ -193,23 +193,13 @@ class TestLoadScopedCatalog:
         # Seed sentinel values in ambient ContextVars and verify NONE are mutated.
         tok_user = ai_client.ai_username.set("sentinel-user")
         tok_source = ai_client.chat_session_source.set("server")
-        tok_selected = ai_client._selected_credential_source.set("user")
-        sentinel_status = {"sentinel": {"modelListingSupported": True}}
-        tok_status = ai_client.model_listing_status.set(sentinel_status)
-        tok_rejected = ai_client._rejected_user_keys.set(frozenset({"sentinel-rej"}))
         try:
             catalog = await load_scoped_catalog("alice")
 
             # Ambient ContextVars untouched!
             assert ai_client.ai_username.get() == "sentinel-user"
             assert ai_client.chat_session_source.get() == "server"
-            assert ai_client._selected_credential_source.get() == "user"
-            assert ai_client.model_listing_status.get() is sentinel_status
-            assert ai_client._rejected_user_keys.get() == frozenset({"sentinel-rej"})
         finally:
-            ai_client._rejected_user_keys.reset(tok_rejected)
-            ai_client.model_listing_status.reset(tok_status)
-            ai_client._selected_credential_source.reset(tok_selected)
             ai_client.chat_session_source.reset(tok_source)
             ai_client.ai_username.reset(tok_user)
 
@@ -397,8 +387,10 @@ class TestResolveAiSelection:
     async def test_legacy_alias_unambiguous_resolves_and_ambiguous_fails(
         self, catalog_db, monkeypatch
     ):
+        from rootcoz import ai_catalog
+
         monkeypatch.setattr(
-            ai_client, "require_server_provider_grant", AsyncMock(return_value=None)
+            ai_catalog, "check_server_provider_grant", AsyncMock(return_value=None)
         )
         # Unambiguous legacy alias: gemini -> google.
         monkeypatch.setattr(
@@ -540,12 +532,26 @@ class TestGrantAndContextScoping:
 
 
 def test_main_and_chat_have_no_direct_credential_source_contextvar_references():
-    """Credential-source ContextVars must stay encapsulated inside ai_catalog/ai_client."""
+    """Credential-source ContextVars and dual-path test-patch branches must not exist."""
     repo_root = Path(__file__).resolve().parents[1]
-    forbidden_tokens = ("_selected_credential_source", "chat_session_source")
+    forbidden_in_all_src = (
+        "_selected_credential_source",
+        "model_listing_status",
+        "_rejected_user_keys",
+        "_DEFAULT_VALIDATE_",
+        "_DEFAULT_RESOLVE_",
+        "_DEFAULT_SCOPED_",
+        "_DEFAULT_REQUIRE_",
+        "_DEFAULT_NORMALIZE_",
+    )
+    for py_file in (repo_root / "src" / "rootcoz").rglob("*.py"):
+        source_text = py_file.read_text(encoding="utf-8")
+        for token in forbidden_in_all_src:
+            assert token not in source_text, (
+                f"{py_file.relative_to(repo_root)} must not reference {token!r}"
+            )
     for rel_path in ("src/rootcoz/main.py", "src/rootcoz/engine/chat.py"):
         source_text = (repo_root / rel_path).read_text(encoding="utf-8")
-        for token in forbidden_tokens:
-            assert token not in source_text, (
-                f"{rel_path} must not reference {token!r}; route through rootcoz.ai_catalog"
-            )
+        assert "chat_session_source" not in source_text, (
+            f"{rel_path} must not reference 'chat_session_source'; route through rootcoz.ai_catalog"
+        )
