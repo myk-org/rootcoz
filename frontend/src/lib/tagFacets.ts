@@ -64,14 +64,34 @@ export function isFacetOptionHidden(option: FilterFacetOption, selected: boolean
   return option.tags.length > 0 && option.missing_tags.length === option.tags.length
 }
 
-/** Return the option labels currently active for *facet* given the flat `label=` list. */
+/**
+ * Return the option labels currently active for *facet* given the flat `label=` list.
+ *
+ * Full-tag matches are selected first; any remaining URL tag belonging to this
+ * facet (e.g. a legacy single-tag bookmark targeting a multi-tag option) also
+ * selects its owning option so bookmarked filters remain visible in the dropdown
+ * without falsely selecting overlapping superset options when an exact option
+ * already covers that tag.
+ */
 export function selectedOptionLabelsForFacet(
   facet: FilterFacet,
   selectedLabels: readonly string[],
 ): string[] {
   const labelSet = new Set(selectedLabels)
+  const exactLabels = new Set<string>()
+  const coveredTags = new Set<string>()
+  for (const opt of facet.options) {
+    if (opt.tags.length > 0 && opt.tags.every((t) => labelSet.has(t))) {
+      exactLabels.add(opt.label)
+      for (const tag of opt.tags) coveredTags.add(tag)
+    }
+  }
   return facet.options
-    .filter((opt) => opt.tags.length > 0 && opt.tags.every((t) => labelSet.has(t)))
+    .filter(
+      (opt) =>
+        exactLabels.has(opt.label) ||
+        opt.tags.some((t) => labelSet.has(t) && !coveredTags.has(t)),
+    )
     .map((opt) => opt.label)
 }
 
@@ -80,7 +100,8 @@ export function selectedOptionLabelsForFacet(
  *
  * Preserves tags belonging to other facets or ungrouped tag chips; removes tags
  * of deselected options unless another still-selected option in this facet also
- * references them.
+ * references them; and adds tags only for newly selected options so partial
+ * bookmarks keep their exact tag set unless explicitly re-picked.
  */
 export function applyFacetOptionChange(
   facet: FilterFacet,
@@ -115,7 +136,7 @@ export function applyFacetOptionChange(
   }
 
   for (const opt of facet.options) {
-    if (!nextSelected.has(opt.label)) continue
+    if (!nextSelected.has(opt.label) || prevSelected.has(opt.label)) continue
     for (const tag of opt.tags) {
       if (!seen.has(tag)) {
         seen.add(tag)

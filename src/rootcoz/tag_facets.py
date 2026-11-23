@@ -243,16 +243,42 @@ def collect_facet_tags(facets: Sequence[TagFacet]) -> set[str]:
     return {tag for facet in facets for opt in facet.options for tag in opt.tags}
 
 
-def collect_option_tag_refs(
+def collect_option_tag_sets(
     facets: Sequence[TagFacet],
-) -> set[tuple[str, str, str]]:
-    """Return ``(facet_id, option_label, tag)`` tuples across *facets*."""
-    return {
-        (facet.id, opt.label, tag)
-        for facet in facets
-        for opt in facet.options
-        for tag in opt.tags
-    }
+) -> list[frozenset[str]]:
+    """Return each option's tag set across *facets* (preserving multiplicity)."""
+    return [frozenset(opt.tags) for facet in facets for opt in facet.options]
+
+
+def find_newly_introduced_unknown_tags(
+    submitted: Sequence[TagFacet],
+    live_labels: set[str],
+    existing_option_sets: Sequence[frozenset[str]] | None = None,
+) -> list[str]:
+    """Return sorted unknown tags that are NOT carried over 1-to-1 from an existing option.
+
+    Each existing option may cover at most one submitted option whose missing
+    tags are a subset of that existing option's tags. This lets admins rename
+    or reorder options/facets holding a vanished tag, or persist an unchanged
+    env config, while still rejecting copying a vanished tag into additional
+    options or introducing brand-new unknown tags.
+    """
+    available = list(existing_option_sets) if existing_option_sets is not None else []
+    unknown: set[str] = set()
+    for facet in submitted:
+        for opt in facet.options:
+            opt_missing = frozenset(t for t in opt.tags if t not in live_labels)
+            if not opt_missing:
+                continue
+            matched_idx = next(
+                (i for i, existing in enumerate(available) if opt_missing <= existing),
+                None,
+            )
+            if matched_idx is not None:
+                available.pop(matched_idx)
+            else:
+                unknown.update(opt_missing)
+    return sorted(unknown)
 
 
 def partition_labels_by_facets(

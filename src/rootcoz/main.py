@@ -385,8 +385,9 @@ from rootcoz.storage import (
 from rootcoz.tag_facets import (
     FilterFacetsResponse,
     TagFacet,
-    collect_option_tag_refs,
+    collect_option_tag_sets,
     diff_tag_facets,
+    find_newly_introduced_unknown_tags,
     parse_tag_facets,
     serialize_tag_facets,
 )
@@ -23219,17 +23220,16 @@ async def _validate_and_normalize_tag_facets(
     raw_facets: Any,
     *,
     allow_missing_tags: bool = False,
-    existing_refs: set[tuple[str, str, str]] | None = None,
+    existing_option_sets: Sequence[frozenset[str]] | None = None,
 ) -> str:
     """Validate ``tag_facets`` schema and (optionally) live tag existence.
 
-    Raises HTTP 422 on schema violations or newly-introduced ``(facet_id,
-    option_label, tag)`` references whose tag is missing from
-    ``job_metadata_labels``. Only unchanged references already present in
-    *existing_refs* are exempted so a vanished tag never blocks editing other
-    facets or persisting an env config, while still blocking adding that
-    vanished tag to any new facet or option. *allow_missing_tags* bypasses
-    the live-label check for backup imports onto fresh/empty databases.
+    Raises HTTP 422 on schema violations or newly-introduced unknown tags
+    missing from ``job_metadata_labels``. Existing options holding a vanished
+    tag are matched 1-to-1 via *existing_option_sets* so renaming or
+    reordering options/facets and persisting env config still succeed, while
+    duplicating a vanished tag into additional options or introducing a new
+    unknown tag fails with 422.
     """
     if raw_facets is None or (isinstance(raw_facets, str) and not raw_facets.strip()):
         return "[]"
@@ -23237,25 +23237,19 @@ async def _validate_and_normalize_tag_facets(
         parsed_facets = parse_tag_facets(raw_facets, strict=True)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"tag_facets: {exc}") from exc
-    if not allow_missing_tags:
-        submitted_refs = collect_option_tag_refs(parsed_facets)
-        new_refs = (
-            submitted_refs - existing_refs
-            if existing_refs is not None
-            else submitted_refs
+    if not allow_missing_tags and parsed_facets:
+        live_labels = await storage.get_live_job_labels()
+        unknown_tags = find_newly_introduced_unknown_tags(
+            parsed_facets, live_labels, existing_option_sets
         )
-        check_tags = {tag for _, _, tag in new_refs}
-        if check_tags:
-            live_labels = await storage.get_live_job_labels()
-            unknown_tags = sorted(check_tags - live_labels)
-            if unknown_tags:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "tag_facets: unknown tag(s) not present in job "
-                        f"metadata: {', '.join(unknown_tags)}"
-                    ),
-                )
+        if unknown_tags:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "tag_facets: unknown tag(s) not present in job "
+                    f"metadata: {', '.join(unknown_tags)}"
+                ),
+            )
     return serialize_tag_facets(parsed_facets)
 
 
@@ -23343,15 +23337,15 @@ async def _validate_settings_updates(
     # tags against live job_metadata_labels (imports allow missing tags so
     # restoring a backup onto an empty DB succeeds).
     if "tag_facets" in settings_updates:
-        existing_refs = (
+        existing_option_sets = (
             None
             if allow_missing_facet_tags
-            else collect_option_tag_refs(get_settings().parsed_tag_facets)
+            else collect_option_tag_sets(get_settings().parsed_tag_facets)
         )
         settings_updates["tag_facets"] = await _validate_and_normalize_tag_facets(
             settings_updates["tag_facets"],
             allow_missing_tags=allow_missing_facet_tags,
-            existing_refs=existing_refs,
+            existing_option_sets=existing_option_sets,
         )
 
     for key, value in settings_updates.items():
@@ -24086,7 +24080,9 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         env_value = await _validate_and_normalize_tag_facets(
             env_value,
             allow_missing_tags=False,
-            existing_refs=collect_option_tag_refs(get_settings().parsed_tag_facets),
+            existing_option_sets=collect_option_tag_sets(
+                get_settings().parsed_tag_facets
+            ),
         )
 
     username = request.state.username or "admin"

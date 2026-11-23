@@ -681,22 +681,42 @@ class TestTagFacetsAPI:
             == 200
         )
 
-        # Moving the vanished tag into a DIFFERENT facet/option is rejected with 422
-        copied_vanished = [
+        # Renaming the option or facet ID that already holds the vanished tag succeeds
+        renamed_opt = [
             {
-                "id": "platform",
+                "id": "platform-v2",
                 "name": "Platform",
-                "options": [{"label": "AWS", "tags": ["aws"]}],
+                "options": [
+                    {"label": "AWS", "tags": ["aws"]},
+                    {"label": "Legacy (deprecated)", "tags": ["old-tag"]},
+                ],
             },
+            {**initial[1], "name": "Storage class"},
+        ]
+        assert (
+            facet_client.put(
+                "/api/admin/settings",
+                json={"settings": {"tag_facets": json.dumps(renamed_opt)}},
+            ).status_code
+            == 200
+        )
+
+        # Duplicating the vanished tag into an additional option is rejected with 422
+        duplicated_vanished = [
             {
-                "id": "storage",
-                "name": "Storage class",
-                "options": [{"label": "Reused", "tags": ["old-tag"]}],
+                "id": "platform-v2",
+                "name": "Platform",
+                "options": [
+                    {"label": "AWS", "tags": ["aws"]},
+                    {"label": "Legacy (deprecated)", "tags": ["old-tag"]},
+                    {"label": "Legacy copy", "tags": ["old-tag"]},
+                ],
             },
+            {**initial[1], "name": "Storage class"},
         ]
         reused_resp = facet_client.put(
             "/api/admin/settings",
-            json={"settings": {"tag_facets": json.dumps(copied_vanished)}},
+            json={"settings": {"tag_facets": json.dumps(duplicated_vanished)}},
         )
         assert reused_resp.status_code == 422
         assert "old-tag" in reused_resp.json()["detail"]

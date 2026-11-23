@@ -150,6 +150,13 @@ describe('FacetDropdowns (#658)', () => {
 
     // Single-tag AWS=[aws] selected does NOT spuriously select multi-tag Cloud=[aws,gcp]
     expect(selectedOptionLabelsForFacet(SAMPLE_FACETS[0], ['aws'])).toEqual(['AWS'])
+    // Legacy single-tag bookmark targeting an uncovered tag of multi-tag Cloud=[aws,gcp]
+    // selects Cloud without expanding its tags when adding another option
+    expect(selectedOptionLabelsForFacet(SAMPLE_FACETS[0], ['gcp'])).toEqual(['Cloud'])
+    expect(applyFacetOptionChange(SAMPLE_FACETS[0], ['gcp'], ['Cloud', 'Bare metal'])).toEqual([
+      'gcp',
+      'bare-metal',
+    ])
 
     fireEvent.click(screen.getByRole('combobox', { name: 'Add Platform' }))
     fireEvent.mouseDown(screen.getByRole('option', { name: 'Bare metal (5)' }))
