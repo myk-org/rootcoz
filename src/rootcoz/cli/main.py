@@ -34,7 +34,8 @@ from rootcoz.config import (
     parse_additional_repos,
     parse_peer_configs,
 )
-from rootcoz.storage import MAX_INCOMPLETE_LIST_LIMIT, TEST_NAME_MODES, VALID_ROLES
+from rootcoz.job_filters import FILTER_PRESET_PAGES, TEST_NAME_MODES
+from rootcoz.storage import MAX_INCOMPLETE_LIST_LIMIT, VALID_ROLES
 from rootcoz.utils import single_line_diagnostic
 
 # -- App and sub-command groups -----------------------------------------------
@@ -6423,7 +6424,7 @@ _REPORT_TEST_NAME_OPTION = typer.Option(
 _REPORT_TEST_NAME_MODE_OPTION = typer.Option(
     "contains",
     "--test-name-mode",
-    help="How --test-name matches: contains, exact, starts_with, ends_with.",
+    help="How --test-name matches: " + ", ".join(TEST_NAME_MODES) + ".",
 )
 
 
@@ -6762,7 +6763,7 @@ def filter_presets_list(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """List saved filter presets (yours + server) for a page."""
-    if page not in ("dashboard", "reports"):
+    if page not in FILTER_PRESET_PAGES:
         typer.echo("Page must be 'dashboard' or 'reports'.")
         raise typer.Exit(1)
     _run_client_command(
@@ -6788,7 +6789,7 @@ def filter_presets_add(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Save a filter preset from a JSON filter object."""
-    if page not in ("dashboard", "reports"):
+    if page not in FILTER_PRESET_PAGES:
         typer.echo("Page must be 'dashboard' or 'reports'.")
         raise typer.Exit(1)
     if scope not in ("user", "server"):

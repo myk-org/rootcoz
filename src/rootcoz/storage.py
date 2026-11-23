@@ -48,6 +48,42 @@ from rootcoz.encryption import (
     get_hmac_secret,
     strip_sensitive_from_response,
 )
+from rootcoz.job_filters import (
+    ANALYSIS_STATE_ANALYZED,
+    ANALYSIS_STATE_SUBMITTED,
+    FILTER_PRESET_PAGES,  # noqa: F401
+    MAX_SUBMITTED_BY_LENGTH,
+    MAX_TEST_NAME_LENGTH,  # noqa: F401
+    TEST_NAME_MODES,  # noqa: F401
+    VALID_ANALYSIS_STATES,
+    JobFilters,
+    build_labels_filter,
+    compile_job_filter_sql,
+)
+from rootcoz.job_filters import (
+    build_analysis_state_predicate as _analysis_state_filter_sql,
+)
+from rootcoz.job_filters import (
+    build_date_filter as _build_date_filter,
+)
+from rootcoz.job_filters import (
+    build_failed_test_name_predicate as _failed_test_name_predicate,  # noqa: F401
+)
+from rootcoz.job_filters import (
+    build_metadata_join as _build_metadata_join,  # noqa: F401
+)
+from rootcoz.job_filters import (
+    build_submitted_by_predicate as _submitted_by_predicate,  # noqa: F401
+)
+from rootcoz.job_filters import (
+    build_test_name_pattern as _test_name_pattern,
+)
+from rootcoz.job_filters import (
+    like_escape as _like_escape,
+)
+from rootcoz.job_filters import (
+    normalize_filter_datetime as _normalize_report_datetime,  # noqa: F401
+)
 from rootcoz.metadata_rules import match_job_metadata, merge_labels
 from rootcoz.models import (
     _SYSTEM_TAGS,
@@ -55,10 +91,7 @@ from rootcoz.models import (
     OverrideClassificationLiteral,
     PatternLiteral,
 )
-from rootcoz.tag_facets import (
-    TagFacet,
-    partition_labels_by_facets,
-)
+from rootcoz.tag_facets import TagFacet
 from rootcoz.url_utils import sanitize_http_href
 
 if TYPE_CHECKING:
@@ -91,11 +124,6 @@ def pin_db_path(path: Path | None = None) -> None:
 def current_db_path() -> Path:
     """The database this context writes to: the pinned path, else ``DB_PATH``."""
     return _PINNED_DB_PATH.get() or DB_PATH
-
-
-ANALYSIS_STATE_SUBMITTED: Literal["submitted"] = "submitted"
-ANALYSIS_STATE_ANALYZED: Literal["analyzed"] = "analyzed"
-VALID_ANALYSIS_STATES = frozenset({ANALYSIS_STATE_SUBMITTED, ANALYSIS_STATE_ANALYZED})
 
 
 # --- Failure signatures: anchor + v2 ----------------------------------------
@@ -3679,20 +3707,6 @@ def _coerce_analysis_state(value: Any) -> str:
     return state if state in VALID_ANALYSIS_STATES else ANALYSIS_STATE_ANALYZED
 
 
-def _analysis_state_filter_sql(
-    analysis_state: str, *, column: str
-) -> tuple[str, list[Any]]:
-    """SQL fragment and params for an optional analysis_state filter."""
-    if not analysis_state:
-        return "", []
-    if analysis_state not in VALID_ANALYSIS_STATES:
-        raise ValueError(
-            f"Invalid analysis_state '{analysis_state}'. "
-            f"Must be {', '.join(sorted(VALID_ANALYSIS_STATES))}."
-        )
-    return f"COALESCE({column}, 'analyzed') = ?", [analysis_state]
-
-
 def _append_denormalized_set_parts(
     result: dict[str, Any],
     set_parts: list[str],
@@ -5098,78 +5112,6 @@ def _ascii_fold(value: str) -> str:
     and ``änne`` — two names the SQL fold keeps apart — and hide one of them.
     """
     return "".join(chr(ord(ch) + 32) if "A" <= ch <= "Z" else ch for ch in value)
-
-
-def _like_escape(fragment: str) -> str:
-    """Escape LIKE metacharacters so ``%``/``_`` in a term match literally."""
-    for char in ("\\", "%", "_"):
-        fragment = fragment.replace(char, f"\\{char}")
-    return fragment
-
-
-# The four test-name match modes (#546). Literal text in every one: ``*``/``?``
-# are not metacharacters here and are never interpreted.
-TEST_NAME_MODES = ("contains", "exact", "starts_with", "ends_with")
-# Longest stored test name measured on the reporter's dataset is 405 characters;
-# 546 distinct failing names exceed 200, none exceed 1000. This equals
-# models.MAX_FILTER_PRESET_VALUE_LENGTH (pinned by a test) so a name the filter
-# accepts can also be bookmarked.
-MAX_TEST_NAME_LENGTH = 1000
-
-
-def _test_name_pattern(mode: str, text: str) -> str:
-    """Build the literal LIKE pattern for one of ``TEST_NAME_MODES``."""
-    if mode == "contains":
-        return f"%{_like_escape(text)}%"
-    if mode == "starts_with":
-        return f"{_like_escape(text)}%"
-    if mode == "ends_with":
-        return f"%{_like_escape(text)}"
-    if mode == "exact":
-        return _like_escape(text)
-    raise ValueError(
-        f"Invalid test_name_mode '{mode}'. Must be {', '.join(TEST_NAME_MODES)}."
-    )
-
-
-def _failed_test_name_predicate(
-    mode: str, text: str, *, job_column: str = "r.job_id"
-) -> tuple[str, list[str]]:
-    """EXISTS clause selecting jobs with a **failing** test matching *text*.
-
-    ``status = 'failed'`` is a SQL constant, not a parameter, so the scan scope
-    is by construction and never drifts with caller input; the typeahead
-    aggregate over the same scope is served by the partial index
-    ``idx_test_entries_failed_name`` (#546: 15,566 of 1,329,209 entries failed).
-    *job_column* names the job id column of the calling query (the reports
-    aggregates do not all alias ``results`` as ``r``).
-    """
-    if not text:
-        return "", []
-    pattern = _test_name_pattern(mode, text)
-    clause = (
-        f"EXISTS (SELECT 1 FROM test_entries te WHERE te.job_id = {job_column}"
-        " AND te.status = 'failed'"
-        " AND lower(te.test_name) LIKE lower(?) ESCAPE '\\')"
-    )
-    return clause, [pattern]
-
-
-def _submitted_by_predicate(
-    values: set[str], *, column: str = "submitted_by"
-) -> tuple[str, list[str]]:
-    """Build a LIKE-any predicate for submitted_by values, folded in SQL.
-
-    *column* lets the reports queries pass their table alias; the default is the
-    unaliased denormalized column, whose index the enumeration reads.
-    """
-    patterns: list[str] = []
-    for value in sorted(values):
-        trimmed = value.strip()
-        patterns.append(f"%{_like_escape(trimmed)}%")
-    folded = f"lower(NULLIF({column}, ''))"
-    clause = " OR ".join(f"{folded} LIKE lower(?) ESCAPE '\\'" for _ in patterns)
-    return f"({clause})", patterns
 
 
 async def get_job_submitters(job_ids: list[str]) -> dict[str, str]:
@@ -7298,6 +7240,7 @@ async def list_incomplete_analyses(limit: int = 100) -> dict[str, Any]:
 
 async def list_results_for_dashboard_filtered(
     *,
+    filters: JobFilters | None = None,
     job_names: set[str] | None = None,
     exclude_job_names: set[str] | None = None,
     search: str = "",
@@ -7311,97 +7254,50 @@ async def list_results_for_dashboard_filtered(
     test_name_mode: str = "contains",
     limit: int = DEFAULT_DASHBOARD_LIMIT,
     offset: int = 0,
+    tag_facets: Sequence[TagFacet] | None = None,
 ) -> dict[str, Any]:
     """List dashboard results with filters applied in SQL before LIMIT.
 
-    Filters are pushed into the SQL query so the LIMIT applies to the
-    **filtered** set, not before filtering.
-
-    Args:
-        job_names: Include only these job names (from metadata filtering).
-        exclude_job_names: Exclude these job names (from metadata exclude labels).
-        search: Text search on job_name or job_id (case-insensitive).
-        status: Filter by status values.
-        date_from: ISO date string for start of range (inclusive).
-        date_to: ISO date string for end of range (inclusive, end-of-day).
-        review_status: Filter by review state (all, reviewed, not_reviewed).
-        analysis_state: Filter by analysis state, empty = all.
-        submitters: Case-insensitive (ASCII) substring match on submitted_by;
-            ``None`` or an empty set means no filter.
-        test_name: Keep only jobs whose **failing** test entries match this text.
-            Empty means no filter. Literal: ``%``/``_``/backslash are escaped, ``*``
-            and ``?`` are not wildcards.
-        test_name_mode: One of ``TEST_NAME_MODES`` (default ``contains``).
-        limit: Max results. 0 = no limit.
-        offset: Rows to skip.
-
-    Returns:
-        Dict with 'jobs' (list of dashboard dicts) and 'total' (total matching count).
+    Filters are pushed into the SQL query via :func:`compile_job_filter_sql`
+    so the LIMIT applies to the **filtered** set, not before filtering.
+    Callers should prefer passing a canonical :class:`JobFilters` instance via
+    *filters*; the legacy keyword arguments remain supported for direct
+    storage callers.
     """
     if limit < 0:
         raise ValueError("limit must be >= 0")
 
-    conditions: list[str] = []
-    params: list[Any] = []
-
-    if search:
-        # Search job_name and job_id. LIKE '%term%' cannot use an index — this
-        # stays a scan; it only avoids reading the result_json blob.
-        conditions.append("(r.job_id LIKE ? OR r.job_name LIKE ?)")
-        like_param = f"%{search}%"
-        params.extend([like_param, like_param])
-
-    if status:
-        # 'timeout' is a virtual status derived from 'failed' + error/summary patterns.
-        # Translate it to a SQL predicate matching the frontend isAnalysisTimeout() logic.
-        real_statuses = [s for s in status if s != "timeout"]
-        has_timeout = "timeout" in status
-        status_parts: list[str] = []
-        if real_statuses:
-            placeholders = ", ".join("?" for _ in real_statuses)
-            status_parts.append(f"r.status IN ({placeholders})")
-            params.extend(real_statuses)
-        if has_timeout:
-            status_parts.append(
-                "(r.status = 'failed' AND ("
-                "lower(r.error) LIKE '%timed out%' OR "
-                "lower(r.error) LIKE '%timeout%' OR "
-                "lower(r.summary) LIKE '%timed out%' OR "
-                "lower(r.summary) LIKE '%timeout%'"
-                "))"
-            )
-        conditions.append(f"({' OR '.join(status_parts)})")
-
-    if date_from:
-        # Use timestamp bounds instead of date() to allow index usage
-        conditions.append("r.created_at >= ?")
-        params.append(f"{date_from}T00:00:00")
-
-    if date_to:
-        conditions.append("r.created_at <= ?")
-        params.append(f"{date_to}T23:59:59")
-
-    if review_status == "reviewed":
-        conditions.append(
-            "(SELECT COUNT(*) FROM failure_reviews fr "
-            "WHERE fr.job_id = r.job_id AND fr.reviewed = 1) > 0"
-        )
-    elif review_status == "not_reviewed":
-        conditions.append(
-            "NOT EXISTS (SELECT 1 FROM failure_reviews fr "
-            "WHERE fr.job_id = r.job_id AND fr.reviewed = 1)"
-        )
-
-    clause, extra = _analysis_state_filter_sql(
-        analysis_state, column="r.analysis_state"
+    effective = filters or JobFilters.from_values(
+        search=search,
+        status=status,
+        date_from=date_from,
+        date_to=date_to,
+        review_status=review_status,
+        analysis_state=analysis_state,
+        submitters=submitters,
+        test_name=test_name,
+        test_name_mode=test_name_mode,
+        split_csv=False,
     )
-    if clause:
-        conditions.append(clause)
-        params.extend(extra)
+    active_facets = (
+        tag_facets if tag_facets is not None else get_settings().parsed_tag_facets
+    )
+    compiled = compile_job_filter_sql(
+        effective,
+        job_name_col="r.job_name",
+        job_id_col="r.job_id",
+        date_col="r.created_at",
+        results_alias="r",
+        results_join_mode="none",
+        ungrouped_label_mode="and",
+        tag_facets=active_facets,
+    )
+    conditions = list(compiled.conditions)
+    params = list(compiled.params)
 
     if job_names is not None:
         if not job_names:
-            # No matching job names from metadata — return empty
+            # No matching job names from caller-provided include set — return empty
             return {"jobs": [], "total": 0}
         names_list = sorted(job_names)
         placeholders = ", ".join("?" for _ in names_list)
@@ -7414,26 +7310,21 @@ async def list_results_for_dashboard_filtered(
         conditions.append(f"(r.job_name IS NULL OR r.job_name NOT IN ({placeholders}))")
         params.extend(exclude_list)
 
-    if submitters:
-        clause, like_params = _submitted_by_predicate(submitters)
-        conditions.append(clause)
-        params.extend(like_params)
-
-    if test_name:
-        clause, test_params = _failed_test_name_predicate(test_name_mode, test_name)
-        conditions.append(clause)
-        params.extend(test_params)
-
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
 
     async with _connect_db() as db:
         # Count total matching rows
-        count_sql = f"SELECT COUNT(*) FROM results r{where}"
+        count_sql = f"SELECT COUNT(*) FROM results r{compiled.meta_join}{where}"
         cursor = await db.execute(count_sql, params)
         total = (await cursor.fetchone())[0]
 
         # Fetch paginated results
-        sql = _DASHBOARD_BASE_SQL + where + " ORDER BY r.created_at DESC"
+        sql = (
+            _DASHBOARD_BASE_SQL
+            + compiled.meta_join
+            + where
+            + " ORDER BY r.created_at DESC"
+        )
         fetch_params = list(params)
         if limit > 0:
             sql += " LIMIT ?"
@@ -7477,12 +7368,6 @@ async def list_failed_test_names(
         {"test_name": row["test_name"], "failure_count": row["failure_count"]}
         for row in rows
     ]
-
-
-# The dashboard endpoint caps one submitted_by value at this many characters. The
-# constant lives here because storage also drops over-long historical values from the
-# picker; main.py validates new input against the same number.
-MAX_SUBMITTED_BY_LENGTH = 64
 
 
 async def list_dashboard_submitters() -> list[str]:
@@ -11410,6 +11295,29 @@ async def delete_job_metadata(job_name: str) -> bool:
         return cursor.rowcount > 0
 
 
+async def get_job_metadata_bulk(
+    job_names: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    """Fetch metadata dicts for *job_names* in chunked SQL queries."""
+    unique = sorted({name for name in job_names if name})
+    if not unique:
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    chunk_size = 500
+    async with _connect_db() as db:
+        for start in range(0, len(unique), chunk_size):
+            chunk = unique[start : start + chunk_size]
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = await db.execute(
+                "SELECT job_name, team, tier, version, labels "
+                f"FROM job_metadata WHERE job_name IN ({placeholders})",
+                chunk,
+            )
+            for row in await cursor.fetchall():
+                result[row["job_name"]] = _job_metadata_row_to_dict(row)
+    return result
+
+
 async def list_jobs_with_metadata(
     *,
     team: str | list[str] = "",
@@ -11418,25 +11326,14 @@ async def list_jobs_with_metadata(
     labels: list[str] | None = None,
     tag_facets: Sequence[TagFacet] | None = None,
 ) -> list[dict[str, Any]]:
-    """List all job metadata entries, optionally filtered.
+    """List all job metadata entries, optionally filtered in SQL.
 
     Filters combine with AND logic. Labels belonging to the same configured
     tag facet combine with OR; distinct facets and non-facet labels combine
-    with AND. Each of *team*, *tier*, and *version* may be a single string
-    **or** a list of strings (OR within that field).
-
-    Args:
-        team: Filter by team (exact match or list of values).
-        tier: Filter by tier (exact match or list of values).
-        version: Filter by version (exact match or list of values).
-        labels: Filter by labels (facet-grouped OR within, AND across).
-        tag_facets: Optional facet definitions override (defaults to active settings).
-
-    Returns:
-        List of metadata dicts.
+    with AND via the shared :func:`build_labels_filter` SQL compiler.
     """
     conditions: list[str] = []
-    params: list[str] = []
+    params: list[Any] = []
 
     for col, val in (("team", team), ("tier", tier), ("version", version)):
         if not val:
@@ -11449,6 +11346,19 @@ async def list_jobs_with_metadata(
             conditions.append(f"{col} = ?")
             params.append(val)
 
+    if labels:
+        active_facets = (
+            tag_facets if tag_facets is not None else get_settings().parsed_tag_facets
+        )
+        build_labels_filter(
+            labels,
+            "job_name",
+            conditions,
+            params,
+            tag_facets=active_facets,
+            ungrouped_mode="and",
+        )
+
     where = " AND ".join(conditions) if conditions else "1=1"
 
     async with _connect_db() as db:
@@ -11458,25 +11368,7 @@ async def list_jobs_with_metadata(
         )
         rows = await cursor.fetchall()
 
-    result = [_job_metadata_row_to_dict(row) for row in rows]
-
-    # Filter by labels using shared facet-grouped OR-within / AND-across logic
-    if labels:
-        active_facets = (
-            tag_facets if tag_facets is not None else get_settings().parsed_tag_facets
-        )
-        label_groups = partition_labels_by_facets(labels, active_facets)
-        if label_groups:
-            filtered_rows: list[dict[str, Any]] = []
-            for row_dict in result:
-                row_labels = set(row_dict.get("labels") or ())
-                if all(
-                    any(lbl in row_labels for lbl in group) for group in label_groups
-                ):
-                    filtered_rows.append(row_dict)
-            result = filtered_rows
-
-    return result
+    return [_job_metadata_row_to_dict(row) for row in rows]
 
 
 async def get_live_job_labels() -> set[str]:
@@ -13025,161 +12917,63 @@ _ISSUE_LINK_PATTERN = re.compile(
 )
 
 
-def _normalize_report_datetime(value: str) -> str:
-    """Normalize an ISO datetime string for SQLite text comparison.
-
-    Parses offset-aware datetimes and converts to UTC so absolute-time
-    semantics are preserved.  Strips fractional seconds and formats the
-    result as ``YYYY-MM-DD HH:MM:SS`` to match SQLite's
-    ``CURRENT_TIMESTAMP`` format.
-    """
-    stripped = value.strip()
-    try:
-        dt = datetime.fromisoformat(stripped)
-    except ValueError:
-        # Not a recognizable ISO format — best-effort cleanup.
-        normalized = stripped.replace("T", " ")
-        normalized = re.sub(r"\.\d+", "", normalized)
-        return normalized.strip()
-
-    # Convert offset-aware datetimes to UTC.
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(UTC)
-
-    # Truncate to second precision and format for SQLite.
-    return dt.replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _build_date_filter(
-    column: str,
-    date_from: str,
-    date_to: str,
-    conditions: list[str],
-    params: list[Any],
-) -> None:
-    """Append date-range conditions and params in-place.
-
-    Shared by all reports queries to avoid duplicating date filtering logic.
-
-    Date-only values (``YYYY-MM-DD``) are used as-is for ``date_from``;
-    for ``date_to``, ``" 23:59:59"`` is appended to make the range inclusive
-    of the entire day.  Values that already contain a time component
-    (``T`` separator or embedded space) are normalized to
-    ``YYYY-MM-DD HH:MM:SS`` (offset-aware values converted to UTC)
-    for consistent SQLite text comparison.
-    """
-    if date_from:
-        conditions.append(f"{column} >= ?")
-        if "T" in date_from or " " in date_from.strip():
-            params.append(_normalize_report_datetime(date_from))
-        else:
-            params.append(date_from)
-    if date_to:
-        conditions.append(f"{column} <= ?")
-        if "T" in date_to or " " in date_to.strip():
-            params.append(_normalize_report_datetime(date_to))
-        else:
-            params.append(f"{date_to} 23:59:59")
-
-
-def _build_metadata_join(
-    team: list[str] | None,
-    tier: list[str] | None,
-    version: list[str] | None,
-    job_name_col: str,
-    conditions: list[str],
-    params: list[Any],
-) -> str:
-    """Return a JOIN clause for job_metadata filtering.
-
-    Appends conditions and params in-place. Returns the JOIN SQL fragment
-    or an empty string when no metadata filters are active.
-    Shared by all reports queries.
-    """
-    if not (team or tier or version):
-        return ""
-    join_sql = f" JOIN job_metadata jm ON jm.job_name = {job_name_col}"
-    if team:
-        placeholders = ", ".join("?" for _ in team)
-        conditions.append(f"jm.team IN ({placeholders})")
-        params.extend(team)
-    if tier:
-        placeholders = ", ".join("?" for _ in tier)
-        conditions.append(f"jm.tier IN ({placeholders})")
-        params.extend(tier)
-    if version:
-        placeholders = ", ".join("?" for _ in version)
-        conditions.append(f"jm.version IN ({placeholders})")
-        params.extend(version)
-    return join_sql
-
-
-def _build_labels_subquery(labels: list[str]) -> str:
-    """Return the job_metadata_labels subquery for a list of labels."""
-    placeholders = ", ".join("?" for _ in labels)
-    return (
-        f"SELECT jml.job_name FROM job_metadata_labels jml "
-        f"WHERE jml.label IN ({placeholders})"
-    )
-
-
-def _build_tags_filter(
-    tags: list[str] | None,
-    job_name_col: str,
-    conditions: list[str],
-    params: list[Any],
+def _resolve_report_filters(
+    filters: JobFilters | None,
     *,
-    tag_facets: Sequence[TagFacet] | None = None,
-) -> None:
-    """Append facet-grouped tag-filtering conditions in-place.
-
-    Tags in the same configured facet combine with OR; distinct facets and
-    non-facet tags combine with AND. Uses the same ``partition_labels_by_facets``
-    helper as Dashboard filtering.
-    """
-    if not tags:
-        return
-    active_facets = (
-        tag_facets if tag_facets is not None else get_settings().parsed_tag_facets
+    team: str | list[str] | None = None,
+    tier: str | list[str] | None = None,
+    version: str | list[str] | None = None,
+    date_from: str = "",
+    date_to: str = "",
+    status: str | list[str] | None = None,
+    tags: str | list[str] | None = None,
+    exclude_tags: str | list[str] | None = None,
+    review_status: str = "",
+    submitters: set[str] | frozenset[str] | None = None,
+    analysis_state: str = "",
+    test_name: str = "",
+    test_name_mode: str = "contains",
+    search: str = "",
+) -> JobFilters:
+    """Return *filters* directly or build a canonical ``JobFilters`` from kwargs."""
+    if filters is not None:
+        return filters
+    return JobFilters.from_values(
+        team=team,
+        tier=tier,
+        version=version,
+        labels=tags,
+        exclude_labels=exclude_tags,
+        search=search,
+        status=status,
+        date_from=date_from,
+        date_to=date_to,
+        review_status=review_status,
+        analysis_state=analysis_state,
+        submitters=submitters,
+        test_name=test_name,
+        test_name_mode=test_name_mode,
+        split_csv=False,
     )
-    for group in partition_labels_by_facets(tags, active_facets, ungrouped_mode="or"):
-        conditions.append(f"{job_name_col} IN ({_build_labels_subquery(group)})")
-        params.extend(group)
-
-
-def _build_exclude_tags_filter(
-    exclude_tags: list[str] | None,
-    job_name_col: str,
-    conditions: list[str],
-    params: list[Any],
-) -> None:
-    """Append tag-exclusion conditions in-place.
-
-    Excludes jobs that have ANY of the specified tags (NOT IN semantics).
-    Rows with empty ``job_name`` pass through — they have no label
-    associations and will never appear in the labels subquery.
-    """
-    if not exclude_tags:
-        return
-    conditions.append(f"{job_name_col} NOT IN ({_build_labels_subquery(exclude_tags)})")
-    params.extend(exclude_tags)
 
 
 async def get_report_totals(
     *,
-    team: list[str] | None = None,
-    tier: list[str] | None = None,
-    version: list[str] | None = None,
+    filters: JobFilters | None = None,
+    team: str | list[str] | None = None,
+    tier: str | list[str] | None = None,
+    version: str | list[str] | None = None,
     date_from: str = "",
     date_to: str = "",
-    status: list[str] | None = None,
-    tags: list[str] | None = None,
-    exclude_tags: list[str] | None = None,
+    status: str | list[str] | None = None,
+    tags: str | list[str] | None = None,
+    exclude_tags: str | list[str] | None = None,
     review_status: str = "",
     submitters: set[str] | None = None,
     analysis_state: str = "",
     test_name: str = "",
     test_name_mode: str = "contains",
+    search: str = "",
     limit: int = 0,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -13188,39 +12982,37 @@ async def get_report_totals(
     Returns total jobs, total failures, total reviewed,
     plus a paginated per-job detail list.
     """
-    conditions: list[str] = []
-    params: list[Any] = []
-
-    _build_date_filter("r.created_at", date_from, date_to, conditions, params)
-    meta_join = _build_metadata_join(
-        team, tier, version, "r.job_name", conditions, params
+    effective = _resolve_report_filters(
+        filters,
+        team=team,
+        tier=tier,
+        version=version,
+        date_from=date_from,
+        date_to=date_to,
+        status=status,
+        tags=tags,
+        exclude_tags=exclude_tags,
+        review_status=review_status,
+        submitters=submitters,
+        analysis_state=analysis_state,
+        test_name=test_name,
+        test_name_mode=test_name_mode,
+        search=search,
     )
-    _build_tags_filter(tags, "r.job_name", conditions, params)
-    _build_exclude_tags_filter(exclude_tags, "r.job_name", conditions, params)
-    if submitters:
-        clause, submitter_params = _submitted_by_predicate(
-            submitters, column="r.submitted_by"
-        )
-        conditions.append(clause)
-        params.extend(submitter_params)
-    clause, extra = _analysis_state_filter_sql(
-        analysis_state, column="r.analysis_state"
+    compiled = compile_job_filter_sql(
+        effective,
+        job_name_col="r.job_name",
+        job_id_col="r.job_id",
+        date_col="r.created_at",
+        results_alias="r",
+        results_join_mode="none",
+        default_statuses=("completed",),
+        ungrouped_label_mode="or",
+        tag_facets=get_settings().parsed_tag_facets,
     )
-    if clause:
-        conditions.append(clause)
-        params.extend(extra)
-    clause, extra = _failed_test_name_predicate(test_name_mode, test_name)
-    if clause:
-        conditions.append(clause)
-        params.extend(extra)
-
-    where = (" AND " + " AND ".join(conditions)) if conditions else ""
+    where = " WHERE " + " AND ".join(compiled.conditions) if compiled.conditions else ""
 
     async with _connect_db() as db:
-        effective_status = status if status else ["completed"]
-        status_placeholders = ", ".join("?" for _ in effective_status)
-        status_params = list(effective_status)
-
         sql = f"""
             SELECT
                 r.job_id,
@@ -13231,7 +13023,7 @@ async def get_report_totals(
                 COALESCE(fc.failure_count, 0) AS failure_count,
                 COALESCE(rv.reviewed_count, 0) AS reviewed_count
             FROM results r
-            {meta_join}
+            {compiled.meta_join}
             LEFT JOIN (
                 SELECT job_id, COUNT(*) AS failure_count
                 FROM failure_history GROUP BY job_id
@@ -13240,16 +13032,11 @@ async def get_report_totals(
                 SELECT job_id, COUNT(*) AS reviewed_count
                 FROM failure_reviews WHERE reviewed = 1 GROUP BY job_id
             ) rv ON rv.job_id = r.job_id
-            WHERE r.status IN ({status_placeholders}){where}
-            ORDER BY r.created_at DESC
+            {where}
+            ORDER BY r.created_at DESC, r.job_id DESC
         """
 
-        if review_status == "reviewed":
-            sql = f"SELECT * FROM ({sql}) sub WHERE sub.reviewed_count > 0 ORDER BY sub.created_at DESC, sub.job_id DESC"
-        elif review_status == "not_reviewed":
-            sql = f"SELECT * FROM ({sql}) sub WHERE sub.reviewed_count = 0 ORDER BY sub.created_at DESC, sub.job_id DESC"
-
-        cursor = await db.execute(sql, status_params + params)
+        cursor = await db.execute(sql, compiled.params)
         rows = await cursor.fetchall()
 
     total_jobs = len(rows)
@@ -13288,94 +13075,51 @@ async def get_report_totals(
 async def _count_reviewed_tests(
     db: aiosqlite.Connection,
     *,
-    team: list[str] | None = None,
-    tier: list[str] | None = None,
-    version: list[str] | None = None,
-    date_from: str = "",
-    date_to: str = "",
-    status: list[str] | None = None,
-    tags: list[str] | None = None,
-    exclude_tags: list[str] | None = None,
-    review_status: str = "",
-    submitters: set[str] | None = None,
-    analysis_state: str = "",
+    filters: JobFilters,
 ) -> int:
-    """Count reviewed tests with the given filters."""
-    conditions: list[str] = []
-    params: list[Any] = []
-    _build_date_filter("fr.updated_at", date_from, date_to, conditions, params)
-    needs_results = bool(
-        team
-        or tier
-        or version
-        or tags
-        or exclude_tags
-        or status
-        or submitters
-        or analysis_state
+    """Count reviewed tests with the given canonical filters."""
+    compiled = compile_job_filter_sql(
+        filters,
+        job_name_col="r_res.job_name",
+        job_id_col="fr.job_id",
+        date_col="fr.updated_at",
+        results_alias="r_res",
+        results_join_col="fr.job_id",
+        results_join_mode="optional_inner",
+        ungrouped_label_mode="or",
+        tag_facets=get_settings().parsed_tag_facets,
+        include_test_name=False,
     )
-    results_join = (
-        "JOIN results r_res ON r_res.job_id = fr.job_id" if needs_results else ""
-    )
-    meta_join = _build_metadata_join(
-        team, tier, version, "r_res.job_name", conditions, params
-    )
-    _build_tags_filter(tags, "r_res.job_name", conditions, params)
-    _build_exclude_tags_filter(exclude_tags, "r_res.job_name", conditions, params)
-    if status:
-        placeholders = ", ".join("?" for _ in status)
-        conditions.append(f"r_res.status IN ({placeholders})")
-        params.extend(status)
-    if submitters:
-        clause, submitter_params = _submitted_by_predicate(
-            submitters, column="r_res.submitted_by"
-        )
-        conditions.append(clause)
-        params.extend(submitter_params)
-    clause, extra = _analysis_state_filter_sql(
-        analysis_state, column="r_res.analysis_state"
-    )
-    if clause:
-        conditions.append(clause)
-        params.extend(extra)
-    if review_status == "reviewed":
-        conditions.append(
-            "EXISTS (SELECT 1 FROM failure_reviews fr_rs"
-            " WHERE fr_rs.job_id = fr.job_id AND fr_rs.reviewed = 1)"
-        )
-    elif review_status == "not_reviewed":
-        conditions.append(
-            "NOT EXISTS (SELECT 1 FROM failure_reviews fr_rs"
-            " WHERE fr_rs.job_id = fr.job_id AND fr_rs.reviewed = 1)"
-        )
-    where = (" AND " + " AND ".join(conditions)) if conditions else ""
+    where = (" AND " + " AND ".join(compiled.conditions)) if compiled.conditions else ""
     cursor = await db.execute(
         f"""
         SELECT COUNT(*) AS cnt FROM failure_reviews fr
-        {results_join}
-        {meta_join}
+        {compiled.results_join}
+        {compiled.meta_join}
         WHERE fr.reviewed = 1{where}
         """,
-        params,
+        compiled.params,
     )
     return (await cursor.fetchone())["cnt"]
 
 
 async def get_report_classification_overrides(
     *,
-    team: list[str] | None = None,
-    tier: list[str] | None = None,
-    version: list[str] | None = None,
+    filters: JobFilters | None = None,
+    team: str | list[str] | None = None,
+    tier: str | list[str] | None = None,
+    version: str | list[str] | None = None,
     date_from: str = "",
     date_to: str = "",
-    status: list[str] | None = None,
-    tags: list[str] | None = None,
-    exclude_tags: list[str] | None = None,
+    status: str | list[str] | None = None,
+    tags: str | list[str] | None = None,
+    exclude_tags: str | list[str] | None = None,
     review_status: str = "",
     submitters: set[str] | None = None,
     analysis_state: str = "",
     test_name: str = "",
     test_name_mode: str = "contains",
+    search: str = "",
     limit: int = 0,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -13384,59 +13128,35 @@ async def get_report_classification_overrides(
     Only includes overrides where created_by is non-empty (user-initiated)
     and the test also appears in failure_reviews (reviewed = 1).
     """
-    conditions: list[str] = ["tc.created_by != ''"]
-    params: list[Any] = []
-
-    _build_date_filter("tc.created_at", date_from, date_to, conditions, params)
-    meta_join = _build_metadata_join(
-        team, tier, version, "tc.job_name", conditions, params
+    effective = _resolve_report_filters(
+        filters,
+        team=team,
+        tier=tier,
+        version=version,
+        date_from=date_from,
+        date_to=date_to,
+        status=status,
+        tags=tags,
+        exclude_tags=exclude_tags,
+        review_status=review_status,
+        submitters=submitters,
+        analysis_state=analysis_state,
+        test_name=test_name,
+        test_name_mode=test_name_mode,
+        search=search,
     )
-    _build_tags_filter(tags, "tc.job_name", conditions, params)
-    _build_exclude_tags_filter(exclude_tags, "tc.job_name", conditions, params)
-
-    # One results join covers every results-column filter: status, submitter and
-    # analysis state. ``results.job_id`` is a primary key, so it cannot multiply
-    # rows.
-    status_join = ""
-    result_conditions: list[str] = []
-    result_params: list[Any] = []
-    if status:
-        placeholders = ", ".join("?" for _ in status)
-        result_conditions.append(f"r_filter.status IN ({placeholders})")
-        result_params.extend(status)
-    if submitters:
-        clause, submitter_params = _submitted_by_predicate(
-            submitters, column="r_filter.submitted_by"
-        )
-        result_conditions.append(clause)
-        result_params.extend(submitter_params)
-    clause, extra = _analysis_state_filter_sql(
-        analysis_state, column="r_filter.analysis_state"
+    compiled = compile_job_filter_sql(
+        effective,
+        job_name_col="tc.job_name",
+        job_id_col="tc.job_id",
+        date_col="tc.created_at",
+        results_alias="r_filter",
+        results_join_col="tc.job_id",
+        results_join_mode="optional_inner",
+        ungrouped_label_mode="or",
+        tag_facets=get_settings().parsed_tag_facets,
     )
-    if clause:
-        result_conditions.append(clause)
-        result_params.extend(extra)
-    if result_conditions:
-        status_join = " JOIN results r_filter ON r_filter.job_id = tc.job_id"
-        conditions.extend(result_conditions)
-        params.extend(result_params)
-
-    clause, extra = _failed_test_name_predicate(
-        test_name_mode, test_name, job_column="tc.job_id"
-    )
-    if clause:
-        conditions.append(clause)
-        params.extend(extra)
-
-    if review_status == "reviewed":
-        conditions.append(
-            "EXISTS (SELECT 1 FROM failure_reviews fr_rs WHERE fr_rs.job_id = tc.job_id AND fr_rs.reviewed = 1)"
-        )
-    elif review_status == "not_reviewed":
-        conditions.append(
-            "NOT EXISTS (SELECT 1 FROM failure_reviews fr_rs WHERE fr_rs.job_id = tc.job_id AND fr_rs.reviewed = 1)"
-        )
-
+    conditions = ["tc.created_by != ''", *compiled.conditions]
     where = " AND ".join(conditions)
 
     async with _connect_db() as db:
@@ -13459,8 +13179,8 @@ async def get_report_classification_overrides(
                 fh.build_id,
                 'classification' AS override_axis
             FROM test_classifications tc
-            {meta_join}
-            {status_join}
+            {compiled.meta_join}
+            {compiled.results_join}
             JOIN failure_history fh
                 ON fh.job_id = tc.job_id
                 AND fh.test_name = tc.test_name
@@ -13478,7 +13198,7 @@ async def get_report_classification_overrides(
               )
             ORDER BY tc.created_at DESC
         """
-        cursor = await db.execute(cls_sql, params)
+        cursor = await db.execute(cls_sql, compiled.params)
         cls_rows = await cursor.fetchall()
 
         # Pattern-axis overrides: original_pattern stored at override time
@@ -13500,8 +13220,8 @@ async def get_report_classification_overrides(
                 fh.build_id,
                 'pattern' AS override_axis
             FROM test_classifications tc
-            {meta_join}
-            {status_join}
+            {compiled.meta_join}
+            {compiled.results_join}
             JOIN failure_history fh
                 ON fh.job_id = tc.job_id
                 AND fh.test_name = tc.test_name
@@ -13519,7 +13239,7 @@ async def get_report_classification_overrides(
               )
             ORDER BY tc.created_at DESC
         """
-        cursor = await db.execute(pat_sql, params)
+        cursor = await db.execute(pat_sql, compiled.params)
         pat_rows = await cursor.fetchall()
 
         all_rows = list(cls_rows) + list(pat_rows)
@@ -13535,20 +13255,7 @@ async def get_report_classification_overrides(
         rows = latest_rows
 
         # Count total reviewed tests (same filters minus override-specific ones)
-        total_reviewed = await _count_reviewed_tests(
-            db,
-            team=team,
-            tier=tier,
-            version=version,
-            date_from=date_from,
-            date_to=date_to,
-            status=status,
-            tags=tags,
-            exclude_tags=exclude_tags,
-            review_status=review_status,
-            submitters=submitters,
-            analysis_state=analysis_state,
-        )
+        total_reviewed = await _count_reviewed_tests(db, filters=effective)
 
     # Group by from->to
     groups: dict[str, dict[str, Any]] = {}
@@ -13601,19 +13308,21 @@ async def get_report_classification_overrides(
 
 async def get_report_issues_created(
     *,
-    team: list[str] | None = None,
-    tier: list[str] | None = None,
-    version: list[str] | None = None,
+    filters: JobFilters | None = None,
+    team: str | list[str] | None = None,
+    tier: str | list[str] | None = None,
+    version: str | list[str] | None = None,
     date_from: str = "",
     date_to: str = "",
-    status: list[str] | None = None,
-    tags: list[str] | None = None,
-    exclude_tags: list[str] | None = None,
+    status: str | list[str] | None = None,
+    tags: str | list[str] | None = None,
+    exclude_tags: str | list[str] | None = None,
     review_status: str = "",
     submitters: set[str] | None = None,
     analysis_state: str = "",
     test_name: str = "",
     test_name_mode: str = "contains",
+    search: str = "",
     limit: int = 0,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -13624,64 +13333,38 @@ async def get_report_issues_created(
     Only http/https URLs are included (prevents javascript: XSS).
     Returns separate github_total and jira_total counts.
     """
-    conditions: list[str] = [
-        "(c.comment LIKE '%GitHub Issue%' OR c.comment LIKE '%Jira Bug%')"
+    effective = _resolve_report_filters(
+        filters,
+        team=team,
+        tier=tier,
+        version=version,
+        date_from=date_from,
+        date_to=date_to,
+        status=status,
+        tags=tags,
+        exclude_tags=exclude_tags,
+        review_status=review_status,
+        submitters=submitters,
+        analysis_state=analysis_state,
+        test_name=test_name,
+        test_name_mode=test_name_mode,
+        search=search,
+    )
+    compiled = compile_job_filter_sql(
+        effective,
+        job_name_col="r.job_name",
+        job_id_col="c.job_id",
+        date_col="c.created_at",
+        results_alias="r",
+        results_join_col="c.job_id",
+        results_join_mode="left_or_inner",
+        ungrouped_label_mode="or",
+        tag_facets=get_settings().parsed_tag_facets,
+    )
+    conditions = [
+        "(c.comment LIKE '%GitHub Issue%' OR c.comment LIKE '%Jira Bug%')",
+        *compiled.conditions,
     ]
-    params: list[Any] = []
-
-    _build_date_filter("c.created_at", date_from, date_to, conditions, params)
-    meta_join = _build_metadata_join(
-        team, tier, version, "r.job_name", conditions, params
-    )
-    _build_tags_filter(tags, "r.job_name", conditions, params)
-    _build_exclude_tags_filter(exclude_tags, "r.job_name", conditions, params)
-
-    if status:
-        placeholders = ", ".join("?" for _ in status)
-        conditions.append(f"r.status IN ({placeholders})")
-        params.extend(status)
-    if submitters:
-        clause, submitter_params = _submitted_by_predicate(
-            submitters, column="r.submitted_by"
-        )
-        conditions.append(clause)
-        params.extend(submitter_params)
-    clause, extra = _analysis_state_filter_sql(
-        analysis_state, column="r.analysis_state"
-    )
-    if clause:
-        conditions.append(clause)
-        params.extend(extra)
-
-    clause, extra = _failed_test_name_predicate(test_name_mode, test_name)
-    if clause:
-        conditions.append(clause)
-        params.extend(extra)
-
-    if review_status == "reviewed":
-        conditions.append(
-            "EXISTS (SELECT 1 FROM failure_reviews fr_rs WHERE fr_rs.job_id = c.job_id AND fr_rs.reviewed = 1)"
-        )
-    elif review_status == "not_reviewed":
-        conditions.append(
-            "NOT EXISTS (SELECT 1 FROM failure_reviews fr_rs WHERE fr_rs.job_id = c.job_id AND fr_rs.reviewed = 1)"
-        )
-
-    # Use JOIN when metadata/tag filters narrow results, LEFT JOIN otherwise
-    join_type = (
-        "JOIN"
-        if (
-            team
-            or tier
-            or version
-            or tags
-            or exclude_tags
-            or status
-            or submitters
-            or analysis_state
-        )
-        else "LEFT JOIN"
-    )
     where = " AND ".join(conditions)
 
     async with _connect_db() as db:
@@ -13690,12 +13373,12 @@ async def get_report_issues_created(
                    c.username, c.created_at,
                    r.job_name, r.build_number, r.build_id
             FROM comments c
-            {join_type} results r ON r.job_id = c.job_id
-            {meta_join}
+            {compiled.results_join}
+            {compiled.meta_join}
             WHERE {where}
             ORDER BY c.created_at DESC
         """
-        cursor = await db.execute(sql, params)
+        cursor = await db.execute(sql, compiled.params)
         rows = await cursor.fetchall()
 
     issues: list[dict[str, Any]] = []
@@ -13745,7 +13428,6 @@ async def get_report_issues_created(
 
 # Hardcoded per the issue spec — deliberately NOT a server setting.
 MAX_FILTER_PRESETS = 20
-FILTER_PRESET_PAGES = ("dashboard", "reports")
 
 
 class FilterPresetNotFound(KeyError):
