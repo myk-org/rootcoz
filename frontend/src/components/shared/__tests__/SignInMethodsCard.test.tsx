@@ -187,6 +187,10 @@ it('opens a confirmation dialog when disconnecting the only SSO provider', async
   expect(screen.getByText(/Disconnect Google\?/)).toBeTruthy()
   expect(screen.getByText(/only connected SSO provider/i)).toBeTruthy()
   expect(screen.getByText(/RootCoz API key/)).toBeTruthy()
+  // Real Unicode punctuation renders — never literal JSX \uXXXX escapes
+  expect(dialog.textContent).toContain('API key — make sure')
+  expect(dialog.textContent).toContain('don’t get locked out')
+  expect(dialog.textContent).not.toContain('\\u')
   // api.delete was NOT called yet
   expect(del).not.toHaveBeenCalled()
 })

@@ -239,7 +239,7 @@ export function SignInMethodsCard() {
             open
             onOpenChange={(open) => { if (!open) setConfirmProvider(null) }}
             title={`Disconnect ${label(confirmProvider)}?`}
-            description="This is your only connected SSO provider. After disconnecting, you will only be able to sign in with your RootCoz API key \u2014 make sure you have it saved (or rotate your key in Profile Settings first) so you don\u2019t get locked out."
+            description="This is your only connected SSO provider. After disconnecting, you will only be able to sign in with your RootCoz API key — make sure you have it saved (or rotate your key in Profile Settings first) so you don’t get locked out."
             confirmLabel="Disconnect"
             variant="destructive"
             loading={busy !== ''}
