@@ -6295,3 +6295,65 @@ async def test_openshift_identity_403_logs_warning_and_returns_none(
         for record in caplog.records
         if record.levelno >= logging.WARNING
     )
+
+
+# ---------------------------------------------------------------------------
+# Qodo #2 — /login provisions a proxy user so an admin can approve them
+# ---------------------------------------------------------------------------
+
+
+async def test_proxy_login_provisions_pending_account_when_approval_required(
+    temp_db_path: Path,
+) -> None:
+    """GET /login with a proxy header must provision a pending account
+    and redirect to /pending, so an administrator can see and approve it."""
+    env = dict(_PROXY_ENV, REQUIRE_APPROVAL="true")
+    for client in make_app_client(temp_db_path, env):
+        resp = client.get(
+            "/login", headers={"X-Forwarded-User": "newcomer"}, follow_redirects=False
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/pending"
+
+        # The account now exists with the right provenance and status.
+        user = await storage.get_user_by_username("newcomer")
+        assert user is not None
+        assert await storage.get_user_status("newcomer") == "pending"
+
+        # Provisioning was audited.
+        provisioned = [
+            row
+            for row in await _audit_actions(temp_db_path)
+            if row["action"] == "auth.proxy_provisioned"
+            and row.get("target_id") == "newcomer"
+        ]
+        assert len(provisioned) == 1
+        assert provisioned[0]["details"]["status"] == "pending"
+
+
+async def test_proxy_login_provisions_active_account_when_approval_not_required(
+    temp_db_path: Path,
+) -> None:
+    """GET /login without REQUIRE_APPROVAL provisions an active account
+    and redirects straight to /."""
+    for client in make_app_client(temp_db_path, _PROXY_ENV):
+        resp = client.get(
+            "/login",
+            headers={"X-Forwarded-User": "activecomer"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/"
+
+        user = await storage.get_user_by_username("activecomer")
+        assert user is not None
+        assert await storage.get_user_status("activecomer") == "active"
+
+        provisioned = [
+            row
+            for row in await _audit_actions(temp_db_path)
+            if row["action"] == "auth.proxy_provisioned"
+            and row.get("target_id") == "activecomer"
+        ]
+        assert len(provisioned) == 1
+        assert provisioned[0]["details"]["status"] == "active"

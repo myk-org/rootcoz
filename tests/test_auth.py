@@ -1630,9 +1630,9 @@ class TestProxyHeaders:
                 )
                 return (await cursor.fetchone())["n"]
 
-        # A page load is not a request to create anything: the destination is
-        # decided from the status provisioning *would* use.
-        assert asyncio.run(count()) == 0
+        # /login now provisions the account so an admin can approve it;
+        # without a row, the pending page has no account to show.
+        assert asyncio.run(count()) == 1
 
     def test_the_login_redirect_and_provisioning_refuse_the_same_names(
         self, temp_db_path

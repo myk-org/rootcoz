@@ -132,6 +132,73 @@ def _record_refusal(request: Request, username: str, reason: str) -> None:
     )
 
 
+async def _provision_proxy_user(
+    username: str, settings: Settings, request: Request
+) -> dict[str, Any] | None:
+    """Create the row for a proxy-vouched account on its first request.
+
+    Shared by :meth:`ProxyStrategy.authenticate` (normal dispatch) and
+    :func:`_login_destination` (``/login`` redirect) so the provisioning
+    logic, its refusal checks and its audit signals exist exactly once.
+
+    Args:
+        username: The normalised name from the trusted header.
+        settings: Application settings (approval rule).
+        request: The request that triggered it, so the caller can audit and
+            notify with its context.
+
+    Returns:
+        The new users row, or ``None`` when provisioning refuses the name
+        (:func:`_proxy_provision_refusal`). The caller then refuses the
+        request: a row-less identity would bypass the approval gate that
+        every provisioned account now passes through.
+    """
+    refusal = _proxy_provision_refusal(username, settings)
+    if refusal:
+        logger.info("Refused proxy account '%s': %s", username, refusal)
+        # No row, no identity — and the serving layer writes the refusal to
+        # the trail.
+        _record_refusal(request, username, refusal)
+        return None
+    status = initial_user_status(settings)
+    try:
+        # Keyless: the header is this account's credential, so provisioning
+        # must not mint a secret nobody is ever shown. The same role rule,
+        # status rule and provenance as every other creation path.
+        await storage.create_keyless_user(username, status=status, created_via="proxy")
+    except ValueError:
+        # Provisioning by name is idempotent, and a browser fires several
+        # requests in parallel on its first page load: the losers of that race
+        # see "already exists" — a ValueError for a name that was, in fact,
+        # just provisioned. Re-read before refusing, or the account's
+        # very first load would answer 401 to some of its own requests.
+        existing = await storage.get_user_by_username(username)
+        if existing is None:
+            # No row: the store refused the name, so there is no account to
+            # authenticate. That is not an identity, and the request is
+            # refused rather than given a row-less session.
+            logger.warning("Refused proxy account '%s': unusable name", username)
+            _record_refusal(request, username, "unusable_name")
+            return None
+        return existing
+    user = await storage.get_user_by_username(username)
+    # Announced on the request so the serving layer can write one audit row
+    # and refresh the pending badge: the auth package never imports the app.
+    # The role travels with it because the middleware writes the row before
+    # ``request.state.role`` is assigned, and an audit row that reports the
+    # dispatch default instead of the account's real role is a wrong row.
+    setattr(
+        request.state,
+        PROVISIONED_ATTR,
+        {
+            "username": username,
+            "status": status,
+            "role": user["role"] if user else settings.default_user_role,
+        },
+    )
+    return user
+
+
 class ProxyStrategy(AuthStrategy):
     """Authenticate ``X-Forwarded-User`` from a trusted reverse proxy.
 
@@ -188,7 +255,7 @@ class ProxyStrategy(AuthStrategy):
             return None
         user = await storage.get_user_by_username(username)
         if user is None:
-            user = await self._provision(username, ctx.settings, ctx.request)
+            user = await _provision_proxy_user(username, ctx.settings, ctx.request)
             if user is None:
                 # A name the store refuses is not a person the deployment can
                 # account for. Authenticating anyway would return a row-less
@@ -206,85 +273,14 @@ class ProxyStrategy(AuthStrategy):
             user=user,
         )
 
-    async def _provision(
-        self, username: str, settings: Settings, request: Request
-    ) -> dict[str, Any] | None:
-        """Create the row for a proxy-vouched account on its first request.
-
-        Args:
-            username: The normalised name from the trusted header.
-            settings: Application settings (approval rule).
-            request: The request that triggered it, so the caller can audit and
-                notify with its context.
-
-        Returns:
-            The new users row, or ``None`` when provisioning refuses the name
-            (:func:`_proxy_provision_refusal`). The caller then refuses the
-            request: a row-less identity would bypass the approval gate that
-            every provisioned account now passes through.
-        """
-        refusal = _proxy_provision_refusal(username, settings)
-        if refusal:
-            logger.info("Refused proxy account '%s': %s", username, refusal)
-            # No row, no identity — and the serving layer writes the refusal to
-            # the trail.
-            _record_refusal(request, username, refusal)
-            return None
-        status = initial_user_status(settings)
-        try:
-            # Keyless: the header is this account's credential, so provisioning
-            # must not mint a secret nobody is ever shown. The same role rule,
-            # status rule and provenance as every other creation path.
-            await storage.create_keyless_user(
-                username, status=status, created_via="proxy"
-            )
-        except ValueError:
-            # Provisioning by name is idempotent, and a browser fires several
-            # requests in parallel on its first page load: the losers of that race
-            # see "already exists" — a ValueError for a name that was, in fact,
-            # just provisioned. Re-read before refusing, or the account's
-            # very first load would answer 401 to some of its own requests.
-            existing = await storage.get_user_by_username(username)
-            if existing is None:
-                # No row: the store refused the name, so there is no account to
-                # authenticate. That is not an identity, and the request is
-                # refused rather than given a row-less session.
-                logger.warning("Refused proxy account '%s': unusable name", username)
-                _record_refusal(request, username, "unusable_name")
-                return None
-            return existing
-        user = await storage.get_user_by_username(username)
-        # Announced on the request so the serving layer can write one audit row
-        # and refresh the pending badge: the auth package never imports the app.
-        # The role travels with it because the middleware writes the row before
-        # ``request.state.role`` is assigned, and an audit row that reports the
-        # dispatch default instead of the account's real role is a wrong row.
-        setattr(
-            request.state,
-            PROVISIONED_ATTR,
-            {
-                "username": username,
-                "status": status,
-                "role": user["role"] if user else settings.default_user_role,
-            },
-        )
-        return user
-
 
 async def _login_destination(username: str, ctx: AuthContext) -> str | None:
     """Where a proxy-vouched visitor on the login page belongs.
 
-    One decision, taken from the status the account has (or would be created
-    with), so the login page, the dashboard and the pending page cannot
-    disagree: an account approval holds must be sent where the page that
-    explains it lives, and a name the deployment would refuse must stay here —
-    sent to ``/`` the middleware refuses it and sends the HTML request back, one
-    redirect per hop, forever.
-
-    The provisioning rule is asked only for a name with no users row, in the
-    order :meth:`ProxyStrategy.authenticate` asks it: an existing account is let
-    in on every other page whatever its name, so judging it here would leave
-    that person stuck on the login page (and write a refusal row per visit).
+    A first-time visitor is **provisioned** here — the same
+    :func:`_provision_proxy_user` the main dispatch uses — so the account
+    exists before this returns, an administrator can see and approve it, and
+    the redirect target always matches a real stored status.
 
     Args:
         username: The normalised name from the trusted header.
@@ -298,16 +294,17 @@ async def _login_destination(username: str, ctx: AuthContext) -> str | None:
     """
     user = await storage.get_user_by_username(username)
     if user is None:
-        refusal = _proxy_provision_refusal(username, ctx.settings)
-        if refusal:
-            _record_refusal(ctx.request, username, refusal)
+        user = await _provision_proxy_user(username, ctx.settings, ctx.request)
+        if user is None:
+            # Refused by _proxy_provision_refusal or unusable name — already
+            # recorded on the request for the serving layer's audit row.
             return None
     if account_block_reason(user):
         return None
     status = await storage.get_user_status(username)
     if status is None:
-        # No row: provisioning creates it, so what matters is the status it
-        # would be created with.
+        # Defensive: the row was just provisioned or already existed, so this
+        # should never be None. Fall back to the initial status.
         status = initial_user_status(ctx.settings)
     # The same three conditions the middleware's approval gate applies, so this
     # can never send a visitor to a page that gate would refuse.
