@@ -828,4 +828,47 @@ describe('UsersPage Sign-in column', () => {
     expect(pill).toHaveTextContent('+2')
     expect(pill).toHaveAttribute('title', 'Red Hat SSO \u00b7 tri@rh.com\nGoogle \u00b7 tri@goog.com')
   })
+
+  it('warns admin that unlinking the only SSO provider leaves API-key-only sign-in', async () => {
+    mockUsers([
+      user('solo-sso', {
+        has_api_key: true,
+        identities: [{ provider: 'redhat', display_name: 'Red Hat SSO', email: 'solo@rh.com', created_at: '2025-01-01T00:00:00Z' }],
+        identities_unlinkable: true,
+      }),
+    ])
+    const user1 = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('solo-sso')).closest('tr')!
+    await user1.click(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from solo-sso' }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/only connected SSO provider/i)).toBeInTheDocument()
+    expect(within(dialog).getByText(/RootCoz API key/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/rotate their key/i)).toBeInTheDocument()
+  })
+
+  it('shows standard remaining-methods message when unlinking 1 of 2 SSO providers', async () => {
+    mockUsers([
+      user('dual-sso', {
+        has_api_key: true,
+        identities: [
+          { provider: 'redhat', display_name: 'Red Hat SSO', email: null, created_at: '2025-01-01T00:00:00Z' },
+          { provider: 'github', display_name: 'GitHub', email: null, created_at: '2025-01-02T00:00:00Z' },
+        ],
+        identities_unlinkable: true,
+      }),
+    ])
+    const user1 = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('dual-sso')).closest('tr')!
+    // First SSO is visible directly
+    await user1.click(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from dual-sso' }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/remaining sign-in method/i)).toBeInTheDocument()
+    expect(within(dialog).queryByText(/only connected SSO provider/i)).not.toBeInTheDocument()
+  })
 })

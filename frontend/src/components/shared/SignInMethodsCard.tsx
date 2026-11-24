@@ -10,6 +10,7 @@ import {
 import { stripQueryParams } from '@/lib/navigation'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 
 /** One identity as `GET /api/user/identities` reports it. */
 interface LinkedIdentity {
@@ -66,6 +67,7 @@ export function SignInMethodsCard() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState('')
+  const [confirmProvider, setConfirmProvider] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -173,7 +175,13 @@ export function SignInMethodsCard() {
                         ? undefined
                         : 'This is your only sign-in method. Connect another one first.'
                   }
-                  onClick={() => void handleUnlink(identity.provider)}
+                  onClick={() => {
+                    if (identities.length === 1 && unlinkable) {
+                      setConfirmProvider(identity.provider)
+                    } else {
+                      void handleUnlink(identity.provider)
+                    }
+                  }}
                 >
                   {busy === identity.provider ? 'Removing…' : 'Disconnect'}
                 </Button>
@@ -225,6 +233,21 @@ export function SignInMethodsCard() {
 
         {notice && <p className="text-sm text-signal-green">{notice}</p>}
         {error && <p className="text-sm text-signal-red">{error}</p>}
+
+        {confirmProvider !== null && (
+          <ConfirmDialog
+            open
+            onOpenChange={(open) => { if (!open) setConfirmProvider(null) }}
+            title={`Disconnect ${label(confirmProvider)}?`}
+            description="This is your only connected SSO provider. After disconnecting, you will only be able to sign in with your RootCoz API key \u2014 make sure you have it saved (or rotate your key in Profile Settings first) so you don\u2019t get locked out."
+            confirmLabel="Disconnect"
+            variant="destructive"
+            loading={busy !== ''}
+            onConfirm={() => {
+              void handleUnlink(confirmProvider).then(() => setConfirmProvider(null))
+            }}
+          />
+        )}
       </CardContent>
     </Card>
   )

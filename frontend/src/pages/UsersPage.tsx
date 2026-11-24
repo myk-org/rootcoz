@@ -104,7 +104,7 @@ function SsoBadge({
   muted: boolean
   unlinkable: boolean
   username: string
-  onUnlink: (target: { username: string; provider: string; displayName: string }) => void
+  onUnlink: (target: { username: string; provider: string; displayName: string; isLastSso: boolean }) => void
 }) {
   const label = id.display_name || id.provider
   const tooltipText = `${label}${id.email ? ` \u00b7 ${id.email}` : ''}${!unlinkable ? '\nOnly sign-in method \u2014 cannot be unlinked' : ''}`
@@ -126,7 +126,7 @@ function SsoBadge({
                 type="button"
                 aria-label={`Unlink ${label} from ${username}`}
                 className="-mr-0.5 rounded-full p-0.5 transition-colors hover:bg-signal-red/20 hover:text-signal-red"
-                onClick={() => onUnlink({ username, provider: id.provider, displayName: label })}
+                onClick={() => onUnlink({ username, provider: id.provider, displayName: label, isLastSso: false })}
               >
                 <X className="h-3 w-3" />
               </button>
@@ -146,11 +146,17 @@ function SignInCell({
 }: {
   user: AdminUser
   muted: boolean
-  onUnlink: (target: { username: string; provider: string; displayName: string }) => void
+  onUnlink: (target: { username: string; provider: string; displayName: string; isLastSso: boolean }) => void
 }) {
   const identities = user.identities ?? []
   const hasApiKey = user.has_api_key ?? (identities.length === 0)
   const unlinkable = user.identities_unlinkable ?? (identities.length > 1 || Boolean(hasApiKey))
+  const isLastSso = identities.length === 1
+  const wrappedOnUnlink = useCallback(
+    (target: { username: string; provider: string; displayName: string; isLastSso: boolean }) =>
+      onUnlink({ ...target, isLastSso }),
+    [onUnlink, isLastSso],
+  )
   const [expanded, setExpanded] = useState(false)
 
   if (!hasApiKey && identities.length === 0) {
@@ -174,7 +180,7 @@ function SignInCell({
       <div className="flex flex-wrap items-center gap-1">
         {localBadge}
         {identities.map((id) => (
-          <SsoBadge key={id.provider} id={id} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={onUnlink} />
+          <SsoBadge key={id.provider} id={id} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={wrappedOnUnlink} />
         ))}
       </div>
     )
@@ -190,7 +196,7 @@ function SignInCell({
     return (
       <div className="flex flex-wrap items-center gap-1">
         {localBadge}
-        <SsoBadge id={identities[0]} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={onUnlink} />
+        <SsoBadge id={identities[0]} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={wrappedOnUnlink} />
         <TooltipProvider delayDuration={200}>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -218,7 +224,7 @@ function SignInCell({
     <div className="flex flex-wrap items-center gap-1">
       {localBadge}
       {identities.map((id) => (
-        <SsoBadge key={id.provider} id={id} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={onUnlink} />
+        <SsoBadge key={id.provider} id={id} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={wrappedOnUnlink} />
       ))}
       <button
         type="button"
@@ -288,7 +294,7 @@ export function UsersPage() {
   const [deleting, setDeleting] = useState(false)
 
   // Unlink SSO identity dialog
-  const [unlinkTarget, setUnlinkTarget] = useState<{ username: string; provider: string; displayName: string } | null>(null)
+  const [unlinkTarget, setUnlinkTarget] = useState<{ username: string; provider: string; displayName: string; isLastSso: boolean } | null>(null)
   const [unlinking, setUnlinking] = useState(false)
 
   // Disable dialog + the in-flight guard shared by disable/enable/unlock
@@ -1175,7 +1181,11 @@ export function UsersPage() {
         open={unlinkTarget !== null}
         onOpenChange={(open) => { if (!open && !unlinking) { setUnlinkTarget(null); setActionError(null) } }}
         title="Unlink SSO provider"
-        description={`Remove ${unlinkTarget?.displayName} sign-in from "${unlinkTarget?.username}"? They can still sign in with their remaining sign-in method(s).`}
+        description={
+          unlinkTarget?.isLastSso
+            ? `Remove ${unlinkTarget.displayName} sign-in from "${unlinkTarget.username}"? This is their only connected SSO provider \u2014 after removing it, they will only be able to sign in with their RootCoz API key. Make sure they have it saved, or rotate their key if needed.`
+            : `Remove ${unlinkTarget?.displayName} sign-in from "${unlinkTarget?.username}"? They can still sign in with their remaining sign-in method(s).`
+        }
         confirmLabel="Unlink"
         variant="destructive"
         onConfirm={handleUnlink}

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, it, vi } from 'vitest'
 import { SignInMethodsCard } from '@/components/shared/SignInMethodsCard'
@@ -172,4 +172,64 @@ it('offers the connect button when the server allows browser sign-in', async () 
     await screen.findByRole('button', { name: /connect github/i }),
   ).toBeTruthy()
   expect(screen.queryByText(/browser sign-in is turned off/i)).toBeNull()
+})
+
+it('opens a confirmation dialog when disconnecting the only SSO provider', async () => {
+  mockState([{ provider: 'google', email: 'a@example.com', created_at: '' }], true)
+  render(<SignInMethodsCard />)
+
+  const btn = await screen.findByRole('button', { name: /disconnect/i })
+  await userEvent.click(btn)
+
+  // Dialog appears with the last-SSO warning
+  const dialog = screen.getByRole('dialog')
+  expect(dialog).toBeTruthy()
+  expect(screen.getByText(/Disconnect Google\?/)).toBeTruthy()
+  expect(screen.getByText(/only connected SSO provider/i)).toBeTruthy()
+  expect(screen.getByText(/RootCoz API key/)).toBeTruthy()
+  // api.delete was NOT called yet
+  expect(del).not.toHaveBeenCalled()
+})
+
+it('cancelling the last-SSO confirmation leaves the provider linked', async () => {
+  mockState([{ provider: 'google', email: null, created_at: '' }], true)
+  render(<SignInMethodsCard />)
+
+  await userEvent.click(await screen.findByRole('button', { name: /disconnect/i }))
+  const dialog = screen.getByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
+
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  expect(del).not.toHaveBeenCalled()
+})
+
+it('confirming the last-SSO dialog calls api.delete and closes the dialog', async () => {
+  mockState([{ provider: 'google', email: null, created_at: '' }], true)
+  del.mockResolvedValue({ ok: true })
+  render(<SignInMethodsCard />)
+
+  await userEvent.click(await screen.findByRole('button', { name: /disconnect/i }))
+  const dialog = screen.getByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /^disconnect$/i }))
+
+  await waitFor(() => expect(del).toHaveBeenCalledWith('/api/user/identities/google'))
+})
+
+it('disconnects directly (no dialog) when user has 2+ SSO providers', async () => {
+  mockState(
+    [
+      { provider: 'google', email: null, created_at: '' },
+      { provider: 'github', email: null, created_at: '' },
+    ],
+    true,
+  )
+  del.mockResolvedValue({ ok: true })
+  render(<SignInMethodsCard />)
+
+  const [first] = await screen.findAllByRole('button', { name: /disconnect/i })
+  await userEvent.click(first)
+
+  // No dialog — api.delete called immediately
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(del).toHaveBeenCalledWith('/api/user/identities/google')
 })

@@ -177,7 +177,9 @@ Three rules matter:
   never have been shown its API key, so unlinking the only identity from a
   keyless account would lock you out. When the account holds a local API key,
   unlinking the sole SSO provider is allowed because local username + API-key
-  login remains. Connect another provider, generate an API key, or rotate the
+  login remains. Disconnecting the sole SSO provider on a keyed account prompts
+  for confirmation to verify you still have your API key saved (or to rotate it
+  first). Connect another provider, generate an API key, or rotate the
   key and keep it, first.
 - An identity that already belongs to **another** account is refused without
   naming that account, since the answer would otherwise confirm that an address

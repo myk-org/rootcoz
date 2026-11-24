@@ -4293,9 +4293,11 @@ def auth_sso_unlink(
 ) -> None:
     """Unlink one SSO provider from your account.
 
-    The last one is refused: every account holds an API key, but an account
-    created through SSO is shown it only once, so removing the only sign-in method could
-    lock you out of your own account.
+    If this is your only SSO provider and your account has no local API key
+    (keyless account), the server refuses with 409 — removing the only
+    sign-in method would lock you out.  When the account holds a local API
+    key, unlinking succeeds and local username + API-key login remains as
+    the only sign-in method.
     """
     _set_json(json_output)
     if not yes:
@@ -4304,7 +4306,10 @@ def auth_sso_unlink(
             # so the caller must have asked for it.
             typer.echo("Refusing to unlink under --json without --yes.", err=True)
             raise typer.Exit(1)
-        if not typer.confirm(f"Unlink {provider} from this account?"):
+        if not typer.confirm(
+            f"Unlink {provider} from this account? If this is your only"
+            " SSO provider, make sure you have your RootCoz API key saved."
+        ):
             typer.echo("Not unlinked.", err=True)
             raise typer.Exit(1)
     _run_client_command(

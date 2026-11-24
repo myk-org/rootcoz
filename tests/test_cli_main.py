@@ -5657,6 +5657,7 @@ class TestAuthLoginCommand:
         mock_client.delete_user_identity.return_value = {"ok": True}
         declined = runner.invoke(app, ["auth", "sso-unlink", "google"], input="n\n")
         assert declined.exit_code == 1
+        assert "make sure you have your RootCoz API key saved" in declined.output
         mock_client.delete_user_identity.assert_not_called()
 
         agreed = runner.invoke(app, ["auth", "sso-unlink", "google", "--yes"])
