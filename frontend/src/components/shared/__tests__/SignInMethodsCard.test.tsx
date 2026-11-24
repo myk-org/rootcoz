@@ -106,6 +106,7 @@ it('cannot disconnect the only sign-in method', async () => {
     ).toBe(true),
   )
   expect(screen.getByText(/only sign-in method/i)).toBeTruthy()
+  expect(screen.getByText(/ask an admin to issue an API key/i)).toBeTruthy()
 })
 
 it('disconnects a provider and reloads the list', async () => {

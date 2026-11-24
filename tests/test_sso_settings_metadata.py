@@ -30,11 +30,11 @@ def test_every_declared_provider_setting_exists() -> None:
 
 
 def test_every_provider_setting_is_offered_in_server_settings() -> None:
-    """The SSO category is the only place an admin can set these."""
-    category = _SETTINGS_CATEGORIES["SSO"]
+    """Auth & Security is the only place an admin can set these."""
+    category = _SETTINGS_CATEGORIES["Auth & Security"]
     for provider in PROVIDER_CLASSES:
         for name in provider.settings_fields:
-            assert name in category, f"{name} missing from the SSO category"
+            assert name in category, f"{name} missing from Auth & Security"
 
 
 def test_every_declared_secret_is_masked() -> None:

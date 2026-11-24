@@ -93,7 +93,7 @@ function CopyableKey({ label, value }: { label: string; value: string }) {
   )
 }
 
-function SsoCell({
+function SignInCell({
   user,
   muted,
   onUnlink,
@@ -103,15 +103,28 @@ function SsoCell({
   onUnlink: (target: { username: string; provider: string; displayName: string }) => void
 }) {
   const identities = user.identities ?? []
-  if (identities.length === 0) {
-    return <span className="text-xs text-text-tertiary">API key only</span>
+  const hasApiKey = user.has_api_key ?? (identities.length === 0)
+  const unlinkable = user.identities_unlinkable ?? (identities.length > 1 || Boolean(hasApiKey))
+
+  if (!hasApiKey && identities.length === 0) {
+    return <span className="text-xs text-text-tertiary">None</span>
   }
-  const unlinkable = user.identities_unlinkable ?? identities.length > 1
+
   return (
     <div className="flex flex-wrap items-center gap-1">
+      {hasApiKey && (
+        <span
+          className={`inline-flex items-center rounded-full border border-border-muted bg-surface-elevated px-2 py-0.5 text-xs font-medium ${
+            muted ? 'text-text-tertiary' : 'text-text-secondary'
+          }`}
+          title="Local username + API key sign-in"
+        >
+          Local
+        </span>
+      )}
       {identities.map((id) => {
         const label = id.display_name || id.provider
-        const tooltipText = `${label}${id.email ? ` · ${id.email}` : ''}${!unlinkable ? '\nOnly linked provider — cannot be unlinked' : ''}`
+        const tooltipText = `${label}${id.email ? ` \u00b7 ${id.email}` : ''}${!unlinkable ? '\nOnly sign-in method \u2014 cannot be unlinked' : ''}`
         return (
           <TooltipProvider key={id.provider} delayDuration={200}>
             <Tooltip>
@@ -391,7 +404,7 @@ export function UsersPage() {
         prev.map((u) => {
           if (u.username !== unlinkTarget.username) return u
           const nextIdentities = (u.identities ?? []).filter((id) => id.provider !== unlinkTarget.provider)
-          return { ...u, identities: nextIdentities, identities_unlinkable: nextIdentities.length > 1 }
+          return { ...u, identities: nextIdentities, identities_unlinkable: nextIdentities.length > 1 || Boolean(u.has_api_key) }
         }),
       )
       setUnlinkTarget(null)
@@ -603,7 +616,7 @@ export function UsersPage() {
               <TableHead>Username</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Role</TableHead>
-              <TableHead>SSO</TableHead>
+              <TableHead>Sign-in</TableHead>
               <TableHead>View reports</TableHead>
               <TableHead>Server providers</TableHead>
               <TableHead>Created</TableHead>
@@ -668,7 +681,7 @@ export function UsersPage() {
                     )}
                   </TableCell>
                   <TableCell>
-                    <SsoCell user={user} muted={muted} onUnlink={setUnlinkTarget} />
+                    <SignInCell user={user} muted={muted} onUnlink={setUnlinkTarget} />
                   </TableCell>
                   <TableCell>
                     {user.role === 'admin' ? (
@@ -1086,7 +1099,7 @@ export function UsersPage() {
         open={unlinkTarget !== null}
         onOpenChange={(open) => { if (!open && !unlinking) { setUnlinkTarget(null); setActionError(null) } }}
         title="Unlink SSO provider"
-        description={`Remove ${unlinkTarget?.displayName} sign-in from "${unlinkTarget?.username}"? They can still sign in with their remaining linked providers.`}
+        description={`Remove ${unlinkTarget?.displayName} sign-in from "${unlinkTarget?.username}"? They can still sign in with their remaining sign-in method(s).`}
         confirmLabel="Unlink"
         variant="destructive"
         onConfirm={handleUnlink}

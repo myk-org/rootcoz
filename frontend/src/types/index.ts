@@ -51,6 +51,8 @@ export interface AdminUser {
   identities?: UserIdentitySummary[]
   /** True when at least one linked identity may be unlinked (more than one linked). */
   identities_unlinkable?: boolean
+  /** Whether the account has a local API key (false for keyless proxy accounts). */
+  has_api_key?: boolean
 }
 
 /** GET /api/admin/users — one window of accounts plus the count of the whole match. */

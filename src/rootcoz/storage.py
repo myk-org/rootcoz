@@ -8985,6 +8985,8 @@ def _user_row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
         data["locked"] = data["locked_at"] is not None
     if "disabled" in data:
         data["disabled"] = bool(data["disabled"])
+    if "has_api_key" in data:
+        data["has_api_key"] = bool(data["has_api_key"])
     return data
 
 
@@ -9073,6 +9075,21 @@ async def get_user_by_username(username: str) -> dict[str, Any] | None:
         )
         row = await cursor.fetchone()
         return _user_row_to_dict(row) if row else None
+
+
+async def user_has_api_key(username: str) -> bool:
+    """Return True when the account has a stored API-key hash.
+
+    The hash itself is never exposed; this is a boolean predicate for the
+    unlink guard and the identities payload.
+    """
+    username = _normalize_username(username)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM users WHERE username = ? AND api_key_hash IS NOT NULL",
+            (username,),
+        )
+        return await cursor.fetchone() is not None
 
 
 async def get_user_audit_snapshot(username: str) -> dict[str, Any] | None:
@@ -9305,7 +9322,8 @@ async def list_users_page(
         params.append(q)
     columns = (
         "id, username, role, status, can_view_reports, can_use_server_providers,"
-        " failed_login_count, locked_at, disabled, created_at, last_seen"
+        " failed_login_count, locked_at, disabled, created_at, last_seen,"
+        " (api_key_hash IS NOT NULL) AS has_api_key"
     )
     async with _connect_db() as db:
         cursor = await db.execute(f"SELECT COUNT(*) FROM users WHERE {where}", params)
@@ -10750,21 +10768,29 @@ async def unlink_user_identity(username: str, provider: str) -> str:
             await db.execute("BEGIN IMMEDIATE")
             try:
                 cursor = await db.execute(
-                    "SELECT i.provider FROM user_identities i JOIN users u"
-                    " ON u.id = i.user_id WHERE u.username = ?",
+                    "SELECT id, (api_key_hash IS NOT NULL) AS has_api_key"
+                    " FROM users WHERE username = ?",
                     (username,),
+                )
+                user_row = await cursor.fetchone()
+                if user_row is None:
+                    await db.rollback()
+                    return "not_found"
+                has_api_key = bool(user_row["has_api_key"])
+                cursor = await db.execute(
+                    "SELECT provider FROM user_identities WHERE user_id = ?",
+                    (user_row["id"],),
                 )
                 providers = [row["provider"] for row in await cursor.fetchall()]
                 if provider not in providers:
                     await db.rollback()
                     return "not_found"
-                if len(providers) == 1:
+                if len(providers) == 1 and not has_api_key:
                     await db.rollback()
                     return "last"
                 await db.execute(
-                    "DELETE FROM user_identities WHERE provider = ? AND user_id ="
-                    " (SELECT id FROM users WHERE username = ?)",
-                    (provider, username),
+                    "DELETE FROM user_identities WHERE provider = ? AND user_id = ?",
+                    (provider, user_row["id"]),
                 )
                 await db.commit()
             except Exception:

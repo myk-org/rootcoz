@@ -166,17 +166,41 @@ async def test_identity_links_lookup_list_and_unlink(setup_test_db: Path) -> Non
         assert await storage.get_user_identity("google", "other") is None
         assert await storage.list_user_identities("alice") == [created]
 
-        # The only identity is not removable: an SSO-created account never saw
-        # its API key, so this would be a lockout.
-        assert await storage.unlink_user_identity("alice", "google") == "last"
-        assert len(await storage.list_user_identities("alice")) == 1
+        # A keyed user can unlink its sole identity: local login remains.
+        assert await storage.user_has_api_key("alice") is True
+        assert await storage.unlink_user_identity("alice", "google") == "deleted"
+        assert len(await storage.list_user_identities("alice")) == 0
 
+        # Re-link two providers, then unlink one at a time.
+        await storage.add_user_identity("alice", "google", "sub-2")
         await storage.add_user_identity("alice", "github", "gh-1")
         assert await storage.unlink_user_identity("alice", "google") == "deleted"
         assert [i["provider"] for i in await storage.list_user_identities("alice")] == [
             "github"
         ]
         assert await storage.unlink_user_identity("alice", "google") == "not_found"
+
+
+async def test_keyless_user_cannot_unlink_last_identity(setup_test_db: Path) -> None:
+    """A keyless account's sole SSO identity is its only sign-in method."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_keyless_user("keyless-alice", created_via="proxy")
+        await storage.add_user_identity("keyless-alice", "google", "sub-k1")
+
+        assert await storage.user_has_api_key("keyless-alice") is False
+        assert await storage.unlink_user_identity("keyless-alice", "google") == "last"
+        assert len(await storage.list_user_identities("keyless-alice")) == 1
+
+        # With two identities, unlinking one is allowed even without a key.
+        await storage.add_user_identity("keyless-alice", "github", "gh-k1")
+        assert (
+            await storage.unlink_user_identity("keyless-alice", "google") == "deleted"
+        )
+        assert [
+            i["provider"] for i in await storage.list_user_identities("keyless-alice")
+        ] == ["github"]
+        # Now the remaining one is the last — still refused.
+        assert await storage.unlink_user_identity("keyless-alice", "github") == "last"
 
 
 async def test_a_link_reads_its_row_inside_the_link_transaction(
@@ -321,9 +345,9 @@ async def test_concurrent_unlinks_cannot_leave_an_account_without_a_method(
     """The last-method guard is part of the write, not a check before it.
 
     Two removals issued together used to each see two identities and both
-    succeed, leaving an SSO-created account with no way in at all.
+    succeed, leaving a keyless SSO-created account with no way in at all.
     """
-    await storage.create_user("alice")
+    await storage.create_keyless_user("alice", created_via="proxy")
     await storage.add_user_identity("alice", "google", "sub-1")
     await storage.add_user_identity("alice", "github", "gh-1")
 

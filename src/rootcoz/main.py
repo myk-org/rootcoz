@@ -726,6 +726,16 @@ _SETTING_CHOICES: dict[str, dict[str, Any]] = {
     },
 }
 
+#: The deployment-wide SSO policy settings that no single provider owns.
+#: Shared by ``_SETTINGS_CATEGORIES["Auth & Security"]`` (placement) and
+#: ``_sso_section`` (section metadata), so both derive from one constant.
+_SSO_GENERIC_SETTINGS = (
+    "sso_allowed_domains",
+    "sso_state_ttl_seconds",
+    "sso_device_code_ttl_seconds",
+    "sso_device_poll_interval_seconds",
+)
+
 # Category grouping for UI display. The tab list is purpose-based (#585):
 # a setting sits on the tab for the task it configures, never on a tab named
 # after a product behind a generic capability, and never on an abstraction
@@ -738,17 +748,6 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         # Exactly two: where the server is reachable, and where it pushes.
         "public_base_url",
         "auto_push_exporters",  # runtime toggle, no restart required
-    ],
-    # Sign-in methods sit beside the rest of Auth & Security: same task, and a
-    # provider is configured where the account rules are.
-    # Provider fields are derived in _sso_provider_settings(); the rest are the
-    # deployment-wide rules that no single provider owns.
-    "SSO": _sso_provider_settings()
-    + [
-        "sso_allowed_domains",
-        "sso_state_ttl_seconds",
-        "sso_device_code_ttl_seconds",
-        "sso_device_poll_interval_seconds",
     ],
     "Jenkins": [
         "jenkins_url",
@@ -853,6 +852,9 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "session_ttl_hours",
         "login_lockout_enabled",
         "login_lockout_threshold",
+        # SSO policy + provider settings merged into Auth & Security (#197).
+        *_SSO_GENERIC_SETTINGS,
+        *_sso_provider_settings(),
     ],
     "Notifications": [
         "smtp_host",
@@ -955,18 +957,21 @@ for _provider_cls in auth_sso.PROVIDER_CLASSES:
         _FIELD_TO_SSO_PROVIDER[_field] = (_provider_cls.name, _display)
 
 
-def _sso_section(field_name: str) -> dict[str, str]:
+def _sso_section(field_name: str) -> dict[str, Any]:
     """The SSO sub-section a setting belongs to, or ``{}`` when it has none.
 
-    Empty for every non-provider setting (the deployment's own SSO policy, and all
-    other categories), so ``section`` is absent rather than null — the frontend
-    renders an ungrouped row without a special case.
+    Generic SSO policy settings get a non-collapsible ``"sso"`` section;
+    per-provider settings get a collapsible section keyed by the provider name.
+    Everything outside SSO returns ``{}``, so ``section`` is absent rather than
+    null — the frontend renders an ungrouped row without a special case.
     """
-    section = _FIELD_TO_SSO_PROVIDER.get(field_name)
-    if section is None:
+    if field_name in _SSO_GENERIC_SETTINGS:
+        return {"section": "sso", "section_label": "SSO"}
+    pair = _FIELD_TO_SSO_PROVIDER.get(field_name)
+    if pair is None:
         return {}
-    provider, label = section
-    return {"section": provider, "section_label": label}
+    provider, label = pair
+    return {"section": provider, "section_label": label, "section_collapsible": True}
 
 
 # Server Settings rows show a human label next to the copyable machine key.
@@ -20063,14 +20068,21 @@ async def sso_ticket(request: Request) -> JSONResponse:
     human to recognise their own address, not enough to harvest from a leaked
     link.
 
+    When the body also contains a non-empty ``username`` string, the response
+    includes ``username_exists: bool`` — so the choice screen can tell the
+    person whether the name they typed is available before they spend the
+    ticket.  The provider must still be configured (a disabled provider cannot
+    probe usernames).
+
     Args:
-        request: Body ``{"ticket": ...}`` — the value the login page read from the
-            URL fragment ``/login#sso_ticket=...``.
+        request: Body ``{"ticket": ..., "username"?: ...}`` — the value the
+            login page read from the URL fragment ``/login#sso_ticket=...``.
 
     Returns:
-        ``{"provider", "suggested_username", "email_domain", "expires_at"}``. The
-        address itself is never returned: for Google the suggestion *is* the
-        local part, so name + masked address would reconstruct it.
+        ``{"provider", "suggested_username", "email_domain", "expires_at",
+        "username_exists"?}``. The address itself is never returned: for
+        Google the suggestion *is* the local part, so name + masked address
+        would reconstruct it.
 
     Raises:
         HTTPException: 404 when the ticket is unknown, expired or already used.
@@ -20079,14 +20091,21 @@ async def sso_ticket(request: Request) -> JSONResponse:
     ticket = str(body.get("ticket", ""))
     await _require_ticket_binding(request, ticket)
     record = await _ticket_or_404(ticket)
-    return JSONResponse(
-        content={
-            "provider": record["provider"],
-            "suggested_username": record["suggested_username"],
-            "email_domain": _email_domain(record["email"]),
-            "expires_at": record["expires_at"],
-        }
-    )
+
+    content: dict[str, Any] = {
+        "provider": record["provider"],
+        "suggested_username": record["suggested_username"],
+        "email_domain": _email_domain(record["email"]),
+        "expires_at": record["expires_at"],
+    }
+
+    raw_username = body.get("username")
+    if isinstance(raw_username, str) and raw_username.strip():
+        await _require_configured_provider(request, record, get_settings())
+        existing = await storage.get_user_by_username(raw_username.strip().lower())
+        content["username_exists"] = existing is not None
+
+    return JSONResponse(content=content)
 
 
 @app.post("/api/auth/sso/create", operation_id="ssoCreateAccount")
@@ -20317,15 +20336,18 @@ _SSO_PROVIDER_DISPLAY_NAMES: dict[str, str] = {
 }
 
 
-def _identities_payload(identities: list[dict[str, Any]]) -> dict[str, Any]:
+def _identities_payload(
+    identities: list[dict[str, Any]], *, has_api_key: bool = False
+) -> dict[str, Any]:
     """Shape the sign-in-methods answer for the self-service and admin routes.
 
     Args:
         identities: Rows from :func:`rootcoz.storage.list_user_identities`.
+        has_api_key: Whether the account holds a local API-key hash.
 
     Returns:
         ``{"identities": [{"provider", "display_name", "email", "created_at"}],
-        "unlinkable": bool}``.
+        "unlinkable": bool, "has_api_key": bool}``.
         The subject id is deliberately absent: it is a correlation key, and no
         client needs it.
     """
@@ -20341,7 +20363,8 @@ def _identities_payload(identities: list[dict[str, Any]]) -> dict[str, Any]:
             }
             for identity in identities
         ],
-        "unlinkable": len(identities) > 1,
+        "unlinkable": len(identities) > 1 or (len(identities) == 1 and has_api_key),
+        "has_api_key": has_api_key,
     }
 
 
@@ -20353,7 +20376,11 @@ async def _unlink_identity(
     audit_action: str,
     as_admin: bool,
 ) -> None:
-    """Remove one provider from an account, refusing the last one.
+    """Remove one provider from an account, refusing the last one for keyless accounts.
+
+    When the account has a local API key, unlinking the sole SSO provider is
+    allowed because local login remains. The guard fires only for keyless
+    accounts whose only sign-in method is the SSO identity being removed.
 
     Shared by the self-service and admin routes so the 404/409 order, the
     lockout guard and the audit row cannot drift apart.
@@ -20412,14 +20439,13 @@ async def _unlink_identity(
     )
 
 
-#: Why an account cannot lose its last sign-in method. Shared by the self-service
-#: and admin routes so both name the same remedies. The guard is unconditional on
-#: purpose — a stored key hash cannot prove its owner still holds that key — so
-#: the remedies are the two that can actually be carried out.
+#: Why a keyless account cannot lose its last sign-in method. Accounts with a
+#: local API key can still sign in after unlinking their sole SSO provider, so
+#: the guard fires only when ``api_key_hash`` is NULL.
 _LAST_IDENTITY_DETAIL = (
     "This is the only way to sign in to this account. Connect another sign-in"
-    " method first, or ask an administrator to disable the account if losing"
-    " access is intended."
+    " method first, generate an API key, or ask an administrator to disable"
+    " the account if losing access is intended."
 )
 
 
@@ -21202,8 +21228,13 @@ async def get_user_identities(request: Request) -> JSONResponse:
             when the request carries no session — with no caller there is no
             account to scope the read to.
     """
-    identities = await storage.list_user_identities(request.state.username)
-    return JSONResponse(content=_identities_payload(identities))
+    username = request.state.username
+    identities = await storage.list_user_identities(username)
+    return JSONResponse(
+        content=_identities_payload(
+            identities, has_api_key=await storage.user_has_api_key(username)
+        )
+    )
 
 
 @app.delete("/api/user/identities/{provider}", operation_id="deleteUserIdentity")
@@ -24663,7 +24694,11 @@ async def list_users_endpoint(
         [u["username"] for u in users]
     )
     for user in users:
-        payload = _identities_payload(identities_by_user.get(user["username"], []))
+        has_api_key = bool(user.get("has_api_key", False))
+        payload = _identities_payload(
+            identities_by_user.get(user["username"], []), has_api_key=has_api_key
+        )
+        user["has_api_key"] = has_api_key
         user["identities"] = payload["identities"]
         user["identities_unlinkable"] = payload["unlinkable"]
     return {
@@ -24869,7 +24904,11 @@ async def admin_user_identities(username: str, request: Request) -> JSONResponse
     if await storage.get_user_by_username(username) is None:
         raise HTTPException(status_code=404, detail="User not found")
     identities = await storage.list_user_identities(username)
-    return JSONResponse(content=_identities_payload(identities))
+    return JSONResponse(
+        content=_identities_payload(
+            identities, has_api_key=await storage.user_has_api_key(username)
+        )
+    )
 
 
 @app.delete(

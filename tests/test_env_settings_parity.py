@@ -315,22 +315,26 @@ def test_sso_settings_carry_the_provider_that_owns_them(client):
     assert response.status_code == 200
     by_key = {item["key"]: item for item in response.json()}
 
-    # Declared per provider class, so no frontend or test list can drift from it.
+    # Declared per provider class: collapsible sub-sections.
     for provider in main.auth_sso.PROVIDER_CLASSES:
         for field in provider.settings_fields:
             assert by_key[field]["section"] == provider.name, field
             assert by_key[field]["section_label"] == provider.display_name, field
+            assert by_key[field]["section_collapsible"] is True, field
 
-    # The deployment's own SSO policy belongs to no provider: absent, not null.
+    # Generic SSO policy: non-collapsible "sso" section.
     for generic in (
         "sso_allowed_domains",
         "sso_state_ttl_seconds",
         "sso_device_code_ttl_seconds",
         "sso_device_poll_interval_seconds",
     ):
-        assert "section" not in by_key[generic], generic
+        assert by_key[generic]["section"] == "sso", generic
+        assert by_key[generic]["section_label"] == "SSO", generic
+        assert "section_collapsible" not in by_key[generic], generic
 
     # Nothing outside SSO claims a section.
+    assert "section" not in by_key["admin_key"]
     assert "section" not in by_key["ai_model"]
     assert "section" not in by_key["jenkins_url"]
 
@@ -1501,28 +1505,6 @@ def test_retention_budget_env_values_the_sidecar_accepted_do_not_block_boot(
 # Server keeps exactly two settings.
 _EXPECTED_CATEGORIES: dict[str, set[str]] = {
     "Server": {"public_base_url", "auto_push_exporters"},
-    # SSO is a derived tab: the provider registry names the fields it reads
-    # (`settings_fields`) and which are secret (`sensitive_settings`), and
-    # tests/test_sso_settings_metadata.py is the contract for that derivation.
-    # Pinned here like every other tab, so a provider that forgets a setting
-    # still shows up as a layout change rather than sliding in unnoticed.
-    "SSO": {
-        "sso_allowed_domains",
-        "sso_device_code_ttl_seconds",
-        "sso_device_poll_interval_seconds",
-        "sso_github_client_id",
-        "sso_github_client_secret",
-        "sso_google_client_id",
-        "sso_google_client_secret",
-        "sso_openshift_api_url",
-        "sso_openshift_client_id",
-        "sso_openshift_client_secret",
-        "sso_openshift_issuer",
-        "sso_redhat_client_id",
-        "sso_redhat_client_secret",
-        "sso_redhat_issuer",
-        "sso_state_ttl_seconds",
-    },
     "Jenkins": {
         "jenkins_url",
         "jenkins_user",
@@ -1618,6 +1600,22 @@ _EXPECTED_CATEGORIES: dict[str, set[str]] = {
         "session_ttl_hours",
         "login_lockout_enabled",
         "login_lockout_threshold",
+        # SSO merged into Auth & Security (#197).
+        "sso_allowed_domains",
+        "sso_state_ttl_seconds",
+        "sso_device_code_ttl_seconds",
+        "sso_device_poll_interval_seconds",
+        "sso_github_client_id",
+        "sso_github_client_secret",
+        "sso_google_client_id",
+        "sso_google_client_secret",
+        "sso_openshift_api_url",
+        "sso_openshift_client_id",
+        "sso_openshift_client_secret",
+        "sso_openshift_issuer",
+        "sso_redhat_client_id",
+        "sso_redhat_client_secret",
+        "sso_redhat_issuer",
     },
     "Notifications": {
         "smtp_host",

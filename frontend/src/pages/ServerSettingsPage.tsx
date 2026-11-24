@@ -111,6 +111,8 @@ interface ServerSetting {
   section?: string
   /** Display name for that section (the provider's own label). */
   section_label?: string
+  /** True when this section should render as a collapsible block (provider rows). */
+  section_collapsible?: boolean
 }
 
 interface CategoryGroup {
@@ -130,7 +132,7 @@ interface SettingsImportResult {
 // Deployment-level settings first, then the two CI sources adjacent and before what consumes their artifacts, then analysis/output, then the operator-facing categories (mirrors backend _SETTINGS_CATEGORIES order).
 const CATEGORY_ORDER = [
   'Server', 'Jenkins', 'Prow', 'Analysis', 'Jira', 'GitHub issues',
-  'Report Portal', 'Datadog', 'SSO', 'Auth & Security', 'Notifications',
+  'Report Portal', 'Datadog', 'Auth & Security', 'Notifications',
   'Data & retention', 'Repos & workspace', 'Logging', 'Advanced',
 ]
 
@@ -830,6 +832,9 @@ export function ServerSettingsPage() {
   const [settingsIoError, setSettingsIoError] = useState<string | null>(null)
   const importFileRef = useRef<HTMLInputElement>(null)
 
+  // Collapsible SSO provider sections — collapsed by default.
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(() => new Set())
+
   // Debounced search
   const [searchInput, setSearchInput] = useState('')
   useEffect(() => {
@@ -1418,7 +1423,8 @@ export function ServerSettingsPage() {
         return
       }
     }
-    const category = state.settings.find(s => s.key === highlighted)?.category
+    const setting = state.settings.find(s => s.key === highlighted)
+    const category = setting?.category
     if (category) {
       if (state.collapsedCategories.has(category)) {
         dispatch({ type: 'TOGGLE_CATEGORY', category })
@@ -1429,10 +1435,15 @@ export function ServerSettingsPage() {
         return
       }
     }
+    // Auto-expand a collapsible section that contains the highlighted setting.
+    if (setting?.section && setting.section_collapsible && !expandedSections.has(setting.section)) {
+      setExpandedSections((prev) => new Set(prev).add(setting.section!))
+      return
+    }
     document
       .querySelector(`[data-setting-key="${CSS.escape(highlighted)}"]`)
       ?.scrollIntoView({ block: 'center' })
-  }, [highlighted, searchInput, state.search, state.settings, state.collapsedCategories, effectiveTab])
+  }, [highlighted, searchInput, state.search, state.settings, state.collapsedCategories, effectiveTab, expandedSections])
 
   // ---- Per-category card (shared by the tab view and search results) ----
   function renderCategory(category: string, settings: ServerSetting[]) {
@@ -1862,43 +1873,102 @@ export function ServerSettingsPage() {
       )
     }
 
-    // The SSO tab reads as two things: the deployment's own sign-in policy and the
-    // credentials of each provider. The policy comes first on its own, then one
-    // block per provider that has rows — split by the key (`sso_<provider>_…`), so
-    // a provider that gains a setting needs no change here.
-    function renderSsoSections(settings: ServerSetting[]) {
-      // The provider owns this: the registry declares its fields, so a provider
-      // this UI has never heard of still gets its own section. Nothing here may
-      // enumerate providers — that is exactly how a new one used to fall into the
-      // generic block.
-      const generic = settings.filter((s) => !s.section)
-      const sections = new Map<string, { label: string; rows: ServerSetting[] }>()
-      for (const setting of settings) {
-        if (!setting.section) continue
-        const entry = sections.get(setting.section) ?? {
-          label: setting.section_label || setting.section,
+    // Section-aware renderer: ungrouped rows on top, then non-collapsible
+    // sections (e.g. generic SSO policy), then collapsible sections (providers).
+    // The server declares which section owns each setting and whether it is
+    // collapsible, so a provider this UI has never heard of still gets its own
+    // block — the frontend never enumerates providers.
+    function renderSections(settings: ServerSetting[]) {
+      const ungrouped = settings.filter((s) => !s.section)
+      const nonCollapsible = new Map<string, { label: string; rows: ServerSetting[] }>()
+      const collapsible = new Map<string, { label: string; rows: ServerSetting[] }>()
+      for (const s of settings) {
+        if (!s.section) continue
+        const target = s.section_collapsible ? collapsible : nonCollapsible
+        const entry = target.get(s.section) ?? {
+          label: s.section_label || s.section,
           rows: [],
         }
-        entry.rows.push(setting)
-        sections.set(setting.section, entry)
+        entry.rows.push(s)
+        target.set(s.section, entry)
       }
+
+      // Auto-expand collapsible sections that contain the highlighted or
+      // searched setting so the row is visible.
+      const autoExpand = (rows: ServerSetting[]) =>
+        Boolean(state.search) ||
+        (!!highlighted && rows.some((r) => r.key === highlighted))
+
       return (
         <>
-          {generic.length > 0 && (
+          {ungrouped.length > 0 && (
             <div className="divide-y divide-border-default">
-              {generic.map(renderSettingRowInRow)}
+              {ungrouped.map(renderSettingRowInRow)}
             </div>
           )}
-          {Array.from(sections.entries()).map(([provider, { label, rows }]) => (
-            <div key={provider} className="mt-4" data-sso-provider={provider}>
+          {Array.from(nonCollapsible.entries()).map(([id, { label: sectionLabel, rows }]) => (
+            <div key={id} className="mt-5 border-t border-border-default pt-4" data-setting-section={id}>
               <h4 className="mb-2 text-xs font-semibold tracking-wide text-text-tertiary uppercase">
-                {label}
+                {sectionLabel}
               </h4>
               <div className="divide-y divide-border-default">
                 {rows.map(renderSettingRowInRow)}
               </div>
             </div>
           ))}
+          {Array.from(collapsible.entries()).map(([id, { label: sectionLabel, rows }]) => {
+            const isOpen = expandedSections.has(id) || autoExpand(rows)
+            const setCount = rows.filter((r) => r.is_set ?? Boolean(r.value)).length
+            const badgeClass =
+              setCount === rows.length && rows.length > 0
+                ? 'border-signal-green/30 bg-signal-green/10 text-signal-green'
+                : setCount > 0
+                  ? 'border-signal-amber/30 bg-signal-amber/10 text-signal-amber'
+                  : 'border-border-muted bg-surface-elevated text-text-tertiary'
+            const badgeText =
+              setCount === rows.length && rows.length > 0
+                ? 'Configured'
+                : setCount > 0
+                  ? `Partial (${setCount}/${rows.length})`
+                  : 'Not configured'
+
+            return (
+              <div key={id} className="mt-4" data-sso-provider={id}>
+                <button
+                  type="button"
+                  aria-expanded={isOpen}
+                  className="flex w-full items-center gap-2 rounded-md px-1 py-1.5 text-left transition-colors hover:bg-surface-hover"
+                  onClick={() =>
+                    setExpandedSections((prev) => {
+                      const next = new Set(prev)
+                      if (next.has(id)) next.delete(id)
+                      else next.add(id)
+                      return next
+                    })
+                  }
+                >
+                  {isOpen ? (
+                    <ChevronDown className="h-4 w-4 shrink-0 text-text-tertiary" />
+                  ) : (
+                    <ChevronRight className="h-4 w-4 shrink-0 text-text-tertiary" />
+                  )}
+                  <span className="text-xs font-semibold tracking-wide text-text-tertiary uppercase">
+                    {sectionLabel}
+                  </span>
+                  <span
+                    className={`ml-auto inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${badgeClass}`}
+                  >
+                    {badgeText}
+                  </span>
+                </button>
+                {isOpen && (
+                  <div className="divide-y divide-border-default">
+                    {rows.map(renderSettingRowInRow)}
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </>
       )
     }
@@ -2002,8 +2072,8 @@ export function ServerSettingsPage() {
                 cloudId={state.settings.find(s => s.key === 'atlassian_oauth_cloud_id')?.value ?? ''}
               />
             )}
-            {category === 'SSO'
-              ? renderSsoSections(rowSettings)
+            {rowSettings.some((s) => s.section)
+              ? renderSections(rowSettings)
               : (
                 <div className="divide-y divide-border-default">
                   {rowSettings.map(renderSettingRowInRow)}

@@ -515,26 +515,28 @@ describe('UsersPage locked badge', () => {
   })
 })
 
-describe('UsersPage SSO identities', () => {
-  it('shows "API key only" when no identities are linked', async () => {
-    mockUsers([user('alice', { identities: [], identities_unlinkable: false })])
+describe('UsersPage Sign-in column', () => {
+  it('shows Local badge for a local-only user (has_api_key: true, no identities)', async () => {
+    mockUsers([user('alice', { has_api_key: true, identities: [] })])
     renderPage()
 
     const row = (await screen.findByText('alice')).closest('tr')!
-    expect(within(row).getByText('API key only')).toBeInTheDocument()
+    expect(within(row).getByText('Local')).toBeInTheDocument()
+    expect(within(row).queryByRole('button', { name: /Unlink/ })).not.toBeInTheDocument()
   })
 
-  it('shows "API key only" when identities field is omitted (older server)', async () => {
+  it('shows Local badge when identities field is omitted (older server)', async () => {
     mockUsers([user('alice')])
     renderPage()
 
     const row = (await screen.findByText('alice')).closest('tr')!
-    expect(within(row).getByText('API key only')).toBeInTheDocument()
+    expect(within(row).getByText('Local')).toBeInTheDocument()
   })
 
-  it('renders a provider badge with display_name and no unlink button when not unlinkable', async () => {
+  it('shows SSO badge only for a keyless SSO-only user, no unlink button', async () => {
     mockUsers([
       user('devuser', {
+        has_api_key: false,
         identities: [{ provider: 'redhat', display_name: 'Red Hat SSO', email: 'devuser@example.com', created_at: '2025-01-01T00:00:00Z' }],
         identities_unlinkable: false,
       }),
@@ -543,12 +545,41 @@ describe('UsersPage SSO identities', () => {
 
     const row = (await screen.findByText('devuser')).closest('tr')!
     expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
     expect(within(row).queryByRole('button', { name: /Unlink/ })).not.toBeInTheDocument()
   })
 
-  it('renders both badges with unlink buttons when unlinkable, and clicking unlink opens confirmation', async () => {
+  it('shows Local + SSO badge with unlink button for local + 1 SSO user', async () => {
+    mockUsers([
+      user('devuser', {
+        has_api_key: true,
+        identities: [{ provider: 'redhat', display_name: 'Red Hat SSO', email: 'dev@rh.com', created_at: '2025-01-01T00:00:00Z' }],
+        identities_unlinkable: true,
+      }),
+    ])
+    del.mockResolvedValue({ ok: true })
+    const user1 = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('devuser')).closest('tr')!
+    expect(within(row).getByText('Local')).toBeInTheDocument()
+    expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from devuser' })).toBeInTheDocument()
+
+    // Unlink: remaining Local badge stays
+    await user1.click(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from devuser' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/Remove Red Hat SSO sign-in from "devuser"/)).toBeInTheDocument()
+    await user1.click(within(dialog).getByRole('button', { name: 'Unlink' }))
+
+    await waitFor(() => expect(within(row).queryByText('Red Hat SSO')).not.toBeInTheDocument())
+    expect(within(row).getByText('Local')).toBeInTheDocument()
+  })
+
+  it('shows Local + 2 SSO badges, both unlinkable; unlinking one leaves remaining still unlinkable', async () => {
     mockUsers([
       user('multi', {
+        has_api_key: true,
         identities: [
           { provider: 'redhat', display_name: 'Red Hat SSO', email: 'multi@rh.com', created_at: '2025-01-01T00:00:00Z' },
           { provider: 'github', display_name: 'GitHub', email: 'multi@gh.com', created_at: '2025-01-02T00:00:00Z' },
@@ -556,32 +587,67 @@ describe('UsersPage SSO identities', () => {
         identities_unlinkable: true,
       }),
     ])
-    del.mockResolvedValue({ ok: true, username: 'multi', provider: 'redhat' })
+    del.mockResolvedValue({ ok: true })
     const user1 = userEvent.setup()
     renderPage()
 
     const row = (await screen.findByText('multi')).closest('tr')!
+    expect(within(row).getByText('Local')).toBeInTheDocument()
     expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
     expect(within(row).getByText('GitHub')).toBeInTheDocument()
     expect(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from multi' })).toBeInTheDocument()
     expect(within(row).getByRole('button', { name: 'Unlink GitHub from multi' })).toBeInTheDocument()
 
-    // Click unlink on Red Hat SSO — opens confirmation dialog
+    // Unlink Red Hat SSO
     await user1.click(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from multi' }))
     const dialog = await screen.findByRole('dialog')
-    expect(within(dialog).getByText(/Remove Red Hat SSO sign-in from "multi"/)).toBeInTheDocument()
-    expect(del).not.toHaveBeenCalled()
-
-    // Confirm
     await user1.click(within(dialog).getByRole('button', { name: 'Unlink' }))
-    await waitFor(() =>
-      expect(del).toHaveBeenCalledWith('/api/admin/users/multi/identities/redhat'),
-    )
+    await waitFor(() => expect(del).toHaveBeenCalledWith('/api/admin/users/multi/identities/redhat'))
 
-    // Badge removed, remaining badge has no unlink button (only 1 provider left)
+    // Remaining GitHub badge still has unlink button (has_api_key: true).
+    await waitFor(() => expect(within(row).queryByText('Red Hat SSO')).not.toBeInTheDocument())
+    expect(within(row).getByText('GitHub')).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: 'Unlink GitHub from multi' })).toBeInTheDocument()
+  })
+
+  it('keyless + 2 SSOs: unlinking one removes unlink button from remaining', async () => {
+    mockUsers([
+      user('keyless', {
+        has_api_key: false,
+        identities: [
+          { provider: 'redhat', display_name: 'Red Hat SSO', email: null, created_at: '2025-01-01T00:00:00Z' },
+          { provider: 'github', display_name: 'GitHub', email: null, created_at: '2025-01-02T00:00:00Z' },
+        ],
+        identities_unlinkable: true,
+      }),
+    ])
+    del.mockResolvedValue({ ok: true })
+    const user1 = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('keyless')).closest('tr')!
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
+    expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
+    expect(within(row).getByText('GitHub')).toBeInTheDocument()
+
+    // Unlink Red Hat SSO
+    await user1.click(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from keyless' }))
+    const dialog = await screen.findByRole('dialog')
+    await user1.click(within(dialog).getByRole('button', { name: 'Unlink' }))
+    await waitFor(() => expect(del).toHaveBeenCalledWith('/api/admin/users/keyless/identities/redhat'))
+
+    // Remaining sole provider: no unlink button (keyless, 1 identity left).
     await waitFor(() => expect(within(row).queryByText('Red Hat SSO')).not.toBeInTheDocument())
     expect(within(row).getByText('GitHub')).toBeInTheDocument()
     expect(within(row).queryByRole('button', { name: /Unlink/ })).not.toBeInTheDocument()
+  })
+
+  it('shows None for a keyless account with no SSO identities', async () => {
+    mockUsers([user('proxy', { has_api_key: false, identities: [] })])
+    renderPage()
+
+    const row = (await screen.findByText('proxy')).closest('tr')!
+    expect(within(row).getByText('None')).toBeInTheDocument()
   })
 
   it('renders a server-supplied display_name for an unknown provider with zero frontend changes', async () => {

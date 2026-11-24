@@ -85,12 +85,12 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
 }) {
   const navigate = useNavigate()
   const { refreshAuth } = useAuth()
-  const [createName, setCreateName] = useState(ticket.suggested_username)
-  const [linking, setLinking] = useState(false)
+  // Single-step Continue flow: step 1 = username, step 2 = existing account link.
+  const [step, setStep] = useState<'username' | 'link'>('username')
+  const [username, setUsername] = useState(ticket.suggested_username)
   const [linkName, setLinkName] = useState('')
   const [linkKey, setLinkKey] = useState('')
   const [showLinkKey, setShowLinkKey] = useState(false)
-  /** The claim the person submitted, shown back for confirmation before it is posted. */
   const [confirmLink, setConfirmLink] = useState<{ username: string; apiKey: string } | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -120,9 +120,6 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
         // The session cookie is already set — navigate even if /me fails.
       }
       if (result.api_key) {
-        // An account created through SSO has no other credential its owner has
-        // ever seen, and the last sign-in method cannot be removed without one —
-        // so the key is shown once, exactly like registration.
         onCreated(
           result.api_key,
           result.next || (result.status === 'active' ? nextPath : '/pending'),
@@ -130,10 +127,6 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
         )
         return
       }
-      // The server decides where a login ends (pending page, or the destination
-      // sealed in the ticket); the SPA only falls back for an older response.
-      // The server sends `next`; the fallback mirrors its rule — anything not
-      // `active` is blocked (pending *or* rejected), not just pending.
       const destination = result.next || (result.status === 'active' ? nextPath : '/pending')
       navigate(destination, { replace: true })
     } catch (err) {
@@ -147,11 +140,40 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
     }
   }
 
-  /**
-   * Attach this identity to `claim`'s account — only after the person has seen
-   * both the provider and the account named, since it joins an account that
-   * already exists.
-   */
+  /** Step 1: check the username, then create or switch to link step. */
+  async function handleContinue() {
+    const trimmed = username.trim()
+    if (!trimmed) return
+    setLoading(true)
+    setError('')
+    try {
+      const result = await api.post<{
+        username_exists?: boolean
+        provider: string
+        suggested_username: string
+        email_domain: string
+      }>('/api/auth/sso/ticket', { ticket: ticketValue, username: trimmed })
+      if (result.username_exists) {
+        setLinkName(trimmed)
+        setLinkKey('')
+        setError('')
+        setStep('link')
+      } else {
+        // New account: create immediately.
+        await finish('/api/auth/sso/create', { ticket: ticketValue, username: trimmed })
+        return
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        onExpired()
+        return
+      }
+      setError(failureMessage(err, 'Could not finish signing in. Please try again.'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
   function linkTo(claim: { username: string; apiKey: string }) {
     void finish('/api/auth/sso/link', {
       ticket: ticketValue,
@@ -167,7 +189,7 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
       </h2>
       <WarningBanner message={error} tone="red" />
 
-      {linking ? (
+      {step === 'link' ? (
         confirmLink ? (
           <form
             onSubmit={(e) => {
@@ -204,20 +226,16 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
           <form
             onSubmit={(e) => {
               e.preventDefault()
-              const name = linkName.trim()
-              if (name && linkKey.trim()) setConfirmLink({ username: name, apiKey: linkKey.trim() })
+              const key = linkKey.trim()
+              if (linkName && key) setConfirmLink({ username: linkName, apiKey: key })
             }}
             className="space-y-4"
           >
             <fieldset disabled={loading} className="space-y-4">
-              <p className="text-xs text-text-tertiary">Connect this {providerLabel} sign-in to the account you already have.</p>
-
-              <UsernameField
-                id="sso-link-username"
-                value={linkName}
-                onChange={(v) => { setLinkName(v); setError('') }}
-                autoFocus
-              />
+              <p className="text-xs text-text-tertiary">
+                An account named {linkName} already exists. Enter its API key to
+                connect {providerLabel} — no re-approval needed if the account is already active.
+              </p>
 
               <TokenField
                 id="sso-link-apikey"
@@ -228,20 +246,20 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
                 onToggleShow={() => setShowLinkKey(!showLinkKey)}
                 placeholder="Your existing API key..."
                 optionalLabel={false}
-                autoFocus={!!linkName}
+                autoFocus
               />
 
-              <Button type="submit" className="w-full" disabled={!linkName.trim() || !linkKey.trim() || loading}>
+              <Button type="submit" className="w-full" disabled={!linkKey.trim() || loading}>
                 Connect account
               </Button>
 
               <p className="text-center text-xs text-text-tertiary">
                 <button
                   type="button"
-                  onClick={() => { setLinking(false); setError('') }}
+                  onClick={() => { setStep('username'); setError('') }}
                   className="font-medium text-signal-blue hover:underline"
                 >
-                  Create a new account instead
+                  Use a different username
                 </button>
               </p>
             </fieldset>
@@ -251,8 +269,7 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
         <form
           onSubmit={(e) => {
             e.preventDefault()
-            const name = createName.trim()
-            if (name) void finish('/api/auth/sso/create', { ticket: ticketValue, username: name })
+            void handleContinue()
           }}
           className="space-y-4"
         >
@@ -260,23 +277,18 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
             <div className="space-y-1.5">
               <UsernameField
                 id="sso-create-username"
-                value={createName}
-                onChange={(v) => { setCreateName(v); setError('') }}
+                value={username}
+                onChange={(v) => { setUsername(v); setError('') }}
                 autoFocus
               />
               <p className="text-xs text-text-tertiary">
                 {ticket.email_domain && `Signed in with an @${ticket.email_domain} address. `}
-                You're signed in here. Other devices can use the same provider, and an
-                admin can issue an API key for a terminal.
+                Enter your RootCoz username to continue.
               </p>
             </div>
 
-            <Button type="submit" className="w-full" disabled={!createName.trim() || loading}>
-              {loading ? 'Creating account...' : 'Create account'}
-            </Button>
-
-            <Button variant="outline" className="w-full" disabled={loading} onClick={() => { setLinking(true); setError('') }}>
-              I already have an account
+            <Button type="submit" className="w-full" disabled={!username.trim() || loading}>
+              {loading ? 'Checking...' : 'Continue'}
             </Button>
           </fieldset>
         </form>

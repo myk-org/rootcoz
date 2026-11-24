@@ -23778,21 +23778,23 @@ async def test_a_ticket_for_a_removed_provider_links_nothing(
 async def test_the_last_method_refusal_names_remedies_that_work(
     temp_db_path: Path,
 ) -> None:
-    """Rotation cannot unblock it — a key hash cannot prove the key is held."""
+    """A keyless account cannot remove its sole SSO identity; remedies stay accurate."""
     for client in make_app_client(temp_db_path):
-        await _sign_in_as(client, "alice")
+        await storage.create_keyless_user("alice", status="active", created_via="proxy")
         await storage.add_user_identity("alice", "google", "sub-a")
+        session = await storage.create_session("alice", role="reviewer")
+        client.cookies.set("rootcoz_session", session)
 
         response = client.delete("/api/user/identities/google")
 
         assert response.status_code == 409
         detail = response.json()["detail"]
         assert "Connect another sign-in method" in detail
+        assert "generate an API key" in detail
         assert "administrator to disable the account" in detail
-        assert "API key" not in detail
 
         # The admin route shares the sentence, so both name the same remedies.
-        await storage.create_user("bob", role="reviewer")
+        await storage.create_keyless_user("bob", status="active", created_via="proxy")
         await storage.add_user_identity("bob", "google", "sub-b")
         admin_login(client)
         admin = client.delete("/api/admin/users/bob/identities/google")
@@ -23819,6 +23821,7 @@ async def test_one_account_never_sees_anothers_sign_in_methods(
         assert client.get("/api/user/identities").json() == {
             "identities": [],
             "unlinkable": False,
+            "has_api_key": True,
         }
 
 

@@ -1610,6 +1610,59 @@ async def test_the_ticket_never_reveals_the_address(temp_db_path: Path) -> None:
         )
 
 
+async def test_ticket_username_exists_check_existing(temp_db_path: Path) -> None:
+    """A bound ticket with an existing username reports username_exists: True."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("existing-user")
+        ticket = await _ticket(client)
+
+        body = client.post(
+            "/api/auth/sso/ticket",
+            json={"ticket": ticket, "username": "existing-user"},
+        ).json()
+
+        assert body["username_exists"] is True
+        assert body["provider"] == "google"
+        # Ticket is not spent — still usable.
+        body2 = client.post("/api/auth/sso/ticket", json={"ticket": ticket}).json()
+        assert body2["provider"] == "google"
+        assert "username_exists" not in body2
+
+
+async def test_ticket_username_exists_check_nonexistent(temp_db_path: Path) -> None:
+    """A bound ticket with a non-existent username reports username_exists: False."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        ticket = await _ticket(client)
+
+        body = client.post(
+            "/api/auth/sso/ticket",
+            json={"ticket": ticket, "username": "no-such-user"},
+        ).json()
+
+        assert body["username_exists"] is False
+        assert body["provider"] == "google"
+
+
+async def test_ticket_username_check_needs_binding(temp_db_path: Path) -> None:
+    """Without a valid ticket or binding cookie, the probe is refused."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        # No binding cookie: refused (404 — same as expired, by design).
+        ticket = await _ticket()  # no client → no cookie
+        response = client.post(
+            "/api/auth/sso/ticket",
+            json={"ticket": ticket, "username": "alice"},
+        )
+        assert response.status_code == 404
+
+        # Bogus ticket: refused.
+        client.cookies.set(sso_state.TICKET_COOKIE, sso_state.new_ticket_binding())
+        response = client.post(
+            "/api/auth/sso/ticket",
+            json={"ticket": "nonexistent-ticket", "username": "alice"},
+        )
+        assert response.status_code == 404
+
+
 async def test_creating_an_account_with_the_chosen_name(temp_db_path: Path) -> None:
     """The person picks the name; it is created, linked and signed in."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
@@ -3750,12 +3803,14 @@ async def test_listing_and_removing_linked_identities(temp_db_path: Path) -> Non
         assert [i["provider"] for i in await storage.list_user_identities("ruthn")] == [
             "google"
         ]
-        # With one left, the client can say so before the person clicks.
-        assert client.get("/api/user/identities").json()["unlinkable"] is False
+        # Keyed user with one identity left: still unlinkable (local login remains).
+        body_after = client.get("/api/user/identities").json()
+        assert body_after["unlinkable"] is True
+        assert body_after["has_api_key"] is True
 
 
-async def test_the_last_sign_in_method_cannot_be_removed(temp_db_path: Path) -> None:
-    """An SSO-created account never saw its API key, so this would lock it out."""
+async def test_keyed_user_can_unlink_sole_identity(temp_db_path: Path) -> None:
+    """An account with a local API key can unlink its only SSO provider."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("ruthn")
         await storage.add_user_identity(
@@ -3763,6 +3818,25 @@ async def test_the_last_sign_in_method_cannot_be_removed(temp_db_path: Path) -> 
         )
         session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
         client.cookies.set("rootcoz_session", session)
+
+        response = client.delete("/api/user/identities/google")
+        assert response.status_code == 200
+        assert len(await storage.list_user_identities("ruthn")) == 0
+
+
+async def test_the_last_sign_in_method_cannot_be_removed(temp_db_path: Path) -> None:
+    """A keyless SSO-created account cannot unlink its only sign-in method."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_keyless_user("ruthn", created_via="proxy")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-1", email="ruthn@example.com"
+        )
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+
+        body = client.get("/api/user/identities").json()
+        assert body["unlinkable"] is False
+        assert body["has_api_key"] is False
 
         response = client.delete("/api/user/identities/google")
         assert response.status_code == 409
@@ -3828,7 +3902,7 @@ async def test_a_refused_removal_is_audited(temp_db_path: Path) -> None:
     The status codes are unchanged — only what the trail sees is.
     """
     for client in make_app_client(temp_db_path, _SSO_ENV):
-        await storage.create_user("ruthn")
+        await storage.create_keyless_user("ruthn", created_via="proxy")
         await storage.add_user_identity("ruthn", "google", "sub-1")
         session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
         client.cookies.set("rootcoz_session", session)
@@ -3893,9 +3967,9 @@ async def test_an_admin_can_inspect_and_unlink_any_account(temp_db_path: Path) -
 async def test_an_admin_cannot_remove_the_last_sign_in_method_either(
     temp_db_path: Path,
 ) -> None:
-    """Disabling is the access cut; removing the only way in is a lockout."""
+    """A keyless account's sole identity cannot be removed even by an admin."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
-        await storage.create_user("alice")
+        await storage.create_keyless_user("alice", created_via="proxy")
         await storage.add_user_identity("alice", "google", "sub-9")
         login = client.post(
             "/api/auth/login",
@@ -5883,6 +5957,10 @@ async def test_admin_users_list_includes_identities(temp_db_path: Path) -> None:
         await storage.add_user_identity(
             "onelink", "google", "sub-ol", email="onelink@g.com"
         )
+        await storage.create_keyless_user("keyless-one", created_via="proxy")
+        await storage.add_user_identity(
+            "keyless-one", "google", "sub-kl", email="keyless@g.com"
+        )
         await storage.create_user("twolinks")
         await storage.add_user_identity(
             "twolinks", "google", "sub-tl-g", email="twolinks@g.com"
@@ -5896,12 +5974,13 @@ async def test_admin_users_list_includes_identities(temp_db_path: Path) -> None:
         assert resp.status_code == 200
         users_by_name = {u["username"]: u for u in resp.json()["users"]}
 
-        # 0 identities
+        # 0 identities, keyed
         u0 = users_by_name["nolinks"]
         assert u0["identities"] == []
         assert u0["identities_unlinkable"] is False
+        assert u0["has_api_key"] is True
 
-        # 1 identity
+        # 1 identity, keyed — unlinkable because local login remains
         u1 = users_by_name["onelink"]
         assert len(u1["identities"]) == 1
         i1 = u1["identities"][0]
@@ -5910,7 +5989,14 @@ async def test_admin_users_list_includes_identities(temp_db_path: Path) -> None:
         assert i1["email"] == "onelink@g.com"
         assert "created_at" in i1
         assert "subject" not in i1
-        assert u1["identities_unlinkable"] is False
+        assert u1["identities_unlinkable"] is True
+        assert u1["has_api_key"] is True
+
+        # 1 identity, keyless — NOT unlinkable
+        uk = users_by_name["keyless-one"]
+        assert len(uk["identities"]) == 1
+        assert uk["identities_unlinkable"] is False
+        assert uk["has_api_key"] is False
 
         # 2 identities
         u2 = users_by_name["twolinks"]
@@ -5920,3 +6006,4 @@ async def test_admin_users_list_includes_identities(temp_db_path: Path) -> None:
         assert u2["identities"][0]["display_name"] == "GitHub"
         assert u2["identities"][1]["display_name"] == "Google"
         assert u2["identities_unlinkable"] is True
+        assert u2["has_api_key"] is True

@@ -46,8 +46,9 @@ For each provider, register two things at the IdP:
 ### Google
 
 Create an OAuth client in the Google Cloud Console and copy the client id and
-secret into Server Settings → SSO. Google publishes its endpoints at a fixed
-issuer, so there is nothing else to configure.
+secret into Server Settings → Auth & Security (under the collapsible **Google**
+section). Google publishes its endpoints at a fixed issuer, so there is nothing
+else to configure.
 
 ### GitHub
 
@@ -126,9 +127,11 @@ OpenShift is), never by a weaker path through the OIDC one.
    can be different people, and one person can be `ruth` in one place and
    `ruthn` in another.
 4. A known identity gets a session. An unknown one gets no session at all — the
-   choice screen instead offers to **claim an existing account** (by proving it
-   with that account's own username and API key) or to **create a new one** with a
-   name the person chooses.
+   first-login screen asks for a username and clicking **Continue** checks it
+   against that bound ticket: if an account with that name already exists, it
+   prompts for that account's API key to prove ownership and link the identity
+   (no re-approval needed if active); otherwise it creates a new account under
+   that name.
 
 New accounts follow the same rules as registration: `ALLOWED_USERS`, the username
 rules, `REQUIRE_APPROVAL` (so a new account may land on the pending page), and the
@@ -169,11 +172,13 @@ Three rules matter:
   alice?"), and nothing is sent until it is accepted — the claim form's own submit
   only produces that confirmation. Cancelling goes back to the form with what was
   typed still there.
-- **The last sign-in method cannot be removed**, by you or by an administrator.
-  Every account holds an API key, but it is shown only once — at registration, or
-  at the moment an SSO account is created — and it may never have been saved, so
-  removing the only way in could lock you out. Connect another provider, or rotate
-  the key and keep it, first.
+- **The last sign-in method cannot be removed from a keyless account**, by you or
+  by an administrator. An account created through a trusted proxy or SSO may
+  never have been shown its API key, so unlinking the only identity from a
+  keyless account would lock you out. When the account holds a local API key,
+  unlinking the sole SSO provider is allowed because local username + API-key
+  login remains. Connect another provider, generate an API key, or rotate the
+  key and keep it, first.
 - An identity that already belongs to **another** account is refused without
   naming that account, since the answer would otherwise confirm that an address
   has an account here.

@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button'
 /** One identity as `GET /api/user/identities` reports it. */
 interface LinkedIdentity {
   provider: string
+  display_name?: string
   email: string | null
   created_at: string
 }
@@ -153,7 +154,7 @@ export function SignInMethodsCard() {
               >
                 <div className="min-w-0">
                   <p className="text-sm text-text-primary">
-                    {label(identity.provider)}
+                    {identity.display_name || label(identity.provider)}
                   </p>
                   {identity.email && (
                     <p className="truncate text-xs text-text-tertiary">
@@ -191,7 +192,7 @@ export function SignInMethodsCard() {
         {!unlinkable && identities && identities.length > 0 && (
           <p className="text-xs text-text-tertiary">
             This is your only sign-in method, so it cannot be removed. Connect
-            another provider, or rotate your API key and keep the new one first.
+            another provider or ask an admin to issue an API key first.
           </p>
         )}
 
