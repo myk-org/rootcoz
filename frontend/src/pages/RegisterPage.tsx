@@ -91,7 +91,6 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
   const [linkName, setLinkName] = useState('')
   const [linkKey, setLinkKey] = useState('')
   const [showLinkKey, setShowLinkKey] = useState(false)
-  const [confirmLink, setConfirmLink] = useState<{ username: string; apiKey: string } | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -174,14 +173,6 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
     }
   }
 
-  function linkTo(claim: { username: string; apiKey: string }) {
-    void finish('/api/auth/sso/link', {
-      ticket: ticketValue,
-      username: claim.username,
-      api_key: claim.apiKey,
-    })
-  }
-
   return (
     <div className="space-y-4">
       <h2 className="font-display text-base font-semibold text-text-primary">
@@ -190,44 +181,17 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
       <WarningBanner message={error} tone="red" />
 
       {step === 'link' ? (
-        confirmLink ? (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault()
-              linkTo(confirmLink)
-            }}
-            className="space-y-4"
-          >
-            <fieldset disabled={loading} className="space-y-4">
-              <p className="text-sm text-text-primary">
-                Attach {providerLabel} to {confirmLink.username}?
-              </p>
-              <p className="text-xs text-text-tertiary">
-                This signs you in with {providerLabel} from now on, on the existing
-                account {confirmLink.username}. Its username and API key keep working too.
-              </p>
-
-              <Button type="submit" className="w-full" disabled={loading}>
-                {loading ? 'Connecting...' : `Yes, attach to ${confirmLink.username}`}
-              </Button>
-
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full"
-                disabled={loading}
-                onClick={() => { setConfirmLink(null); setError('') }}
-              >
-                Cancel
-              </Button>
-            </fieldset>
-          </form>
-        ) : (
           <form
             onSubmit={(e) => {
               e.preventDefault()
               const key = linkKey.trim()
-              if (linkName && key) setConfirmLink({ username: linkName, apiKey: key })
+              if (linkName && key) {
+                void finish('/api/auth/sso/link', {
+                  ticket: ticketValue,
+                  username: linkName,
+                  api_key: key,
+                })
+              }
             }}
             className="space-y-4"
           >
@@ -250,7 +214,7 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
               />
 
               <Button type="submit" className="w-full" disabled={!linkKey.trim() || loading}>
-                Connect account
+                {loading ? 'Connecting...' : 'Connect account'}
               </Button>
 
               <p className="text-center text-xs text-text-tertiary">
@@ -264,7 +228,6 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
               </p>
             </fieldset>
           </form>
-        )
       ) : (
         <form
           onSubmit={(e) => {

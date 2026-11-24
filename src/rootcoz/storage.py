@@ -11341,6 +11341,7 @@ async def exchange_device_code_for_session(
     username: str,
     approved_provider: str | None = None,
     ttl_hours: int | None = None,
+    domain_check: Callable[[str | None], str | None] | None = None,
 ) -> dict[str, Any] | None:
     """Spend a claimed device code and mint its session in one transaction.
 
@@ -11424,6 +11425,25 @@ async def exchange_device_code_for_session(
                         # Prefixed like every other SSO refusal reason, so the
                         # poll audits it as-is.
                         return {"refused": f"account_{refusal}"}
+                # Domain policy is re-checked inside the transaction so a
+                # revocation committed after the poll’s read and before this
+                # exchange cannot slip through.  The callback is supplied by
+                # the caller (main.py) to keep the dependency direction:
+                # storage never imports auth.
+                if approved_provider is not None and domain_check is not None:
+                    cursor = await db.execute(
+                        "SELECT email FROM user_identities"
+                        " WHERE user_id = ("
+                        "   SELECT id FROM users WHERE username = ?"
+                        " ) AND provider = ?",
+                        (normalized, approved_provider),
+                    )
+                    id_row = await cursor.fetchone()
+                    email = id_row["email"] if id_row is not None else None
+                    domain_refusal = domain_check(email)
+                    if domain_refusal is not None:
+                        await db.rollback()
+                        return {"refused": domain_refusal}
                 token = await _insert_session_in_tx(
                     db,
                     username=normalized,

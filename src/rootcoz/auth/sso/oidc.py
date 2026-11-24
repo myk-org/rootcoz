@@ -37,7 +37,7 @@ from rootcoz import get_child_logger
 from rootcoz.auth.sso.base import AuthError, ClaimSet, SSOProvider
 from rootcoz.auth.sso.http import request_json
 from rootcoz.config import Settings, issuer_is_secure
-from rootcoz.url_utils import is_safe_navigation_url
+from rootcoz.url_utils import is_safe_navigation_url, origin_of
 
 logger = get_child_logger(__name__)
 
@@ -170,6 +170,20 @@ class OIDCProvider(SSOProvider):
         self._client_id = client_id
         self._client_secret = client_secret
 
+    def trusted_endpoint_origins(self) -> frozenset[tuple[str, str, int]]:
+        """Origins whose server-side endpoints this provider may point at.
+
+        By default, an endpoint's ``(scheme, host, port)`` must match the
+        configured issuer's origin.  Providers whose IdP legitimately
+        distributes endpoints across hosts (Google) override this.
+
+        Returns:
+            Origins that are accepted for ``token_endpoint``, ``jwks_uri``
+            and ``authorization_endpoint``.
+        """
+        issuer_origin = origin_of(self.issuer)
+        return frozenset({issuer_origin}) if issuer_origin is not None else frozenset()
+
     def accepted_issuers(self) -> frozenset[str]:
         """The ``iss`` values this provider's ID tokens may carry.
 
@@ -259,6 +273,7 @@ class OIDCProvider(SSOProvider):
                 "discovery_failed",
                 f"discovery document claims issuer {claimed_issuer!r}",
             )
+        trusted = self.trusted_endpoint_origins()
         checked = ["authorization_endpoint", "token_endpoint", "jwks_uri"]
         for endpoint_key in checked:
             endpoint = str(document[endpoint_key])
@@ -266,6 +281,12 @@ class OIDCProvider(SSOProvider):
                 raise AuthError(
                     "discovery_failed",
                     f"{endpoint_key} is not an https URL",
+                )
+            ep_origin = origin_of(endpoint)
+            if ep_origin is None or ep_origin not in trusted:
+                raise AuthError(
+                    "discovery_failed",
+                    f"{endpoint_key} origin is not trusted for this provider",
                 )
         _METADATA_CACHE[self.issuer] = (now, document)
         return document

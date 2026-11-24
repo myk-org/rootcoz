@@ -31,7 +31,12 @@ from rootcoz.auth.sso import state as sso_state
 from rootcoz.auth.sso.google import GoogleProvider
 from rootcoz.auth.sso.oidc import OIDCProvider
 from rootcoz.auth.sso.redhat import RedHatSSOProvider
-from rootcoz.config import clear_settings_cache, get_settings, normalize_domain_list
+from rootcoz.config import (
+    clear_settings_cache,
+    get_settings,
+    normalize_domain_list,
+    update_db_settings_cache,
+)
 from rootcoz.encryption import encrypt_value
 from tests.conftest import admin_login, build_test_env, make_app_client
 from tests.test_auth import _assert_spa_page
@@ -6007,3 +6012,286 @@ async def test_admin_users_list_includes_identities(temp_db_path: Path) -> None:
         assert u2["identities"][1]["display_name"] == "Google"
         assert u2["identities_unlinkable"] is True
         assert u2["has_api_key"] is True
+
+
+# ---------------------------------------------------------------------------
+# Qodo #2 — pre-existing rootcoz* names authenticate via proxy
+# ---------------------------------------------------------------------------
+
+
+async def test_a_preexisting_rootcoz_legacy_account_authenticates_via_proxy(
+    temp_db_path: Path,
+) -> None:
+    """A legacy ``rootcoz-legacy`` row created before the prefix restriction
+    must still authenticate via ``X-Forwarded-User`` — the prefix restriction
+    is enforced only at provisioning time for brand-new accounts."""
+    for client in make_app_client(temp_db_path, _PROXY_ENV):
+        # Pre-create the legacy account directly in the DB (bypassing
+        # _validate_username which would now refuse it).
+        import sqlite3 as _sqlite3
+
+        with _sqlite3.connect(storage.DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO users (username, role, status, created_via)"
+                " VALUES ('rootcoz-legacy', 'reviewer', 'active', 'admin')"
+            )
+
+        response = client.get(
+            "/api/auth/me",
+            headers={"X-Forwarded-User": "rootcoz-legacy"},
+        )
+        assert response.status_code == 200
+        assert response.json()["username"] == "rootcoz-legacy"
+
+
+async def test_a_nonexistent_rootcoz_new_name_is_refused_by_proxy(
+    temp_db_path: Path,
+) -> None:
+    """A brand-new ``rootcoz-new`` name with no existing row must be refused
+    at provisioning (``reserved_name`` / ``unusable_name``)."""
+    for client in make_app_client(temp_db_path, _PROXY_ENV):
+        response = client.get(
+            "/api/auth/me",
+            headers={"X-Forwarded-User": "rootcoz-new"},
+        )
+        assert response.status_code == 401
+        assert await storage.get_user_by_username("rootcoz-new") is None
+
+    refusals = [
+        row
+        for row in await _audit_actions(temp_db_path)
+        if row["action"] == "auth.proxy_provision_refused"
+    ]
+    assert len(refusals) >= 1
+    assert refusals[0]["details"]["reason"] == "unusable_name"
+
+
+async def test_admin_and_rootcoz_ai_are_always_refused_by_proxy(
+    temp_db_path: Path,
+) -> None:
+    """``admin`` and ``rootcoz-ai`` must never authenticate via proxy, even if
+    someone forged a row."""
+    for client in make_app_client(temp_db_path, _PROXY_ENV):
+        for name in ("admin", "rootcoz-ai"):
+            response = client.get(
+                "/api/auth/me",
+                headers={"X-Forwarded-User": name},
+            )
+            assert response.status_code == 401, f"{name} should be refused"
+
+
+# ---------------------------------------------------------------------------
+# Qodo #3 — revoked domain must not mint a CLI session
+# ---------------------------------------------------------------------------
+
+
+async def test_a_domain_revocation_between_the_poll_and_the_exchange_refuses_redemption(
+    temp_db_path: Path,
+) -> None:
+    """A domain removed from ``SSO_ALLOWED_DOMAINS`` after the poll's initial
+    read but before the exchange transaction must deny the CLI session."""
+    env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="example.com")
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("domuser")
+        await storage.add_user_identity(
+            username="domuser",
+            provider="google",
+            subject="sub-dom",
+            email="domuser@example.com",
+        )
+        session = await storage.create_session(
+            "domuser", is_admin=False, role="reviewer", auth_provider="google"
+        )
+        started = _start_device(client, provider="google")
+
+        # Approve the code while the domain is still allowed.
+        client.cookies.set("rootcoz_session", session)
+        approve = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
+        )
+        assert approve.status_code == 200
+        client.cookies.clear()
+
+        real_exchange = storage.exchange_device_code_for_session
+
+        async def exchange_after_revocation(device_code: str, **kwargs: object):
+            # Simulate a domain revocation between poll and exchange:
+            # update the in-memory settings cache so get_settings() returns
+            # the revoked domain list.
+            update_db_settings_cache({"sso_allowed_domains": "other.org"})
+            return await real_exchange(device_code, **kwargs)  # noqa: B023
+
+        with patch.object(
+            storage,
+            "exchange_device_code_for_session",
+            exchange_after_revocation,
+        ):
+            polled = client.post(
+                "/api/auth/sso/device/poll",
+                json={"device_code": started["device_code"]},
+            )
+
+        body = polled.json()
+        assert body["status"] == "denied"
+
+        # Verify no session was minted.
+        refusals = [
+            row
+            for row in await _audit_actions(temp_db_path)
+            if row["action"] == "auth.sso_login_failed"
+            and "domain_not_allowed" in str(row.get("details", {}))
+        ]
+        assert len(refusals) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Qodo #4 — OIDC endpoint origin validation
+# ---------------------------------------------------------------------------
+
+
+async def test_redhat_sso_discovery_rejects_a_cross_origin_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A discovery document pointing token_endpoint or jwks_uri to an
+    arbitrary private or external origin must be refused."""
+    from rootcoz.auth.sso import oidc as oidc_module
+
+    for bad_url, key in [
+        ("https://169.254.169.254/latest", "token_endpoint"),
+        ("http://127.0.0.1:9100/sessions", "jwks_uri"),
+        ("https://evil.example/token", "token_endpoint"),
+    ]:
+        oidc_module._reset_discovery_cache()
+        provider = RedHatSSOProvider(
+            client_id="cid",
+            client_secret="secret",  # pragma: allowlist secret
+            issuer="https://idp.example",
+        )
+        doc = {
+            "issuer": "https://idp.example",
+            "authorization_endpoint": "https://idp.example/auth",
+            "token_endpoint": "https://idp.example/token",
+            "jwks_uri": "https://idp.example/jwks",
+        }
+        doc[key] = bad_url
+        monkeypatch.setattr(oidc_module, "request_json", _returning(doc))
+        with pytest.raises(AuthError) as excinfo:
+            await provider.metadata()
+        assert excinfo.value.reason == "discovery_failed", (
+            f"Expected discovery_failed for {key}={bad_url}"
+        )
+
+
+async def test_google_discovery_accepts_its_multi_host_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google's real discovery uses accounts.google.com, oauth2.googleapis.com
+    and www.googleapis.com — all must be accepted."""
+    from rootcoz.auth.sso import oidc as oidc_module
+
+    oidc_module._reset_discovery_cache()
+    provider = GoogleProvider(
+        client_id="cid",
+        client_secret="secret",  # pragma: allowlist secret
+        issuer="https://accounts.google.com",
+    )
+    doc = {
+        "issuer": "https://accounts.google.com",
+        "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_endpoint": "https://oauth2.googleapis.com/token",
+        "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+    }
+    monkeypatch.setattr(oidc_module, "request_json", _returning(doc))
+    result = await provider.metadata()
+    assert result is doc
+
+
+async def test_google_discovery_rejects_a_loopback_or_evil_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even for Google, an endpoint pointing at loopback or an unknown origin
+    must be refused."""
+    from rootcoz.auth.sso import oidc as oidc_module
+
+    for bad_url, key in [
+        ("https://127.0.0.1/token", "token_endpoint"),
+        ("https://evil.example/jwks", "jwks_uri"),
+    ]:
+        oidc_module._reset_discovery_cache()
+        provider = GoogleProvider(
+            client_id="cid",
+            client_secret="secret",  # pragma: allowlist secret
+            issuer="https://accounts.google.com",
+        )
+        doc = {
+            "issuer": "https://accounts.google.com",
+            "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_endpoint": "https://oauth2.googleapis.com/token",
+            "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+        }
+        doc[key] = bad_url
+        monkeypatch.setattr(oidc_module, "request_json", _returning(doc))
+        with pytest.raises(AuthError) as excinfo:
+            await provider.metadata()
+        assert excinfo.value.reason == "discovery_failed", (
+            f"Expected discovery_failed for {key}={bad_url}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Qodo #5 — OpenShift identity 403 logs a warning
+# ---------------------------------------------------------------------------
+
+
+async def test_openshift_identity_403_logs_warning_and_returns_none(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the cluster returns 403 for an identity lookup, ``_email`` must
+    log a WARNING and return ``None`` instead of crashing."""
+    import logging
+
+    import httpx
+
+    user = {
+        "metadata": {"uid": "u-403", "name": "forbidden-user"},
+        "identities": ["oidc:forbidden"],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth/token":
+            return httpx.Response(200, json={"access_token": "sha256~token"})
+        if request.url.path.endswith("/users/~"):
+            return httpx.Response(200, json=user)
+        if "/identities/" in request.url.path:
+            return httpx.Response(403, json={"kind": "Status", "message": "forbidden"})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    from rootcoz.auth.sso import openshift as openshift_module
+
+    # The module logger has propagate=False (get_child_logger convention),
+    # so caplog's root-level handler doesn't see it.  Temporarily enable
+    # propagation so caplog captures the record.
+    openshift_logger = openshift_module.logger
+    old_propagate = openshift_logger.propagate
+    openshift_logger.propagate = True
+    try:
+        with (
+            _github_client(transport),
+            caplog.at_level(logging.WARNING, logger=openshift_logger.name),
+        ):
+            claims = await _openshift_provider().exchange(
+                code="c", code_verifier="", redirect_uri="https://x/cb", nonce=""
+            )
+    finally:
+        openshift_logger.propagate = old_propagate
+
+    assert claims.subject == "u-403"
+    assert claims.email is None
+    assert any(
+        "identity lookup failed" in record.message and "user:info" in record.message
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    )

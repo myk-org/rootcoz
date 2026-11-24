@@ -80,6 +80,16 @@ itself decides: an identity object is written by the cluster admin (or by the Id
 mapping the admin configured), never by the end user, so the address it carries
 is authoritative and admitted on its domain alone.
 
+> **RBAC limitation — email and `SSO_ALLOWED_DOMAINS`:** The `user:info` scope
+> grants `get` on `users/~` but typically does **not** grant cluster-scoped `get`
+> on `identities` resources. When the user's access token lacks that permission,
+> the identity lookup returns a 403, no email address is available, and
+> `SSO_ALLOWED_DOMAINS` will refuse every OpenShift login with
+> `domain_not_allowed`. To use a domain allow-list with OpenShift, either grant
+> read access to `identities` for authenticated users on the cluster, leave
+> `SSO_ALLOWED_DOMAINS` empty, or use an OIDC provider (Red Hat SSO or Google)
+> that returns the email in the ID token.
+
 ### Red Hat SSO (Keycloak)
 
 Create a client in the realm, set `SSO_REDHAT_ISSUER` to the realm's issuer URL,
@@ -167,11 +177,9 @@ someone who may connect one; dismissing it hides it for that browser session.
 
 Three rules matter:
 
-- **Attaching a provider to an existing account asks first.** The confirmation names
-  both the provider and the account it is being attached to ("Attach Google to
-  alice?"), and nothing is sent until it is accepted — the claim form's own submit
-  only produces that confirmation. Cancelling goes back to the form with what was
-  typed still there.
+- **Attaching a provider to an existing account asks first** (when claiming via
+  the first-login choice screen; the API-key link screen on the settings page
+  connects directly without an extra confirmation step).
 - **The last sign-in method cannot be removed from a keyless account**, by you or
   by an administrator. An account created through a trusted proxy or SSO may
   never have been shown its API key, so unlinking the only identity from a

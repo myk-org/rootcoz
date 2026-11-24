@@ -20801,10 +20801,18 @@ async def _redeem_claimed_device_code(
     # inside that transaction, so a block or a downgrade that committed while the
     # code was pending wins over what this poll read above — the block has already
     # dropped the account's sessions, and a token minted now would outlive that.
+    # Build a domain-check callback so the exchange transaction can re-verify
+    # the domain policy with the row it reads, inside the same commit.  The
+    # callback re-reads settings at invocation time (not the poll’s snapshot)
+    # so a domain revocation committed between the poll and the exchange wins.
+    def _domain_check(email: str | None) -> str | None:
+        return auth_identity.stored_identity_domain_refusal(email, get_settings())
+
     minted = await storage.exchange_device_code_for_session(
         device_code,
         username=username,
         approved_provider=provider,
+        domain_check=_domain_check,
     )
     if minted is not None and "refused" in minted:
         # The account was blocked inside the exchange transaction. The refusal

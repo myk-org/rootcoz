@@ -23,9 +23,12 @@ from urllib.parse import quote
 
 import httpx
 
+from rootcoz import get_child_logger
 from rootcoz.auth.sso.base import AuthError, ClaimSet, SSOProvider
 from rootcoz.auth.sso.http import request_json
 from rootcoz.config import Settings, issuer_is_secure
+
+logger = get_child_logger(__name__)
 
 #: Scope that lets the cluster answer with the caller's own identity.
 SCOPES: tuple[str, ...] = ("user:info",)
@@ -255,7 +258,16 @@ class OpenShiftProvider(SSOProvider):
                     reason="userinfo_failed",
                     headers=headers,
                 )
-            except AuthError:
+            except AuthError as exc:
+                logger.warning(
+                    "OpenShift identity lookup failed for %r "
+                    "(user tokens scoped to user:info typically lack "
+                    "cluster-scoped get on identities; email will be "
+                    "unavailable and SSO_ALLOWED_DOMAINS will refuse "
+                    "OpenShift logins): %s",
+                    name,
+                    exc.reason,
+                )
                 continue
             email = _identity_email(identity)
             if email:

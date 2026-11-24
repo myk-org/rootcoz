@@ -524,10 +524,9 @@ describe('RegisterPage SSO first-login choice', () => {
     await userEvent.type(nameField, 'jdoe')
     await userEvent.click(screen.getByRole('button', { name: /^continue$/i }))
 
-    // Step 2: prompted for API key.
+    // Step 2: prompted for API key — submits directly, no confirmation screen.
     await userEvent.type(await screen.findByLabelText(/api key/i), 'existing-key') // pragma: allowlist secret
     await userEvent.click(screen.getByRole('button', { name: /^connect account$/i }))
-    await userEvent.click(await screen.findByRole('button', { name: /^yes, attach to jdoe$/i }))
 
     await waitFor(() =>
       expect(apiMock.api.post).toHaveBeenCalledWith('/api/auth/sso/link', {
@@ -579,10 +578,9 @@ describe('RegisterPage SSO first-login choice', () => {
     await userEvent.click(screen.getByRole('button', { name: /drop fragment/i }))
     await userEvent.click(screen.getByRole('button', { name: /^continue$/i }))
 
-    // Step 2: enter API key.
+    // Step 2: enter API key — submits directly.
     await userEvent.type(await screen.findByLabelText(/api key/i), 'existing-key') // pragma: allowlist secret
     await userEvent.click(screen.getByRole('button', { name: /^connect account$/i }))
-    await userEvent.click(await screen.findByRole('button', { name: /^yes, attach to jdoe$/i }))
 
     await waitFor(() =>
       expect(apiMock.api.post).toHaveBeenCalledWith('/api/auth/sso/link', {
@@ -593,7 +591,7 @@ describe('RegisterPage SSO first-login choice', () => {
     )
   })
 
-  it('names the provider and the account before anything is linked', async () => {
+  it('Connect account posts /sso/link directly (no extra confirmation screen)', async () => {
     apiMock.api.post.mockImplementation(async (path: string, body?: unknown) => {
       if (path === '/api/auth/sso/ticket') {
         const b = body as { username?: string } | undefined
@@ -610,20 +608,33 @@ describe('RegisterPage SSO first-login choice', () => {
     await userEvent.type(nameField, 'jdoe')
     await userEvent.click(screen.getByRole('button', { name: /^continue$/i }))
 
-    // Step 2: enter API key and click Connect.
+    // Step 2: enter API key and click Connect — posts immediately.
     await userEvent.type(await screen.findByLabelText(/api key/i), 'existing-key') // pragma: allowlist secret
     await userEvent.click(screen.getByRole('button', { name: /^connect account$/i }))
 
-    expect(await screen.findByText(/attach google to jdoe\?/i)).toBeInTheDocument()
-    expect(apiMock.api.post).not.toHaveBeenCalledWith('/api/auth/sso/link', expect.anything())
+    await waitFor(() =>
+      expect(apiMock.api.post).toHaveBeenCalledWith('/api/auth/sso/link', {
+        ticket: 'tkt-1',
+        username: 'jdoe',
+        api_key: 'existing-key', // pragma: allowlist secret
+      }),
+    )
+    // No confirmation screen ever appeared.
+    expect(screen.queryByText(/attach google to jdoe\?/i)).toBeNull()
   })
 
-  it('posts nothing and keeps the typed values when the link is cancelled', async () => {
+  it('shows the 401 error above the API key input and keeps the input visible for retry', async () => {
+    let linkCalls = 0
     apiMock.api.post.mockImplementation(async (path: string, body?: unknown) => {
       if (path === '/api/auth/sso/ticket') {
         const b = body as { username?: string } | undefined
         if (b?.username) return { ...TICKET, username_exists: true }
         return TICKET
+      }
+      if (path === '/api/auth/sso/link') {
+        linkCalls += 1
+        if (linkCalls === 1) throw apiError(401, 'Invalid username or API key')
+        return { username: 'jdoe', status: 'active' }
       }
       return { username: 'jdoe', status: 'active' }
     })
@@ -635,13 +646,29 @@ describe('RegisterPage SSO first-login choice', () => {
     await userEvent.type(nameField, 'jdoe')
     await userEvent.click(screen.getByRole('button', { name: /^continue$/i }))
 
-    // Step 2: enter API key, Connect, then Cancel.
-    await userEvent.type(await screen.findByLabelText(/api key/i), 'existing-key') // pragma: allowlist secret
+    // Step 2: enter bad API key.
+    const keyInput = await screen.findByLabelText(/api key/i)
+    await userEvent.type(keyInput, 'wrong-key') // pragma: allowlist secret
     await userEvent.click(screen.getByRole('button', { name: /^connect account$/i }))
-    await userEvent.click(await screen.findByRole('button', { name: /^cancel$/i }))
 
-    expect(screen.getByLabelText(/api key/i)).toHaveValue('existing-key') // pragma: allowlist secret
-    expect(apiMock.api.post).not.toHaveBeenCalledWith('/api/auth/sso/link', expect.anything())
+    // Error renders, API key input stays visible — no stuck confirmation screen.
+    expect(await screen.findByText('Invalid username or API key')).toBeInTheDocument()
+    expect(screen.getByLabelText(/api key/i)).toBeInTheDocument()
+    expect(screen.queryByText(/attach google to jdoe\?/i)).toBeNull()
+
+    // Fix the key and retry — succeeds.
+    await userEvent.clear(screen.getByLabelText(/api key/i))
+    await userEvent.type(screen.getByLabelText(/api key/i), 'correct-key') // pragma: allowlist secret
+    await userEvent.click(screen.getByRole('button', { name: /^connect account$/i }))
+
+    await waitFor(() =>
+      expect(apiMock.api.post).toHaveBeenCalledWith('/api/auth/sso/link', {
+        ticket: 'tkt-1',
+        username: 'jdoe',
+        api_key: 'correct-key', // pragma: allowlist secret
+      }),
+    )
+    expect(linkCalls).toBe(2)
   })
 
   it('Continue with new username calls /ticket then /create automatically', async () => {
@@ -681,11 +708,10 @@ describe('RegisterPage SSO first-login choice', () => {
     await userEvent.type(nameField, 'existing')
     await userEvent.click(screen.getByRole('button', { name: /^continue$/i }))
 
-    // Step 2: prompted for API key.
+    // Step 2: prompted for API key — submits directly.
     expect(await screen.findByText(/account named existing already exists/i)).toBeInTheDocument()
     await userEvent.type(screen.getByLabelText(/api key/i), 'my-key') // pragma: allowlist secret
     await userEvent.click(screen.getByRole('button', { name: /^connect account$/i }))
-    await userEvent.click(await screen.findByRole('button', { name: /^yes, attach to existing$/i }))
 
     await waitFor(() =>
       expect(apiMock.api.post).toHaveBeenCalledWith('/api/auth/sso/link', {

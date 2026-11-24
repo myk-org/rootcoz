@@ -25,8 +25,14 @@ from rootcoz.auth.base import (
     role_and_admin,
     set_username_cookie,
 )
-from rootcoz.auth.identity import is_reserved_username
 from rootcoz.config import Settings
+
+#: Identities that must never authenticate via proxy even if a row exists: the
+#: bootstrap superuser and the AI system account. A proxy forwarding one of
+#: these names is not naming a person.
+_HARD_REFUSED_USERNAMES: frozenset[str] = frozenset(
+    {"admin", storage.AI_SYSTEM_USERNAME}
+)
 
 #: Header naming the user the reverse proxy already authenticated.
 PROXY_USER_HEADER = "x-forwarded-user"
@@ -62,10 +68,15 @@ def proxy_username(request: Request, settings: Settings) -> str:
     if not settings.trust_proxy_headers:
         return ""
     username = request.headers.get(PROXY_USER_HEADER, "").strip().lower()
-    # The reserved identities are refused before anything else: a proxy that
-    # forwards "rootcoz-ai" or "admin" is not naming a person, and provisioning
-    # must never be a way to occupy a system name.
-    if is_reserved_username(username):
+    # The bootstrap administrator and the AI system identity are refused
+    # unconditionally — a proxy that forwards "admin" or "rootcoz-ai" is not
+    # naming a person. Other ``rootcoz*`` names may be legacy accounts an
+    # administrator created before the prefix restriction, so they are only
+    # refused at *provisioning* time (see ``_proxy_provision_refusal``).
+    if username in _HARD_REFUSED_USERNAMES:
+        return ""
+    # System tags ("re-analyze" etc.) are never people either.
+    if username in storage.RESERVED_USERNAMES:
         return ""
     return username
 
@@ -92,8 +103,12 @@ def _proxy_provision_refusal(username: str, settings: Settings) -> str | None:
         # The write allow-list bounds *creation* on every other path
         # (registration, SSO create); a proxy header is not an exemption from it.
         return "not_allowed"
-    # A name the store would refuse is not an account either, and refusing here
-    # keeps the rule in one place instead of at the INSERT.
+    # A name the store would refuse (malformed, reserved prefix, system tag)
+    # is not an account either. This enforces the ``rootcoz*`` prefix
+    # restriction on brand-new accounts — existing accounts bearing a
+    # ``rootcoz*`` name are allowed to authenticate by ``proxy_username``
+    # and ``ProxyStrategy.authenticate`` (which skips provisioning when a row
+    # already exists).
     if not storage.is_creatable_username(username):
         return "unusable_name"
     return None
