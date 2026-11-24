@@ -202,9 +202,9 @@ src/rootcoz/
 
 ### Server Settings Page
 
-**Provider settings are declared, not listed.** An SSO provider names the `Settings` fields it reads (`settings_fields`) and which hold a secret (`sensitive_settings`) — `_SETTINGS_CATEGORIES["SSO"]`, `_SENSITIVE_SETTINGS` and `_RESTART_REQUIRED_SETTINGS` are derived from the registry (`tests/test_sso_settings_metadata.py` is the contract), so a provider's settings rows and its secret cannot be forgotten; adding a provider is one module, an entry in `PROVIDER_CLASSES`, and its name in `storage.SSO_PROVIDERS`.
+**Provider settings are declared, not listed.** An SSO provider names the `Settings` fields it reads (`settings_fields`) and which hold a secret (`sensitive_settings`) — `_SETTINGS_CATEGORIES["SSO"]`, `_SENSITIVE_SETTINGS`, `_RESTART_REQUIRED_SETTINGS`, and `_FIELD_TO_SSO_PROVIDER` are derived from the registry (`tests/test_sso_settings_metadata.py` is the contract), so a provider's settings rows and its secret are registered through those declarations rather than listed manually; adding a provider is one module, an entry in `PROVIDER_CLASSES`, and its name in `storage.SSO_PROVIDERS`.
 
-Every new environment variable added to `Settings` in `config.py` **MUST** also be registered in the server settings metadata in `main.py`:
+Every **other** new environment variable added to `Settings` in `config.py` — i.e. anything not declared on an SSO provider, including deployment-wide SSO settings such as `SSO_ALLOWED_DOMAINS` and state/device TTLs — **MUST** be registered in the server settings metadata in `main.py`:
 1. Add the field to the appropriate category in `_SETTINGS_CATEGORIES`
 2. Add to `_SENSITIVE_SETTINGS` if it contains passwords/tokens/keys
 3. Add to `_RESTART_REQUIRED_SETTINGS` if it requires server restart to take effect
