@@ -93,6 +93,52 @@ function CopyableKey({ label, value }: { label: string; value: string }) {
   )
 }
 
+function SsoBadge({
+  id,
+  muted,
+  unlinkable,
+  username,
+  onUnlink,
+}: {
+  id: { provider: string; display_name?: string; email?: string | null }
+  muted: boolean
+  unlinkable: boolean
+  username: string
+  onUnlink: (target: { username: string; provider: string; displayName: string }) => void
+}) {
+  const label = id.display_name || id.provider
+  const tooltipText = `${label}${id.email ? ` \u00b7 ${id.email}` : ''}${!unlinkable ? '\nOnly sign-in method \u2014 cannot be unlinked' : ''}`
+  return (
+    <TooltipProvider key={id.provider} delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
+              muted
+                ? 'border-border-muted bg-surface-elevated text-text-tertiary'
+                : 'border-signal-blue/30 bg-signal-blue/10 text-signal-blue'
+            }`}
+            title={tooltipText}
+          >
+            {label}
+            {unlinkable && (
+              <button
+                type="button"
+                aria-label={`Unlink ${label} from ${username}`}
+                className="-mr-0.5 rounded-full p-0.5 transition-colors hover:bg-signal-red/20 hover:text-signal-red"
+                onClick={() => onUnlink({ username, provider: id.provider, displayName: label })}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="whitespace-pre-line">{tooltipText}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 function SignInCell({
   user,
   muted,
@@ -105,56 +151,86 @@ function SignInCell({
   const identities = user.identities ?? []
   const hasApiKey = user.has_api_key ?? (identities.length === 0)
   const unlinkable = user.identities_unlinkable ?? (identities.length > 1 || Boolean(hasApiKey))
+  const [expanded, setExpanded] = useState(false)
 
   if (!hasApiKey && identities.length === 0) {
     return <span className="text-xs text-text-tertiary">None</span>
   }
 
+  const localBadge = hasApiKey && (
+    <span
+      className={`inline-flex items-center rounded-full border border-border-muted bg-surface-elevated px-2 py-0.5 text-xs font-medium ${
+        muted ? 'text-text-tertiary' : 'text-text-secondary'
+      }`}
+      title="Local username + API key sign-in"
+    >
+      Local
+    </span>
+  )
+
+  // Single or no SSO — render flat (unchanged behaviour)
+  if (identities.length <= 1) {
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        {localBadge}
+        {identities.map((id) => (
+          <SsoBadge key={id.provider} id={id} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={onUnlink} />
+        ))}
+      </div>
+    )
+  }
+
+  // 2+ SSO providers
+  const overflow = identities.slice(1)
+  const overflowTooltip = overflow
+    .map((id) => `${id.display_name || id.provider}${id.email ? ` \u00b7 ${id.email}` : ''}`)
+    .join('\n')
+
+  if (!expanded) {
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        {localBadge}
+        <SsoBadge id={identities[0]} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={onUnlink} />
+        <TooltipProvider delayDuration={200}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className={`inline-flex items-center rounded-md border border-border-muted bg-surface-elevated px-1.5 py-0.5 text-xs font-medium transition-colors ${
+                  muted ? 'text-text-tertiary' : 'text-text-secondary hover:text-text-primary'
+                }`}
+                title={overflowTooltip}
+                aria-label={`Show ${overflow.length} more SSO provider${overflow.length > 1 ? 's' : ''} for ${user.username}`}
+                aria-expanded={false}
+                onClick={() => setExpanded(true)}
+              >
+                +{overflow.length}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent className="whitespace-pre-line">{overflowTooltip}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-wrap items-center gap-1">
-      {hasApiKey && (
-        <span
-          className={`inline-flex items-center rounded-full border border-border-muted bg-surface-elevated px-2 py-0.5 text-xs font-medium ${
-            muted ? 'text-text-tertiary' : 'text-text-secondary'
-          }`}
-          title="Local username + API key sign-in"
-        >
-          Local
-        </span>
-      )}
-      {identities.map((id) => {
-        const label = id.display_name || id.provider
-        const tooltipText = `${label}${id.email ? ` \u00b7 ${id.email}` : ''}${!unlinkable ? '\nOnly sign-in method \u2014 cannot be unlinked' : ''}`
-        return (
-          <TooltipProvider key={id.provider} delayDuration={200}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span
-                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
-                    muted
-                      ? 'border-border-muted bg-surface-elevated text-text-tertiary'
-                      : 'border-signal-blue/30 bg-signal-blue/10 text-signal-blue'
-                  }`}
-                  title={tooltipText}
-                >
-                  {label}
-                  {unlinkable && (
-                    <button
-                      type="button"
-                      aria-label={`Unlink ${label} from ${user.username}`}
-                      className="-mr-0.5 rounded-full p-0.5 transition-colors hover:bg-signal-red/20 hover:text-signal-red"
-                      onClick={() => onUnlink({ username: user.username, provider: id.provider, displayName: label })}
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  )}
-                </span>
-              </TooltipTrigger>
-              <TooltipContent className="whitespace-pre-line">{tooltipText}</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        )
-      })}
+      {localBadge}
+      {identities.map((id) => (
+        <SsoBadge key={id.provider} id={id} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={onUnlink} />
+      ))}
+      <button
+        type="button"
+        className={`inline-flex items-center rounded-md border border-border-muted bg-surface-elevated px-1.5 py-0.5 text-xs font-medium transition-colors ${
+          muted ? 'text-text-tertiary' : 'text-text-secondary hover:text-text-primary'
+        }`}
+        aria-label={`Show fewer SSO providers for ${user.username}`}
+        aria-expanded={true}
+        onClick={() => setExpanded(false)}
+      >
+        Less
+      </button>
     </div>
   )
 }

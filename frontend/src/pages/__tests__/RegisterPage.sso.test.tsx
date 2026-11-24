@@ -845,4 +845,21 @@ describe('RegisterPage SSO ticket failures and ticket identity', () => {
     expect(screen.queryByRole('button', { name: /^create account$/i })).toBeNull()
     expect(apiMock.api.post).toHaveBeenCalledWith('/api/auth/sso/ticket', { ticket: 'tkt-2' })
   })
+
+  it('names the typed username in the helper copy so users know a new account will be created', async () => {
+    apiMock.api.post.mockResolvedValue(TICKET)
+    renderLogin(TICKET_ENTRY)
+
+    expect(
+      await screen.findByText(/Enter your existing RootCoz username to link this sign-in, or a new user "rnetser" will be created in RootCoz\./),
+    ).toBeInTheDocument()
+
+    const input = screen.getByLabelText(/username/i)
+    await userEvent.clear(input)
+    await userEvent.type(input, 'ruthn')
+
+    expect(
+      screen.getByText(/Enter your existing RootCoz username to link this sign-in, or a new user "ruthn" will be created in RootCoz\./),
+    ).toBeInTheDocument()
+  })
 })

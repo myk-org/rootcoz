@@ -593,6 +593,13 @@ describe('UsersPage Sign-in column', () => {
 
     const row = (await screen.findByText('multi')).closest('tr')!
     expect(within(row).getByText('Local')).toBeInTheDocument()
+    // Collapsed: first SSO visible, second hidden behind +1 pill
+    expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
+    expect(within(row).queryByText('GitHub')).not.toBeInTheDocument()
+    expect(within(row).getByLabelText('Show 1 more SSO provider for multi')).toBeInTheDocument()
+
+    // Expand to see all SSO badges
+    await user1.click(within(row).getByLabelText('Show 1 more SSO provider for multi'))
     expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
     expect(within(row).getByText('GitHub')).toBeInTheDocument()
     expect(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from multi' })).toBeInTheDocument()
@@ -627,7 +634,12 @@ describe('UsersPage Sign-in column', () => {
 
     const row = (await screen.findByText('keyless')).closest('tr')!
     expect(within(row).queryByText('Local')).not.toBeInTheDocument()
+    // Collapsed: first SSO visible, second behind +1
     expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
+    expect(within(row).queryByText('GitHub')).not.toBeInTheDocument()
+
+    // Expand
+    await user1.click(within(row).getByLabelText('Show 1 more SSO provider for keyless'))
     expect(within(row).getByText('GitHub')).toBeInTheDocument()
 
     // Unlink Red Hat SSO
@@ -691,6 +703,7 @@ describe('UsersPage Sign-in column', () => {
     renderPage()
 
     const row = (await screen.findByText('clash')).closest('tr')!
+    // First SSO is visible; click unlink on it directly
     await user1.click(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from clash' }))
     const dialog = await screen.findByRole('dialog')
     await user1.click(within(dialog).getByRole('button', { name: 'Unlink' }))
@@ -701,6 +714,118 @@ describe('UsersPage Sign-in column', () => {
     )
     // Badge stays
     expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
+    // GitHub still behind +1 pill
+    expect(within(row).getByLabelText('Show 1 more SSO provider for clash')).toBeInTheDocument()
+  })
+
+  it('with Local + 2 SSOs, initially shows Local, first SSO, and +1 pill with tooltip', async () => {
+    mockUsers([
+      user('duo', {
+        has_api_key: true,
+        identities: [
+          { provider: 'github', display_name: 'GitHub', email: 'duo@gh.com', created_at: '2025-01-01T00:00:00Z' },
+          { provider: 'redhat', display_name: 'Red Hat SSO', email: 'duo@rh.com', created_at: '2025-01-02T00:00:00Z' },
+        ],
+        identities_unlinkable: true,
+      }),
+    ])
+    renderPage()
+
+    const row = (await screen.findByText('duo')).closest('tr')!
+    expect(within(row).getByText('Local')).toBeInTheDocument()
     expect(within(row).getByText('GitHub')).toBeInTheDocument()
+    expect(within(row).queryByText('Red Hat SSO')).not.toBeInTheDocument()
+
+    const pill = within(row).getByLabelText('Show 1 more SSO provider for duo')
+    expect(pill).toBeInTheDocument()
+    expect(pill).toHaveTextContent('+1')
+    expect(pill).toHaveAttribute('title', 'Red Hat SSO \u00b7 duo@rh.com')
+    expect(pill).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('clicking +1 expands all SSO badges; unlinking the extra one removes +N pill', async () => {
+    mockUsers([
+      user('duo', {
+        has_api_key: true,
+        identities: [
+          { provider: 'github', display_name: 'GitHub', email: 'duo@gh.com', created_at: '2025-01-01T00:00:00Z' },
+          { provider: 'redhat', display_name: 'Red Hat SSO', email: 'duo@rh.com', created_at: '2025-01-02T00:00:00Z' },
+        ],
+        identities_unlinkable: true,
+      }),
+    ])
+    del.mockResolvedValue({ ok: true })
+    const user1 = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('duo')).closest('tr')!
+    await user1.click(within(row).getByLabelText('Show 1 more SSO provider for duo'))
+
+    // Both SSO badges visible with unlink buttons
+    expect(within(row).getByText('GitHub')).toBeInTheDocument()
+    expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
+    expect(within(row).getByLabelText('Unlink GitHub from duo')).toBeInTheDocument()
+    expect(within(row).getByLabelText('Unlink Red Hat SSO from duo')).toBeInTheDocument()
+
+    // Unlink Red Hat SSO
+    await user1.click(within(row).getByLabelText('Unlink Red Hat SSO from duo'))
+    const dialog = await screen.findByRole('dialog')
+    await user1.click(within(dialog).getByRole('button', { name: 'Unlink' }))
+    await waitFor(() => expect(del).toHaveBeenCalledWith('/api/admin/users/duo/identities/redhat'))
+
+    // Now Local + GitHub only, no +N pill
+    await waitFor(() => expect(within(row).queryByText('Red Hat SSO')).not.toBeInTheDocument())
+    expect(within(row).getByText('Local')).toBeInTheDocument()
+    expect(within(row).getByText('GitHub')).toBeInTheDocument()
+    expect(within(row).queryByLabelText(/Show \d+ more/)).not.toBeInTheDocument()
+  })
+
+  it('clicking collapse hides the extra SSO badge back into +1 pill', async () => {
+    mockUsers([
+      user('duo', {
+        has_api_key: true,
+        identities: [
+          { provider: 'github', display_name: 'GitHub', email: null, created_at: '2025-01-01T00:00:00Z' },
+          { provider: 'redhat', display_name: 'Red Hat SSO', email: null, created_at: '2025-01-02T00:00:00Z' },
+        ],
+        identities_unlinkable: true,
+      }),
+    ])
+    const user1 = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('duo')).closest('tr')!
+    // Expand
+    await user1.click(within(row).getByLabelText('Show 1 more SSO provider for duo'))
+    expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
+
+    // Collapse
+    await user1.click(within(row).getByLabelText('Show fewer SSO providers for duo'))
+    expect(within(row).queryByText('Red Hat SSO')).not.toBeInTheDocument()
+    expect(within(row).getByLabelText('Show 1 more SSO provider for duo')).toBeInTheDocument()
+  })
+
+  it('with 3 SSOs, renders first SSO + +2 pill whose tooltip lists both hidden providers', async () => {
+    mockUsers([
+      user('triple', {
+        has_api_key: false,
+        identities: [
+          { provider: 'github', display_name: 'GitHub', email: 'tri@gh.com', created_at: '2025-01-01T00:00:00Z' },
+          { provider: 'redhat', display_name: 'Red Hat SSO', email: 'tri@rh.com', created_at: '2025-01-02T00:00:00Z' },
+          { provider: 'google', display_name: 'Google', email: 'tri@goog.com', created_at: '2025-01-03T00:00:00Z' },
+        ],
+        identities_unlinkable: true,
+      }),
+    ])
+    renderPage()
+
+    const row = (await screen.findByText('triple')).closest('tr')!
+    expect(within(row).getByText('GitHub')).toBeInTheDocument()
+    expect(within(row).queryByText('Red Hat SSO')).not.toBeInTheDocument()
+    expect(within(row).queryByText('Google')).not.toBeInTheDocument()
+
+    const pill = within(row).getByLabelText('Show 2 more SSO providers for triple')
+    expect(pill).toHaveTextContent('+2')
+    expect(pill).toHaveAttribute('title', 'Red Hat SSO \u00b7 tri@rh.com\nGoogle \u00b7 tri@goog.com')
   })
 })

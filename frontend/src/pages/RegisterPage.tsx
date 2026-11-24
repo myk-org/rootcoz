@@ -283,7 +283,9 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
               />
               <p className="text-xs text-text-tertiary">
                 {ticket.email_domain && `Signed in with an @${ticket.email_domain} address. `}
-                Enter your RootCoz username to continue.
+                {username.trim()
+                  ? `Enter your existing RootCoz username to link this sign-in, or a new user "${username.trim()}" will be created in RootCoz.`
+                  : 'Enter your existing RootCoz username to link this sign-in, or enter a new username to create an account in RootCoz.'}
               </p>
             </div>
 
