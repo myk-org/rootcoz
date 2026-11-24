@@ -1343,3 +1343,44 @@ async def test_a_new_name_still_registers_and_gets_its_key(
 
         assert username == "newcomer"
         assert (await storage.get_user_by_key(raw_key))["username"] == "newcomer"
+
+
+async def test_list_identities_for_users_empty_input(setup_test_db: Path) -> None:
+    """An empty username list returns an empty dict without touching the DB."""
+    # No DB patch needed — the function must short-circuit before connecting.
+    assert await storage.list_identities_for_users([]) == {}
+
+
+async def test_list_identities_for_users_mixed(
+    setup_test_db: Path,
+) -> None:
+    """Batched lookup returns grouped, provider-ordered identities."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_user("alice")
+        await storage.create_user("bob")
+        await storage.create_user("carol")
+
+        await storage.add_user_identity(
+            "alice", "google", "g-alice", email="alice@g.com"
+        )
+        await storage.add_user_identity(
+            "alice", "github", "gh-alice", email="alice@gh.com"
+        )
+        await storage.add_user_identity(
+            "carol", "google", "g-carol", email="carol@g.com"
+        )
+        # bob has no identities
+
+        result = await storage.list_identities_for_users(["alice", "bob", "carol"])
+
+        # bob is absent (no identities)
+        assert "bob" not in result
+
+        # alice: two identities, ordered by provider
+        assert [i["provider"] for i in result["alice"]] == ["github", "google"]
+        assert result["alice"][0]["email"] == "alice@gh.com"
+        assert result["alice"][1]["email"] == "alice@g.com"
+
+        # carol: one identity
+        assert len(result["carol"]) == 1
+        assert result["carol"][0]["provider"] == "google"

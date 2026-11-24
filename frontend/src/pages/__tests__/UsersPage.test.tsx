@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { UsersPage } from '@/pages/UsersPage'
 
-const { get, put, post, ApiError } = vi.hoisted(() => {
+const { get, put, post, del, ApiError } = vi.hoisted(() => {
   class ApiError extends Error {
     status: number
     body: unknown
@@ -14,10 +14,20 @@ const { get, put, post, ApiError } = vi.hoisted(() => {
       this.body = body
     }
   }
-  return { get: vi.fn(), put: vi.fn(), post: vi.fn(), ApiError }
+  return { get: vi.fn(), put: vi.fn(), post: vi.fn(), del: vi.fn(), ApiError }
 })
 
-vi.mock('@/lib/api', () => ({ api: { get, put, post, delete: vi.fn() }, ApiError }))
+vi.mock('@/lib/api', () => ({
+  api: { get, put, post, delete: del },
+  ApiError,
+  extractApiDetail: (err: unknown) => {
+    if (err instanceof ApiError) {
+      const body = err.body as { detail?: string } | null
+      return body?.detail ?? null
+    }
+    return null
+  },
+}))
 vi.mock('@/lib/auth', () => ({ useAuth: () => ({ username: 'root', refreshAuth: vi.fn() }) }))
 
 // Radix Select pokes at pointer-capture and scrolling APIs jsdom does not have.
@@ -117,6 +127,7 @@ beforeEach(() => {
   get.mockReset()
   put.mockReset()
   post.mockReset()
+  del.mockReset()
   mockUsers([user('alice'), user('bob')])
 })
 
@@ -501,5 +512,129 @@ describe('UsersPage locked badge', () => {
     await waitFor(() => expect(get).toHaveBeenCalledWith('/api/admin/settings'))
     expect(within(row).getByText('locked')).toBeInTheDocument()
     expect(within(row).queryByText(/locked \(/)).not.toBeInTheDocument()
+  })
+})
+
+describe('UsersPage SSO identities', () => {
+  it('shows "API key only" when no identities are linked', async () => {
+    mockUsers([user('alice', { identities: [], identities_unlinkable: false })])
+    renderPage()
+
+    const row = (await screen.findByText('alice')).closest('tr')!
+    expect(within(row).getByText('API key only')).toBeInTheDocument()
+  })
+
+  it('shows "API key only" when identities field is omitted (older server)', async () => {
+    mockUsers([user('alice')])
+    renderPage()
+
+    const row = (await screen.findByText('alice')).closest('tr')!
+    expect(within(row).getByText('API key only')).toBeInTheDocument()
+  })
+
+  it('renders a provider badge with display_name and no unlink button when not unlinkable', async () => {
+    mockUsers([
+      user('devuser', {
+        identities: [{ provider: 'redhat', display_name: 'Red Hat SSO', email: 'devuser@example.com', created_at: '2025-01-01T00:00:00Z' }],
+        identities_unlinkable: false,
+      }),
+    ])
+    renderPage()
+
+    const row = (await screen.findByText('devuser')).closest('tr')!
+    expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
+    expect(within(row).queryByRole('button', { name: /Unlink/ })).not.toBeInTheDocument()
+  })
+
+  it('renders both badges with unlink buttons when unlinkable, and clicking unlink opens confirmation', async () => {
+    mockUsers([
+      user('multi', {
+        identities: [
+          { provider: 'redhat', display_name: 'Red Hat SSO', email: 'multi@rh.com', created_at: '2025-01-01T00:00:00Z' },
+          { provider: 'github', display_name: 'GitHub', email: 'multi@gh.com', created_at: '2025-01-02T00:00:00Z' },
+        ],
+        identities_unlinkable: true,
+      }),
+    ])
+    del.mockResolvedValue({ ok: true, username: 'multi', provider: 'redhat' })
+    const user1 = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('multi')).closest('tr')!
+    expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
+    expect(within(row).getByText('GitHub')).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from multi' })).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: 'Unlink GitHub from multi' })).toBeInTheDocument()
+
+    // Click unlink on Red Hat SSO — opens confirmation dialog
+    await user1.click(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from multi' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/Remove Red Hat SSO sign-in from "multi"/)).toBeInTheDocument()
+    expect(del).not.toHaveBeenCalled()
+
+    // Confirm
+    await user1.click(within(dialog).getByRole('button', { name: 'Unlink' }))
+    await waitFor(() =>
+      expect(del).toHaveBeenCalledWith('/api/admin/users/multi/identities/redhat'),
+    )
+
+    // Badge removed, remaining badge has no unlink button (only 1 provider left)
+    await waitFor(() => expect(within(row).queryByText('Red Hat SSO')).not.toBeInTheDocument())
+    expect(within(row).getByText('GitHub')).toBeInTheDocument()
+    expect(within(row).queryByRole('button', { name: /Unlink/ })).not.toBeInTheDocument()
+  })
+
+  it('renders a server-supplied display_name for an unknown provider with zero frontend changes', async () => {
+    mockUsers([
+      user('kc-user', {
+        identities: [{ provider: 'my-keycloak-instance', display_name: 'Keycloak', email: null, created_at: '2025-06-01T00:00:00Z' }],
+        identities_unlinkable: false,
+      }),
+    ])
+    renderPage()
+
+    const row = (await screen.findByText('kc-user')).closest('tr')!
+    expect(within(row).getByText('Keycloak')).toBeInTheDocument()
+  })
+
+  it('falls back to provider id when display_name is absent', async () => {
+    mockUsers([
+      user('raw', {
+        identities: [{ provider: 'saml-corp', email: null, created_at: '2025-06-01T00:00:00Z' }],
+        identities_unlinkable: false,
+      }),
+    ])
+    renderPage()
+
+    const row = (await screen.findByText('raw')).closest('tr')!
+    expect(within(row).getByText('saml-corp')).toBeInTheDocument()
+  })
+
+  it('surfaces unlink error (409) in the alert without dropping the badge', async () => {
+    mockUsers([
+      user('clash', {
+        identities: [
+          { provider: 'redhat', display_name: 'Red Hat SSO', email: null, created_at: '2025-01-01T00:00:00Z' },
+          { provider: 'github', display_name: 'GitHub', email: null, created_at: '2025-01-02T00:00:00Z' },
+        ],
+        identities_unlinkable: true,
+      }),
+    ])
+    del.mockRejectedValue(new ApiError(409, { detail: 'Cannot unlink the last sign-in method' }))
+    const user1 = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('clash')).closest('tr')!
+    await user1.click(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from clash' }))
+    const dialog = await screen.findByRole('dialog')
+    await user1.click(within(dialog).getByRole('button', { name: 'Unlink' }))
+
+    // Error surfaces in the alert
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('Cannot unlink the last sign-in method'),
+    )
+    // Badge stays
+    expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
+    expect(within(row).getByText('GitHub')).toBeInTheDocument()
   })
 })

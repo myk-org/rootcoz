@@ -5873,3 +5873,50 @@ async def test_provisioning_still_audits_and_still_waits_for_approval(
             "created_via": "proxy",
             "role": "reviewer",
         }
+
+
+async def test_admin_users_list_includes_identities(temp_db_path: Path) -> None:
+    """GET /api/admin/users carries per-user identities with display_name."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("nolinks")
+        await storage.create_user("onelink")
+        await storage.add_user_identity(
+            "onelink", "google", "sub-ol", email="onelink@g.com"
+        )
+        await storage.create_user("twolinks")
+        await storage.add_user_identity(
+            "twolinks", "google", "sub-tl-g", email="twolinks@g.com"
+        )
+        await storage.add_user_identity(
+            "twolinks", "github", "sub-tl-gh", email="twolinks@gh.com"
+        )
+
+        cookies = admin_login(client)
+        resp = client.get("/api/admin/users", cookies=cookies)
+        assert resp.status_code == 200
+        users_by_name = {u["username"]: u for u in resp.json()["users"]}
+
+        # 0 identities
+        u0 = users_by_name["nolinks"]
+        assert u0["identities"] == []
+        assert u0["identities_unlinkable"] is False
+
+        # 1 identity
+        u1 = users_by_name["onelink"]
+        assert len(u1["identities"]) == 1
+        i1 = u1["identities"][0]
+        assert i1["provider"] == "google"
+        assert i1["display_name"] == "Google"
+        assert i1["email"] == "onelink@g.com"
+        assert "created_at" in i1
+        assert "subject" not in i1
+        assert u1["identities_unlinkable"] is False
+
+        # 2 identities
+        u2 = users_by_name["twolinks"]
+        assert len(u2["identities"]) == 2
+        providers = [i["provider"] for i in u2["identities"]]
+        assert providers == ["github", "google"]
+        assert u2["identities"][0]["display_name"] == "GitHub"
+        assert u2["identities"][1]["display_name"] == "Google"
+        assert u2["identities_unlinkable"] is True

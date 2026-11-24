@@ -10342,6 +10342,40 @@ async def list_user_identities(username: str) -> list[dict[str, Any]]:
         )
 
 
+async def list_identities_for_users(
+    usernames: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Batched identity lookup for multiple accounts (no N+1).
+
+    Args:
+        usernames: The accounts to look up.
+
+    Returns:
+        A dict keyed by normalized username, each value being the list of
+        identities for that account ordered by provider.  Users with no
+        identities are omitted — callers use ``.get(name, [])``.
+    """
+    if not usernames:
+        return {}
+    normalized = list(dict.fromkeys(_normalize_username(u) for u in usernames))
+    result: dict[str, list[dict[str, Any]]] = {}
+    async with _connect_db() as db:
+        # Chunk to stay well under SQLite's bind-parameter limit when callers
+        # omit `limit` on /api/admin/users.
+        for start in range(0, len(normalized), 500):
+            chunk = normalized[start : start + 500]
+            placeholders = ", ".join("?" * len(chunk))
+            rows = await _select_identities(
+                db,
+                f"u.username IN ({placeholders})",
+                tuple(chunk),
+                order="ORDER BY u.username, i.provider",
+            )
+            for row in rows:
+                result.setdefault(row["username"], []).append(row)
+    return result
+
+
 #: Claim-name fragments that mark a credential rather than identity data. An
 #: OIDC claim set routinely carries ``access_token`` / ``id_token`` / an
 #: authorization ``code``, and the audit column must never become a secret store.

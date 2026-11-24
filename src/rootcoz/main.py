@@ -20311,6 +20311,12 @@ async def sso_link_account(request: Request) -> Response:
     return response
 
 
+#: Human-readable provider labels, derived once from the registry.
+_SSO_PROVIDER_DISPLAY_NAMES: dict[str, str] = {
+    p.name: p.display_name or p.name for p in auth_sso.PROVIDER_CLASSES
+}
+
+
 def _identities_payload(identities: list[dict[str, Any]]) -> dict[str, Any]:
     """Shape the sign-in-methods answer for the self-service and admin routes.
 
@@ -20318,7 +20324,8 @@ def _identities_payload(identities: list[dict[str, Any]]) -> dict[str, Any]:
         identities: Rows from :func:`rootcoz.storage.list_user_identities`.
 
     Returns:
-        ``{"identities": [{"provider", "email", "created_at"}], "unlinkable": bool}``.
+        ``{"identities": [{"provider", "display_name", "email", "created_at"}],
+        "unlinkable": bool}``.
         The subject id is deliberately absent: it is a correlation key, and no
         client needs it.
     """
@@ -20326,6 +20333,9 @@ def _identities_payload(identities: list[dict[str, Any]]) -> dict[str, Any]:
         "identities": [
             {
                 "provider": identity["provider"],
+                "display_name": _SSO_PROVIDER_DISPLAY_NAMES.get(
+                    identity["provider"], identity["provider"]
+                ),
                 "email": identity["email"],
                 "created_at": identity["created_at"],
             }
@@ -24649,6 +24659,13 @@ async def list_users_endpoint(
     """List all users (admin and regular), optionally paged and searched."""
     _require_admin(request)
     users, total = await storage.list_users_page(limit=limit, offset=offset, q=q)
+    identities_by_user = await storage.list_identities_for_users(
+        [u["username"] for u in users]
+    )
+    for user in users:
+        payload = _identities_payload(identities_by_user.get(user["username"], []))
+        user["identities"] = payload["identities"]
+        user["identities_unlinkable"] = payload["unlinkable"]
     return {
         "users": users,
         "total": total,

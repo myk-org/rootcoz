@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { useClipboard } from '@/lib/useClipboard'
 import { parsePageSize } from '@/lib/pageParams'
 import { RoleBadge } from '@/components/shared/RoleBadge'
@@ -25,7 +25,7 @@ import {
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { Copy, Check, RefreshCw, Trash2, UserPlus, Shield, CheckCircle, XCircle, Unlock, UserCheck, UserX, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Copy, Check, RefreshCw, Trash2, UserPlus, Shield, CheckCircle, XCircle, Unlock, UserCheck, UserX, ChevronLeft, ChevronRight, X } from 'lucide-react'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { formatTimestamp, formatRelativeTime, toIntInRange } from '@/lib/utils'
@@ -93,6 +93,59 @@ function CopyableKey({ label, value }: { label: string; value: string }) {
   )
 }
 
+function SsoCell({
+  user,
+  muted,
+  onUnlink,
+}: {
+  user: AdminUser
+  muted: boolean
+  onUnlink: (target: { username: string; provider: string; displayName: string }) => void
+}) {
+  const identities = user.identities ?? []
+  if (identities.length === 0) {
+    return <span className="text-xs text-text-tertiary">API key only</span>
+  }
+  const unlinkable = user.identities_unlinkable ?? identities.length > 1
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {identities.map((id) => {
+        const label = id.display_name || id.provider
+        const tooltipText = `${label}${id.email ? ` · ${id.email}` : ''}${!unlinkable ? '\nOnly linked provider — cannot be unlinked' : ''}`
+        return (
+          <TooltipProvider key={id.provider} delayDuration={200}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span
+                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
+                    muted
+                      ? 'border-border-muted bg-surface-elevated text-text-tertiary'
+                      : 'border-signal-blue/30 bg-signal-blue/10 text-signal-blue'
+                  }`}
+                  title={tooltipText}
+                >
+                  {label}
+                  {unlinkable && (
+                    <button
+                      type="button"
+                      aria-label={`Unlink ${label} from ${user.username}`}
+                      className="-mr-0.5 rounded-full p-0.5 transition-colors hover:bg-signal-red/20 hover:text-signal-red"
+                      onClick={() => onUnlink({ username: user.username, provider: id.provider, displayName: label })}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </span>
+              </TooltipTrigger>
+              <TooltipContent className="whitespace-pre-line">{tooltipText}</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )
+      })}
+    </div>
+  )
+}
+
 export function UsersPage() {
   const { username: currentUser, refreshAuth } = useAuth()
   const [users, setUsers] = useState<AdminUser[]>([])
@@ -144,6 +197,10 @@ export function UsersPage() {
   // Delete dialog
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
+
+  // Unlink SSO identity dialog
+  const [unlinkTarget, setUnlinkTarget] = useState<{ username: string; provider: string; displayName: string } | null>(null)
+  const [unlinking, setUnlinking] = useState(false)
 
   // Disable dialog + the in-flight guard shared by disable/enable/unlock
   const [disableTarget, setDisableTarget] = useState<string | null>(null)
@@ -321,6 +378,27 @@ export function UsersPage() {
       }
     } finally {
       setDeleting(false)
+    }
+  }
+
+  async function handleUnlink() {
+    if (!unlinkTarget) return
+    setUnlinking(true)
+    setActionError(null)
+    try {
+      await api.delete(`/api/admin/users/${encodeURIComponent(unlinkTarget.username)}/identities/${encodeURIComponent(unlinkTarget.provider)}`)
+      setUsers((prev) =>
+        prev.map((u) => {
+          if (u.username !== unlinkTarget.username) return u
+          const nextIdentities = (u.identities ?? []).filter((id) => id.provider !== unlinkTarget.provider)
+          return { ...u, identities: nextIdentities, identities_unlinkable: nextIdentities.length > 1 }
+        }),
+      )
+      setUnlinkTarget(null)
+    } catch (err) {
+      setActionError(extractApiDetail(err) ?? (err instanceof ApiError ? `Failed to unlink provider (${err.status})` : 'Failed to unlink provider'))
+    } finally {
+      setUnlinking(false)
     }
   }
 
@@ -525,6 +603,7 @@ export function UsersPage() {
               <TableHead>Username</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Role</TableHead>
+              <TableHead>SSO</TableHead>
               <TableHead>View reports</TableHead>
               <TableHead>Server providers</TableHead>
               <TableHead>Created</TableHead>
@@ -587,6 +666,9 @@ export function UsersPage() {
                         </SelectContent>
                       </Select>
                     )}
+                  </TableCell>
+                  <TableCell>
+                    <SsoCell user={user} muted={muted} onUnlink={setUnlinkTarget} />
                   </TableCell>
                   <TableCell>
                     {user.role === 'admin' ? (
@@ -996,6 +1078,19 @@ export function UsersPage() {
         variant="destructive"
         onConfirm={() => { if (disableTarget) handleAccountState(disableTarget, 'disable') }}
         loading={accountBusy !== null}
+        error={actionError}
+      />
+
+      {/* Unlink SSO Identity Dialog */}
+      <ConfirmDialog
+        open={unlinkTarget !== null}
+        onOpenChange={(open) => { if (!open && !unlinking) { setUnlinkTarget(null); setActionError(null) } }}
+        title="Unlink SSO provider"
+        description={`Remove ${unlinkTarget?.displayName} sign-in from "${unlinkTarget?.username}"? They can still sign in with their remaining linked providers.`}
+        confirmLabel="Unlink"
+        variant="destructive"
+        onConfirm={handleUnlink}
+        loading={unlinking}
         error={actionError}
       />
     </div>
