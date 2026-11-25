@@ -1913,6 +1913,89 @@ async def test_a_browser_link_works_for_an_allow_listed_account(
         ]
 
 
+async def test_admin_outside_allow_list_can_link_via_ticket(
+    temp_db_path: Path,
+) -> None:
+    """Registered admins always bypass ``ALLOWED_USERS`` on first-login ticket link."""
+    env = dict(_SSO_ENV, ALLOWED_USERS="someone-else")
+    for client in make_app_client(temp_db_path, env):
+        _, raw_key = await storage.create_user("boss", role="admin")
+        ticket = await _ticket(client)
+
+        response = client.post(
+            "/api/auth/sso/link",
+            json={"ticket": ticket, "username": "boss", "api_key": raw_key},
+        )
+
+        assert response.status_code == 200
+        linked = await storage.list_user_identities("boss")
+        assert [(row["provider"], row["subject"]) for row in linked] == [
+            ("google", "sub-1")
+        ]
+
+
+async def test_admin_outside_allow_list_can_link_via_browser_callback(
+    temp_db_path: Path,
+) -> None:
+    """Registered admins bypass ``ALLOWED_USERS`` on Settings link callback (live row)."""
+    env = dict(_SSO_ENV, ALLOWED_USERS="someone-else")
+    for client in make_app_client(temp_db_path, env):
+        # Live row is admin; even a stale non-admin session bit must see the live role.
+        await storage.create_user("boss", role="admin")
+        session = await storage.create_session("boss", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="boss", next_path="/settings"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        assert response.headers["location"] == "/settings?sso_linked=google"
+        linked = await storage.list_user_identities("boss")
+        assert [(row["provider"], row["subject"]) for row in linked] == [
+            ("google", "sub-1")
+        ]
+
+
+async def test_demoted_admin_stale_session_cannot_bypass_link_allow_list(
+    temp_db_path: Path,
+) -> None:
+    """``_sso_finish_link`` reads admin status from the live users row, not the session."""
+    env = dict(_SSO_ENV, ALLOWED_USERS="someone-else")
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("ruthn", role="reviewer")
+        # Stale session still has is_admin=True, but live row is reviewer.
+        session = await storage.create_session("ruthn", is_admin=True, role="admin")
+        client.cookies.set("rootcoz_session", session)
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="ruthn", next_path="/settings"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        assert response.headers["location"] == "/settings?sso_error=denied"
+        assert await storage.list_user_identities("ruthn") == []
+        refusal = await _last_sso_refusal(temp_db_path)
+        assert refusal["details"]["reason"] == "not_allowed"
+        assert refusal["actor"] == "ruthn"
+
+
 async def test_a_stolen_ticket_cannot_be_redeemed_in_another_browser(
     temp_db_path: Path,
 ) -> None:
@@ -3861,6 +3944,39 @@ async def test_a_viewer_cannot_unlink_a_sign_in_method(temp_db_path: Path) -> No
         response = client.delete("/api/user/identities/github")
         assert response.status_code == 403
         assert len(await storage.list_user_identities("vicky")) == 2
+
+
+@pytest.mark.parametrize(
+    ("username", "role", "is_admin", "allowed_users", "expected_status"),
+    [
+        ("bob", "reviewer", False, "someoneelse", 403),
+        ("boss", "admin", True, "someoneelse", 200),
+        ("alice", "reviewer", False, "alice", 200),
+    ],
+)
+async def test_unlink_identity_enforces_allow_list(
+    temp_db_path: Path,
+    username: str,
+    role: str,
+    is_admin: bool,
+    allowed_users: str,
+    expected_status: int,
+) -> None:
+    """``DELETE /api/user/identities/{provider}`` enforces ``ALLOWED_USERS``; admins bypass."""
+    env = dict(_SSO_ENV, ALLOWED_USERS=allowed_users)
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user(username, role=role)
+        await storage.add_user_identity(
+            username, "google", "sub-1", email=f"{username}@example.com"
+        )
+        session = await storage.create_session(username, is_admin=is_admin, role=role)
+        client.cookies.set("rootcoz_session", session)
+
+        response = client.delete("/api/user/identities/google")
+
+        assert response.status_code == expected_status
+        remaining = await storage.list_user_identities(username)
+        assert len(remaining) == (1 if expected_status == 403 else 0)
 
 
 async def test_removing_an_unconnected_provider_is_a_404(temp_db_path: Path) -> None:

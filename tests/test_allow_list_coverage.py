@@ -64,16 +64,9 @@ ALLOW_LIST_EXEMPT_ROUTES = {
     ("POST", "/api/validate-token"),
     ("POST", "/api/jobs/metadata/rules/preview"),
     ("DELETE", "/api/user/ai-credentials/{provider:path}"),
-    # Removing one of your own sign-in methods, for the same reason as removing
-    # your own AI key: a user dropped from the list must still be able to
-    # control how they sign in. The last one is refused by the handler anyway.
-    ("DELETE", "/api/user/identities/{provider}"),
-    # Connecting another provider to your own account is the same class of
-    # self-service account-security write as unlinking above — the handler
-    # already refuses it to anyone below reviewer — and it can never widen what
-    # the account may do, because a linked provider resolves to that same
-    # account. Gating it would let a list change strand a signed-in person who
-    # may still remove a method but not add one.
+    # Public-by-shape SSO start route (no request.state populated by middleware);
+    # the authoritative ALLOWED_USERS check runs in `_sso_finish_link` via
+    # `_sso_link_allow_list_refused` when the callback writes the link.
     ("POST", "/api/auth/sso/{provider}/login"),
 }
 

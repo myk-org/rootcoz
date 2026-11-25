@@ -19248,13 +19248,19 @@ async def _audit_sso_refusal(
 
 
 async def _sso_link_allow_list_refused(
-    request: Request, *, provider: str, username: str, settings: Settings
+    request: Request,
+    *,
+    provider: str,
+    username: str,
+    settings: Settings,
+    is_admin: bool = False,
 ) -> bool:
     """Whether ``ALLOWED_USERS`` forbids attaching a provider to this account.
 
     Linking writes a credential onto an account, so it is a write: the list that
     bounds account creation bounds this too (#33 — the list bounds writes and
-    never grants anything). Both link paths ask this one function, so the
+    never grants anything). Admins always bypass ``ALLOWED_USERS``, matching
+    ``_check_allow_list``. Both link paths ask this one function, so the
     credential-verified ticket path and a live browser flow cannot disagree about
     who may add a sign-in method.
 
@@ -19263,14 +19269,15 @@ async def _sso_link_allow_list_refused(
         provider: Provider that authenticated the identity.
         username: The account the identity would be attached to.
         settings: Application settings (``ALLOWED_USERS``).
+        is_admin: Whether the live account row holds the administrator role.
 
     Returns:
-        True when the account is outside a non-empty list; the refusal itself is
-        already audited, and the caller answers in its own shape (a redirect on
-        the callback, a 403 on the ticket route).
+        True when a non-admin account is outside a non-empty list; the refusal
+        itself is already audited, and the caller answers in its own shape (a
+        redirect on the callback, a 403 on the ticket route).
     """
     allowed = settings.allowed_users_set
-    if not allowed or username in allowed:
+    if is_admin or not allowed or username in allowed:
         return False
     await _audit_sso_refusal(request, provider, "not_allowed", subject=username)
     return True
@@ -19640,8 +19647,13 @@ async def _sso_finish_link(
         )
         return _link_error_redirect(destination, "identity_conflict")
 
+    _, is_admin = role_and_admin(user)
     if await _sso_link_allow_list_refused(
-        request, provider=provider, username=username, settings=get_settings()
+        request,
+        provider=provider,
+        username=username,
+        settings=get_settings(),
+        is_admin=is_admin,
     ):
         # Same write rule as the ticket path, applied where the write happens.
         return _link_error_redirect(destination, "not_allowed")
@@ -20281,7 +20293,11 @@ async def sso_link_account(request: Request) -> Response:
             detail="Reviewer access required. Viewers cannot perform this action.",
         )
     if await _sso_link_allow_list_refused(
-        request, provider=record["provider"], username=username, settings=settings
+        request,
+        provider=record["provider"],
+        username=username,
+        settings=settings,
+        is_admin=is_admin,
     ):
         raise HTTPException(status_code=403, detail="User not allowed")
 
@@ -21249,10 +21265,10 @@ async def get_user_identities(request: Request) -> JSONResponse:
 async def delete_user_identity(provider: str, request: Request) -> JSONResponse:
     """Unlink one provider from the calling account.
 
-    The last one is refused: every account also holds an API key, but an
-    account created through SSO is shown its key only once, so unlinking the only
-    identity would lock the person out of their own account with a credential
-    they do not have. The refusal names the two ways out.
+    For keyless accounts (no local API key), removing the last SSO identity is
+    refused with 409 because it is the only way to sign in. Accounts holding a
+    local API key may unlink their sole SSO provider because local login
+    remains.
 
     Args:
         provider: Provider to unlink.
@@ -21262,10 +21278,12 @@ async def delete_user_identity(provider: str, request: Request) -> JSONResponse:
         ``{"ok": true, "provider": ...}``.
 
     Raises:
-        HTTPException: 404 when the account has no such identity, 409 when it is
-            the only one.
+        HTTPException: 403 when the caller lacks reviewer access or is not on
+            ``ALLOWED_USERS``, 404 when the account has no such identity, 409
+            when it is a keyless account's only sign-in method.
     """
     _require_reviewer(request)
+    _check_allow_list(request)
     username = request.state.username
     await _unlink_identity(
         request,
