@@ -990,6 +990,7 @@ def principal_state(
     can_view_reports: bool | None = None,
     can_use_server_providers: bool = False,
     can_use_free_providers: bool = False,
+    authenticated: bool | None = None,
     auth_session_token: str = "",
     auth_strategy: str = "",
     auth_provider: str | None = None,
@@ -1002,6 +1003,7 @@ def principal_state(
     resolved_reports = (
         bool(can_view_reports) if can_view_reports is not None else resolved_admin
     )
+    resolved_auth = bool(authenticated) if authenticated is not None else bool(username)
     principal = Principal(
         username=username,
         role=role,
@@ -1010,7 +1012,7 @@ def principal_state(
         can_view_reports=resolved_reports,
         can_use_server_providers=can_use_server_providers,
         can_use_free_providers=can_use_free_providers,
-        authenticated=bool(username),
+        authenticated=resolved_auth,
         auth_session_token=auth_session_token,
         auth_strategy=auth_strategy,
         auth_provider=auth_provider,

@@ -141,7 +141,7 @@ class Principal:
 
 
 #: Default unauthenticated principal attached to public/preflight requests.
-ANONYMOUS_PRINCIPAL = Principal()
+ANONYMOUS_PRINCIPAL = Principal(role="")
 
 
 def attach_principal(request: Request, principal: Principal) -> None:

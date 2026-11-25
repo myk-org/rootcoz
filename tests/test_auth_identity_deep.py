@@ -750,3 +750,28 @@ async def test_idp_logout_url_reasons() -> None:
         None,
         "provider_unavailable",
     )
+
+
+async def test_anonymous_audit_row_does_not_inherit_reviewer_role(
+    setup_test_db: Path,
+) -> None:
+    """An unauthenticated request carrying ANONYMOUS_PRINCIPAL records actor_role=None."""
+    from rootcoz import main as app_module
+
+    req = _make_request(method="POST", path="/api/auth/login")
+    auth_principal.attach_principal(req, auth_principal.ANONYMOUS_PRINCIPAL)
+
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        event = await app_module.record_audit(
+            action="auth.login_failed",
+            actor="anonymous",
+            message="Failed login attempt",
+            target_type="user",
+            target_id="ghost",
+            outcome="failure",
+            details={"reason": "unknown_user"},
+            request=req,
+        )
+        assert event is not None
+        assert event["actor_role"] is None
+        assert event["is_admin"] is False

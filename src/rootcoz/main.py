@@ -2135,7 +2135,7 @@ async def record_audit(
     if request is not None:
         principal = auth_principal.get_principal(request)
         resolved_role = resolved_role or (
-            principal.role if auth_principal.has_principal(request) else None
+            principal.role if principal.authenticated else None
         )
         resolved_admin = resolved_admin or principal.is_admin
     try:

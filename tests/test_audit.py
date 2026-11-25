@@ -66,7 +66,7 @@ def _fake_request(
 ) -> Any:
     """Minimal stand-in for a Starlette Request on the audit code paths."""
     return SimpleNamespace(
-        state=principal_state(role=role, is_admin=is_admin),
+        state=principal_state(role=role, is_admin=is_admin, authenticated=True),
         headers=headers or {},
         client=SimpleNamespace(host=client_host) if client_host else None,
     )
