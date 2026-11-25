@@ -39,7 +39,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO, Literal, NoReturn, get_args
+from typing import Annotated, Any, BinaryIO, Literal, NoReturn
 from urllib.parse import quote as _urlquote
 from urllib.parse import urlparse
 
@@ -75,13 +75,13 @@ from rootcoz import (
     issue_matching,
     job_filters,
     server_status,
+    settings_registry,
     storage,
 )
 from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
     SESSION_REFUSAL_MARKER,
     RejectedUserKeyError,
-    _cached_catalog_provider_ids,
     _setup_usage_recorder,
     ai_username,
     bounded_model_catalog,
@@ -90,7 +90,6 @@ from rootcoz.ai_client import (
     format_ai_diagnostic,
     list_models,
     normalize_provider,
-    parse_ambient_auth_provider_ids,
     registered_provider_ids,
     supported_key_providers,
     update_model_catalog,
@@ -137,33 +136,20 @@ from rootcoz.comment_enrichment import (
     fetch_jira_ticket_status,
 )
 from rootcoz.config import (
-    DEFAULT_USER_ROLES,
-    JIRA_AUTH_MODES,
     RESULTS_RETENTION_DAYS_MAX,
     SQLITE_INT_MAX,
     Settings,
-    atlassian_cloud_id_error,
-    browser_provider_without_base_url,
-    csv_entries,
-    duplicate_additional_repo_names,
     get_settings,
     jira_availability,
-    jira_site_url_error,
     jira_unavailable_reason,
-    normalize_domain_list,
-    normalize_feedback_repo_url,
     normalize_jira_auth_mode,
-    parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
-    remove_from_db_settings_cache,
     safe_parse_repo_ref,
-    update_db_settings_cache,
 )
 from rootcoz.encryption import (
     SENSITIVE_KEYS,
     decrypt_sensitive_fields,
-    decrypt_value_or_none,
     encrypt_sensitive_fields,
     strip_sensitive_from_response,
 )
@@ -218,10 +204,8 @@ from rootcoz.exporters.base import (
     Exporter,
 )
 from rootcoz.exporters.datadog import (
-    DATADOG_SITES,
     DatadogExporter,
     _auth_headers,
-    normalize_datadog_site,
     validate_datadog_credentials,
 )
 from rootcoz.exporters.reportportal import (
@@ -416,12 +400,6 @@ from rootcoz.storage import (
 )
 from rootcoz.tag_facets import (
     FilterFacetsResponse,
-    TagFacet,
-    collect_option_tag_sets,
-    diff_tag_facets,
-    find_newly_introduced_unknown_tags,
-    parse_tag_facets,
-    serialize_tag_facets,
 )
 from rootcoz.temp_paths import (
     DeleteResult,
@@ -440,18 +418,15 @@ from rootcoz.token_tracking import (
 from rootcoz.transcripts import (
     transcript_path,
     transcript_summary,
-    write_sidecar_env_bridge,
 )
 from rootcoz.url_utils import (
     _parse_valid_url,
     is_safe_navigation_url,
     is_same_origin,
-    mask_url_credentials_in_text,
     mask_url_value,
     redact_urls_in_text,
     sanitize_http_href,
     strip_nonprintable,
-    strip_url_credentials,
     strip_url_userinfo,
 )
 from rootcoz.utils import (
@@ -467,734 +442,14 @@ from rootcoz.xml_enrichment import (
 # Module-level Depends singletons (B008: avoid function calls in defaults)
 _SETTINGS_DEP = Depends(get_settings)
 
-# --- Server Settings metadata ---
-
-# --- SSO settings metadata, derived from the provider registry -----------------
-#
-# A provider declares the Settings fields it reads (``settings_fields``) and which
-# of them hold a secret (``sensitive_settings``); these three views are computed
-# from that single declaration, so adding a provider cannot leave its secret
-# unmasked or its rows missing from Server Settings.
-
-
-def _sso_provider_settings() -> list[str]:
-    """The SSO settings fields of every registered provider, in offer order.
-
-    Returns:
-        Field names in the order the providers are offered, each listed once.
-    """
-    return [
-        name
-        for provider in auth_sso.PROVIDER_CLASSES
-        for name in provider.settings_fields
-    ]
-
-
-def _sso_sensitive_settings() -> frozenset[str]:
-    """The declared secret fields across all providers.
-
-    Returns:
-        Field names that must be masked in the settings API.
-    """
-    return frozenset(
-        name
-        for provider in auth_sso.PROVIDER_CLASSES
-        for name in provider.sensitive_settings
-    )
-
-
-#: Settings that decide :func:`rootcoz.config.browser_provider_without_base_url`.
-#: A save that touches none of them cannot leave a configured provider without a
-#: base URL, so the rule is only asked for a batch that does.
-_SSO_BROWSER_LOGIN_SETTINGS: frozenset[str] = frozenset(
-    {"public_base_url", *_sso_provider_settings()}
+# Process-lifecycle & hook helpers owned by settings_registry.py
+_apply_log_level_setting = settings_registry.apply_log_level_setting
+_audit_setting_details = settings_registry.audit_setting_details
+_deployment_authenticated_provider_ids = (
+    settings_registry.deployment_authenticated_provider_ids
 )
-
-
-def _sso_restart_required_settings() -> frozenset[str]:
-    """The declared restart-required fields across all providers.
-
-    Returns:
-        Field names whose change needs a restart (empty for every built-in
-        provider — they are runtime-configurable — but a future one can differ).
-    """
-    return frozenset(
-        name
-        for provider in auth_sso.PROVIDER_CLASSES
-        for name in provider.restart_required_settings
-    )
-
-
-# Fields that contain sensitive data (passwords, tokens, keys)
-_SENSITIVE_SETTINGS: frozenset[str] = frozenset(
-    {
-        "jenkins_password",
-        "jenkins_user",
-        "jira_api_token",
-        "jira_pat",
-        "jira_oauth_client_secret",
-        "jira_atst_token",
-        "jira_email",
-        "github_token",
-        "tests_repo_token",
-        "reportportal_api_token",
-        "datadog_api_key",
-        "datadog_app_key",
-        "admin_key",
-        "vapid_private_key",
-        "smtp_password",
-        "slack_webhook_url",
-    }
-    # Provider secrets are declared on the providers themselves.
-    | _sso_sensitive_settings()
-)
-
-# Server-only settings that should not be exposed to API clients.
-# Everything else is admin-settable via Server Settings (#347); these are
-# process/deployment bootstrap with no Settings field at all, plus
-# ADMIN_KEY — a Settings field, but a server-only bootstrap secret that
-# must never become settable or persistable at runtime (AGENTS.md), and
-# DB_PATH/DEBUG — needed before the settings store exists. Everything else,
-# ALLOWED_USERS included, is admin-editable in Server Settings: one console.
-_SERVER_ONLY_SETTINGS: frozenset[str] = frozenset(
-    {
-        "db_path",
-        "debug",
-        "admin_key",
-    }
-)
-
-# Settings whose value is derived from another setting at boot: the
-# entrypoint/startup derives SIDECAR_URL from SIDECAR_PORT and exports it
-# into the process env, so it shows as env-sourced — but persisting it
-# would pin an explicit URL that silently beats the port derivation, and a
-# later sidecar_port change would then break AI calls. Persist the source
-# setting instead.
-_DERIVED_SETTINGS: frozenset[str] = frozenset({"sidecar_url"})
-
-# Admin-management settings hidden from the any-role
-# /api/default-server-settings defaults payload: they configure the server,
-# not per-request analysis defaults, and several (allowed_users,
-# admin_wait_approve_msg) reveal information non-admins never saw before
-# #347 unblocked them for admin management.
-_DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
-    {
-        "default_user_role",
-        "secure_cookies",
-        "trust_proxy_headers",
-        "require_approval",
-        "admin_wait_approve_msg",
-        "allowed_users",
-        "sso_allowed_domains",
-        "log_level",
-        "metadata_rules_file",
-        "enable_github_issues",
-        "enable_reportportal",
-        "enable_datadog",
-        "enable_auto_review",
-        "auto_push_exporters",
-        "public_base_url",
-        "rp_push_classifications",
-        "rp_push_rootcoz_url",
-        "rp_push_tracker_links",
-        "rp_allow_unreviewed_push",
-        "dd_push_classifications",
-        "dd_push_rootcoz_url",
-        "dd_push_tracker_links",
-        "dd_allow_unreviewed_push",
-        "vapid_claim_email",
-        "vapid_public_key",
-        "smtp_host",
-        "smtp_port",
-        "smtp_user",
-        "smtp_password",
-        "smtp_from",
-        "slack_webhook_url",
-        "alert_email_to",
-        "enable_health_monitor",
-        "health_monitor_interval_seconds",
-        "health_alert_unhealthy_seconds",
-        "health_alert_error_rate_percent",
-        "health_alert_error_rate_seconds",
-        "health_alert_stuck_analysis_seconds",
-        "session_ttl_hours",
-        "sidecar_host",
-        "sidecar_port",
-        "sidecar_url",
-        "pi_sidecar_log_level",
-        "node_binary",
-        "pi_sidecar_transcripts_dir",
-        "pi_sidecar_transcripts_max_age_days",
-        "pi_sidecar_transcripts_max_size_mb",
-        # Operator detail, not a per-analysis default: it drives
-        # supported_key_providers() (which providers may ever touch a user
-        # API key) and is edited via env/CLI, never in Server Settings.
-        "ambient_auth_providers",
-    }
-)
-
-# Fields that require server restart to take effect
-_RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
-    {
-        "default_user_role",
-        "secure_cookies",
-        "trust_proxy_headers",
-        "metadata_rules_file",
-        "log_level",
-        "vapid_public_key",
-        "vapid_private_key",
-        "vapid_claim_email",
-        "sidecar_host",
-        "sidecar_port",
-        "sidecar_url",
-        "pi_sidecar_log_level",
-        "node_binary",
-        "pi_sidecar_transcripts_dir",
-        "pi_sidecar_transcripts_max_age_days",
-        "pi_sidecar_transcripts_max_size_mb",
-    }
-    | _sso_restart_required_settings()
-)
-
-# The application log file's budget and floor (#481). Runtime settings — a
-# save rebuilds the shared handler, no restart needed.
-_LOG_FILE_SETTINGS: frozenset[str] = frozenset(
-    {"log_max_bytes", "log_backup_count", "log_min_free_bytes"}
-)
-
-# Updating any of these invalidates the recorded jira_verified_method —
-# the record reflects the last successful test of the *previous* setup.
-_JIRA_VERIFIED_INVALIDATING_KEYS: frozenset[str] = frozenset(
-    {
-        "jira_auth_mode",
-        "jira_email",
-        "jira_api_token",
-        "jira_pat",
-        "jira_oauth_client_secret",
-        "jira_atst_token",
-        "atlassian_oauth_client_id",
-        "atlassian_oauth_cloud_id",
-        "jira_cloud_url",
-        "jira_server_url",
-        "jira_oauth_ssl_verify",
-        "jira_cloud_ssl_verify",
-        "jira_server_ssl_verify",
-    }
-)
-
-# Valid log levels shared by the PUT allowlist and the env-persist path
-# (#347): Settings.log_level itself is unconstrained, so both write paths
-# must enforce the same set.
-_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
-
-
-def _log_level_error(value: object) -> str | None:
-    """Validate a log level; return the error message, or None when valid.
-
-    Case-insensitive (an existing ``LOG_LEVEL=info`` env must keep working)
-    and always stored uppercase, so the saved value is one the picker offers.
-    """
-    if str(value).strip().upper() not in _VALID_LOG_LEVELS:
-        return (
-            "log_level: must be one of "
-            f"{', '.join(_VALID_LOG_LEVELS)} (case-insensitive)"
-        )
-    return None
-
-
-# Enumerated settings (#379): "One console" wants a picker in Server Settings,
-# so the API must describe the choices, not leave a free-text box.
-# ``options`` is a fixed set; ``options_source`` names the set the server only
-# knows at runtime (the UI fetches exporters/providers/users from their own
-# endpoints); ``multiple`` means comma-separated list semantics; and
-# ``allow_custom`` lets the admin type a value the server does not list —
-# an SSO user may legitimately not exist yet.
-_SETTING_CHOICES: dict[str, dict[str, Any]] = {
-    "default_user_role": {"options": list(DEFAULT_USER_ROLES)},
-    "jira_auth_mode": {"options": list(JIRA_AUTH_MODES)},
-    "log_level": {"options": list(_VALID_LOG_LEVELS)},
-    # Datadog publishes a finite site list; the picker offers it and the
-    # server canonicalises to the bare hostname. Custom stays allowed so a
-    # new region works before this list ships an update.
-    "datadog_site": {"options": list(DATADOG_SITES), "allow_custom": True},
-    "auto_push_exporters": {"options_source": "exporters", "multiple": True},
-    "ambient_auth_providers": {"options_source": "providers", "multiple": True},
-    "allowed_users": {
-        "options_source": "users",
-        "multiple": True,
-        "allow_custom": True,
-    },
-}
-
-#: The deployment-wide SSO policy settings that no single provider owns.
-#: Shared by ``_SETTINGS_CATEGORIES["Auth & Security"]`` (placement) and
-#: ``_sso_section`` (section metadata), so both derive from one constant.
-_SSO_GENERIC_SETTINGS = (
-    "sso_allowed_domains",
-    "sso_state_ttl_seconds",
-    "sso_device_code_ttl_seconds",
-    "sso_device_poll_interval_seconds",
-)
-
-# Category grouping for UI display. The tab list is purpose-based (#585):
-# a setting sits on the tab for the task it configures, never on a tab named
-# after a product behind a generic capability, and never on an abstraction
-# like "Sources". Server keeps exactly two settings.
-_SETTINGS_CATEGORIES: dict[str, list[str]] = {
-    # Tab order: deployment-level first, then the two CI sources adjacent and
-    # before what consumes their artifacts, then analysis/output, then the
-    # operator-facing categories.
-    "Server": [
-        # Exactly two: where the server is reachable, and where it pushes.
-        "public_base_url",
-        "auto_push_exporters",  # runtime toggle, no restart required
-    ],
-    "Jenkins": [
-        "jenkins_url",
-        "jenkins_user",
-        "jenkins_password",
-        "jenkins_ssl_verify",
-        "jenkins_timeout",
-        "jenkins_artifacts_max_size_mb",
-        # Jenkins-only polling, beside the settings it polls with.
-        "wait_for_completion",
-        "poll_interval_minutes",
-        "max_wait_minutes",
-    ],
-    "Prow": [
-        "prow_url",
-        "gcs_bucket",
-        "prow_artifacts_max_size_mb",
-        "prow_artifact_max_file_size_mb",
-        "prow_artifacts_max_objects",
-    ],
-    # The AI settings plus the analysis pipeline they run in.
-    "Analysis": [
-        "ai_provider",
-        "ai_model",
-        "ai_call_timeout",
-        "max_concurrent_ai_calls",
-        "peer_ai_configs",
-        "peer_analysis_max_rounds",
-        "enable_free_models",
-        "ambient_auth_providers",
-        "active_server_providers",
-        "record_transcripts",
-        "enable_auto_review",  # runtime toggle, no restart required
-        "max_concurrent_analyses",
-        "metadata_rules_file",
-        "tag_facets",
-        # The only setting BOTH sources read (jenkins_source, prow_source),
-        # so neither source may own it.
-        "get_job_artifacts",
-    ],
-    "Jira": [
-        "jira_auth_mode",
-        "enable_jira",
-        "enable_jira_issues",
-        "jira_project_key",
-        "jira_site_url",
-        "jira_max_results",
-        # basic
-        "jira_email",
-        "jira_api_token",
-        "jira_cloud_url",
-        "jira_cloud_ssl_verify",
-        # pat
-        "jira_pat",
-        "jira_server_url",
-        "jira_server_ssl_verify",
-        # oauth
-        "jira_oauth_client_secret",
-        "atlassian_oauth_client_id",
-        # oauth + atst
-        "atlassian_oauth_cloud_id",
-        "jira_oauth_ssl_verify",
-        # atst
-        "jira_atst_token",
-    ],
-    "GitHub issues": [
-        "github_token",
-        "feedback_repo_url",
-        "enable_github_issues",
-    ],
-    "Report Portal": [
-        "reportportal_url",
-        "reportportal_api_token",
-        "reportportal_project",
-        "reportportal_verify_ssl",
-        "enable_reportportal",
-        "rp_push_classifications",
-        "rp_push_rootcoz_url",
-        "rp_push_tracker_links",
-        "rp_allow_unreviewed_push",
-    ],
-    "Datadog": [
-        "datadog_api_key",
-        "datadog_app_key",
-        "datadog_site",
-        "datadog_service",
-        "datadog_env",
-        "enable_datadog",
-        "dd_push_classifications",
-        "dd_push_rootcoz_url",
-        "dd_push_tracker_links",
-        "dd_allow_unreviewed_push",
-    ],
-    "Auth & Security": [
-        "admin_key",
-        "secure_cookies",
-        "trust_proxy_headers",
-        "require_approval",
-        "admin_wait_approve_msg",
-        "allowed_users",
-        "default_user_role",
-        "session_ttl_hours",
-        "login_lockout_enabled",
-        "login_lockout_threshold",
-        # SSO policy + provider settings merged into Auth & Security (#197).
-        *_SSO_GENERIC_SETTINGS,
-        *_sso_provider_settings(),
-    ],
-    "Notifications": [
-        "smtp_host",
-        "smtp_port",
-        "smtp_user",
-        "smtp_password",
-        "smtp_from",
-        "alert_email_to",
-        "slack_webhook_url",
-        # The built-in health monitor (#464): server behaviour, runtime applied.
-        "enable_health_monitor",
-        "health_monitor_interval_seconds",
-        "health_alert_unhealthy_seconds",
-        "health_alert_error_rate_percent",
-        "health_alert_error_rate_seconds",
-        "health_alert_stuck_analysis_seconds",
-        # Browser push is a notification channel.
-        "vapid_public_key",
-        "vapid_private_key",
-        "vapid_claim_email",
-    ],
-    # Data lifecycle: everything that deletes rows or files.
-    "Data & retention": [
-        "audit_retention_days",
-        "audit_max_rows",
-        "audit_auth_failure_max_per_minute",
-        "results_retention_days",
-        "results_max_rows",
-        "pi_sidecar_transcripts_max_age_days",
-        "pi_sidecar_transcripts_max_size_mb",
-    ],
-    # What is cloned, and how big the workspace it lands in may get.
-    "Repos & workspace": [
-        "tests_repo_url",
-        "tests_repo_token",
-        "additional_repos",
-        "max_concurrent_repo_clones",
-        "chat_clone_depth",
-        "repo_clone_timeout_seconds",
-        "max_workspace_graph_mb",
-    ],
-    "Logging": [
-        "log_level",
-        "log_max_bytes",
-        "log_backup_count",
-        "log_min_free_bytes",
-        "pi_sidecar_log_level",
-    ],
-    # Restart-required: the sidecar starts once at container boot and reads
-    # these from the /data/pi-sidecar/env bridge the entrypoint sources.
-    "Advanced": [
-        "sidecar_host",
-        "sidecar_port",
-        "sidecar_url",
-        "node_binary",
-        "pi_sidecar_transcripts_dir",
-    ],
-}
-
-# Settings shown only for the selected Jira auth mode (#585): the page filters
-# on the controlling value so switching mode shows the new fields at once. The
-# rule travels with the setting; a mode -> field map in the page would drift.
-# Hiding never clears: an invisible field keeps its stored value untouched.
-_SETTING_VISIBLE_WHEN: dict[str, dict[str, Any]] = {
-    # basic (Jira Cloud email + API token)
-    "jira_email": {"key": "jira_auth_mode", "in": ["basic"]},
-    "jira_api_token": {"key": "jira_auth_mode", "in": ["basic"]},
-    "jira_cloud_url": {"key": "jira_auth_mode", "in": ["basic"]},
-    "jira_cloud_ssl_verify": {"key": "jira_auth_mode", "in": ["basic"]},
-    # pat (Jira Server/DC bearer PAT)
-    "jira_pat": {"key": "jira_auth_mode", "in": ["pat"]},
-    "jira_server_url": {"key": "jira_auth_mode", "in": ["pat"]},
-    "jira_server_ssl_verify": {"key": "jira_auth_mode", "in": ["pat"]},
-    # oauth (Atlassian OAuth 2.0 service-account credential)
-    "jira_oauth_client_secret": {"key": "jira_auth_mode", "in": ["oauth"]},
-    "atlassian_oauth_client_id": {"key": "jira_auth_mode", "in": ["oauth"]},
-    # Shared by oauth and atst: both go through the api.atlassian.com
-    # gateway, which the cloud ID locates and the TLS flag verifies.
-    "atlassian_oauth_cloud_id": {"key": "jira_auth_mode", "in": ["oauth", "atst"]},
-    "jira_oauth_ssl_verify": {"key": "jira_auth_mode", "in": ["oauth", "atst"]},
-    # atst (already-minted service-account scoped token)
-    "jira_atst_token": {"key": "jira_auth_mode", "in": ["atst"]},
-}
-
-# Reverse lookup: field -> category
-_FIELD_TO_CATEGORY: dict[str, str] = {}
-for _cat, _fields in _SETTINGS_CATEGORIES.items():
-    for _f in _fields:
-        _FIELD_TO_CATEGORY[_f] = _cat
-
-
-# Sub-section each SSO setting belongs to, derived from the provider registry: a
-# provider declares the fields it reads (`settings_fields`), so a provider the UI
-# has never heard of still lands in its own section. Nothing in the frontend may
-# enumerate providers — that is how a new one used to fall into the generic block.
-_FIELD_TO_SSO_PROVIDER: dict[str, tuple[str, str]] = {}
-for _provider_cls in auth_sso.PROVIDER_CLASSES:
-    _display = getattr(_provider_cls, "display_name", "") or _provider_cls.name
-    for _field in getattr(_provider_cls, "settings_fields", ()):
-        _FIELD_TO_SSO_PROVIDER[_field] = (_provider_cls.name, _display)
-
-
-def _sso_section(field_name: str) -> dict[str, Any]:
-    """The SSO sub-section a setting belongs to, or ``{}`` when it has none.
-
-    Generic SSO policy settings get a non-collapsible ``"sso"`` section;
-    per-provider settings get a collapsible section keyed by the provider name.
-    Everything outside SSO returns ``{}``, so ``section`` is absent rather than
-    null — the frontend renders an ungrouped row without a special case.
-    """
-    if field_name in _SSO_GENERIC_SETTINGS:
-        return {"section": "sso", "section_label": "SSO"}
-    pair = _FIELD_TO_SSO_PROVIDER.get(field_name)
-    if pair is None:
-        return {}
-    provider, label = pair
-    return {"section": provider, "section_label": label, "section_collapsible": True}
-
-
-# Server Settings rows show a human label next to the copyable machine key.
-# These read badly when humanised mechanically, so they are named explicitly.
-_SETTING_LABEL_OVERRIDES: dict[str, str] = {
-    "admin_key": "Admin API key",
-    "log_level": "Log level",
-    "log_max_bytes": "Log file size (bytes)",
-    "log_backup_count": "Rotated log files kept",
-    "log_min_free_bytes": "Log free-space floor (bytes)",
-    "ai_provider": "AI provider",
-    "ai_model": "AI model",
-    "ai_call_timeout": "AI call timeout",
-    "max_concurrent_ai_calls": "Max concurrent AI calls",
-    "max_concurrent_analyses": "Max concurrent analyses",
-    "session_ttl_hours": "Session lifetime (hours)",
-    "jira_atst_token": "Jira service account scoped token",
-    "jira_pat": "JIRA personal access token",
-    "atlassian_oauth_cloud_id": "Atlassian OAuth cloud ID",
-    "prow_url": "Prow Deck URL",
-    "gcs_bucket": "GCS bucket",
-    "tests_repo_url": "Tests repository URL",
-    "feedback_repo_url": "Feedback repository URL",
-    "allowed_users": "Allowed users (write allow-list)",
-    "default_user_role": "Default role for new users",
-    "trust_proxy_headers": "Trust proxy identity headers",
-    "secure_cookies": "Secure cookies",
-    "require_approval": "Require admin approval",
-    "admin_wait_approve_msg": "Approval wait message",
-    "enable_free_models": "Enable free AI models",
-    "max_workspace_graph_mb": "Workspace graph budget (MB)",
-    "login_lockout_enabled": "Enable login lockout",
-    "login_lockout_threshold": "Failed logins before lockout",
-    "audit_auth_failure_max_per_minute": "Audit rows kept per minute",
-    "tag_facets": "Tag facets",
-}
-
-# Tokens the humaniser keeps uppercase — "Ai model" is not an English label.
-_LABEL_ACRONYMS: frozenset[str] = frozenset(
-    {
-        "AI",
-        "API",
-        "URL",
-        "URI",
-        "ID",
-        "SSO",
-        "TLS",
-        "SSL",
-        "SMTP",
-        "DNS",
-        "JSON",
-        "CSV",
-        "XML",
-        "YAML",
-        "HTTP",
-        "JIRA",
-        "GITHUB",
-        "GIT",
-        "CI",
-        "DB",
-        "GCS",
-        "AWS",
-        "GCP",
-        "LLM",
-        "MCP",
-        "PR",
-        "RP",
-        "DD",
-        "RBAC",
-        "DSN",
-        "VAPID",
-        "OIDC",
-        "SAML",
-        "TTL",
-        "CPU",
-        "GPU",
-        "HTML",
-        "PDF",
-    }
-)
-
-# Brand casing for acronym words that are not written all-caps.
-_LABEL_PROPER_CASE: dict[str, str] = {
-    "GITHUB": "GitHub",
-    "REPORTPORTAL": "ReportPortal",
-    "ROOTCOZ": "RootCoz",
-    "DATADOG": "Datadog",
-}
-
-# A trailing token that is a unit renders as a parenthetical suffix instead of
-# a word: audit_retention_days → "Audit retention (days)".
-_LABEL_UNITS: dict[str, str] = {
-    "DAYS": "days",
-    "HOURS": "hours",
-    "MINUTES": "minutes",
-    "SECONDS": "seconds",
-    "BYTES": "bytes",
-    "PERCENT": "percent",
-    "MB": "MB",
-}
-
-
-def _label_word(word: str) -> str:
-    """Render one key token: an acronym keeps its casing, the rest is lowercased."""
-    upper = word.upper()
-    if upper in _LABEL_PROPER_CASE:
-        return _LABEL_PROPER_CASE[upper]
-    return upper if upper in _LABEL_ACRONYMS else word.lower()
-
-
-def _humanize_setting_key(key: str) -> str:
-    """Mechanical label for a setting key: ``audit_max_rows`` → ``Audit max rows``."""
-    words = [word for word in key.split("_") if word]
-    unit = ""
-    if len(words) > 1 and words[-1].upper() in _LABEL_UNITS:
-        unit = f" ({_LABEL_UNITS[words.pop().upper()]})"
-    labels = [_label_word(word) for word in words]
-    if labels[0] == words[0].lower():  # not an acronym/brand → sentence case
-        labels[0] = labels[0].capitalize()
-    return " ".join(labels) + unit
-
-
-def _setting_label(field_name: str) -> str:
-    """Human label for a Settings field — an override, else the humanised key."""
-    return _SETTING_LABEL_OVERRIDES.get(field_name) or _humanize_setting_key(field_name)
-
-
-def _get_settings_metadata() -> list[dict[str, Any]]:
-    """Build metadata for all Settings fields with current values and sources."""
-    settings = get_settings()
-
-    result = []
-    for field_name, field_info in Settings.model_fields.items():
-        # Get the current value
-        value = getattr(settings, field_name)
-
-        # Handle SecretStr
-        if isinstance(value, SecretStr):
-            value = value.get_secret_value() if value else ""
-
-        # Convert to string for display
-        if value is None:
-            display_value = ""
-        elif isinstance(value, bool):
-            display_value = str(value).lower()
-        else:
-            display_value = str(value)
-
-        # Determine the field type
-        annotation = field_info.annotation
-        field_type = "string"
-        if annotation is bool or (
-            hasattr(annotation, "__args__")
-            and bool in getattr(annotation, "__args__", ())
-        ):
-            field_type = "boolean"
-        elif annotation is int or (
-            hasattr(annotation, "__args__")
-            and int in getattr(annotation, "__args__", ())
-        ):
-            field_type = "integer"
-
-        # Get description
-        description = ""
-        if field_info.description:
-            description = field_info.description
-
-        # Get default
-        default = field_info.default
-        if default is None:
-            default_str = ""
-        elif isinstance(default, bool):
-            default_str = str(default).lower()
-        else:
-            default_str = str(default) if default != "" else ""
-
-        is_sensitive = field_name in _SENSITIVE_SETTINGS
-        choices = _SETTING_CHOICES.get(field_name, {})
-        # Whether a value exists at all (#379 E2E-J09): the UI cannot tell an
-        # empty secret from a stored one by its masked value, so this flag
-        # comes from the value itself — a boolean, never a hint of its content.
-        is_set = value is not None and str(value).strip() != ""
-
-        entry: dict[str, Any] = {
-            "key": field_name,
-            "label": _setting_label(field_name),
-            # jira_auth_mode is DB-only (Server Settings) — no env var
-            "env_var": "" if field_name == "jira_auth_mode" else field_name.upper(),
-            "value": display_value,
-            "is_set": is_set,
-            "default": default_str,
-            "description": description,
-            "type": field_type,
-            "category": _FIELD_TO_CATEGORY.get(field_name, "Other"),
-            **_sso_section(field_name),
-            "sensitive": is_sensitive,
-            "restart_required": field_name in _RESTART_REQUIRED_SETTINGS,
-            "source": "default",  # Will be overridden by caller
-            # Enumerated-setting contract (#379): every item carries the
-            # four keys so the UI renders a picker without special cases.
-            "options": choices.get("options"),
-            "options_source": choices.get("options_source"),
-            "multiple": bool(choices.get("multiple", False)),
-            "allow_custom": bool(choices.get("allow_custom", False)),
-            # Persistability contract (#347): server-only settings are
-            # env bootstrap the persist/reset/PUT paths always reject,
-            # and derived settings must not be pinned (see
-            # _DERIVED_SETTINGS) — the UI hides "Save to DB" for both.
-            "server_only": field_name in _SERVER_ONLY_SETTINGS,
-            "derived": field_name in _DERIVED_SETTINGS,
-            "persistable": (
-                field_name not in _SERVER_ONLY_SETTINGS
-                and field_name not in _DERIVED_SETTINGS
-            ),
-        }
-        # Conditional visibility travels beside the setting; absent — never
-        # null — for the settings that are always shown.
-        if visible_when := _SETTING_VISIBLE_WHEN.get(field_name):
-            entry["visible_when"] = visible_when
-        result.append(entry)
-
-    return result
-
+_derive_sidecar_url_from_port = settings_registry.derive_sidecar_url_from_port
+_live_provider_spellings = settings_registry.live_provider_spellings
 
 # --- SSE broadcast for navbar badges ---
 _active_count_listeners: set[asyncio.Event] = set()
@@ -1987,20 +1242,6 @@ def _redact_details(details: dict[str, Any] | None) -> dict[str, Any]:
         )
         for name, value in (details or {}).items()
         if name in _AUDIT_SAFE_DETAIL_KEYS or not is_sensitive_key(name)
-    }
-
-
-def _audit_setting_details(key: str) -> dict[str, Any]:
-    """Audit details for a settings event: the key name, never its value.
-
-    A single-key event always carries ``changed``; a sensitive key is also
-    flagged ``redacted`` so a reader knows a value was written without the
-    audit trail naming or carrying it.
-    """
-    return {
-        "key": key,
-        "changed": True,
-        **({"redacted": True} if key in _SENSITIVE_SETTINGS else {}),
     }
 
 
@@ -4208,135 +3449,23 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> N
         logger.exception("Failed to resume waiting jobs after startup")
 
 
-# Settings whose DB overrides reach the sidecar through the
-# /data/pi-sidecar/env bridge the entrypoint sources at container start
-# (#347). The sidecar starts once per boot, so these are restart-required.
-_SIDECAR_BRIDGE_SETTINGS: tuple[str, ...] = (
-    "sidecar_host",
-    "sidecar_port",
-    "sidecar_url",
-    "pi_sidecar_log_level",
-    "node_binary",
-    "pi_sidecar_transcripts_dir",
-    "pi_sidecar_transcripts_max_age_days",
-    "pi_sidecar_transcripts_max_size_mb",
-)
-
-
-def _is_loopback_host(host: str) -> bool:
-    """True for loopback bind addresses (127.0.0.0/8, ::1, localhost)."""
-    if host.lower() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def _sidecar_host_supports_loopback_probe(host: str) -> bool:
-    """True when a sidecar bind host keeps the loopback health probe working.
-
-    The container entrypoint probes ``http://127.0.0.1:$SIDECAR_PORT`` and
-    aborts startup when it fails, and the probe result persists under
-    ``/data`` — a bind address that can never answer on 127.0.0.1 would
-    brick every subsequent restart before the UI could undo it. The probe
-    is a fixed IPv4 call to 127.0.0.1, so only the deployment default
-    (empty), ``0.0.0.0`` (answers on 127.0.0.1 too), and ``127.0.0.1``
-    itself are known-safe (#347 r4): every other spelling — ``::1``,
-    ``127.0.0.2``, ``localhost``, ``::`` — can bind an address the probe
-    never reaches.
-    """
-    return host.strip() in ("", "0.0.0.0", "127.0.0.1")
-
-
-def _derive_sidecar_url_from_port() -> None:
-    """Point the sidecar client at SIDECAR_PORT when no URL is configured.
-
-    The Python client defaults to ``127.0.0.1:9100`` regardless of
-    SIDECAR_PORT, so a port override would change the listener but not
-    the client (#347). An explicitly configured SIDECAR_URL always wins;
-    the container entrypoint applies the same derivation at boot.
-    """
-    if os.environ.get("SIDECAR_URL"):
-        return
-    port = (os.environ.get("SIDECAR_PORT") or "").strip()
-    if not port or port == "9100":
-        return
-    os.environ["SIDECAR_URL"] = f"http://127.0.0.1:{port}"
-    logger.info("Derived SIDECAR_URL=http://127.0.0.1:%s from SIDECAR_PORT", port)
-
-
-def _write_sidecar_env_bridge() -> None:
-    """Write the full sidecar env bridge from the current DB overrides.
-
-    Every bridged var is written in one pass: a var with no DB override is
-    left unassigned so the deployment environment governs. Callers must
-    always write the full set — a partial write would drop the others.
-    """
-    from rootcoz.config import db_setting_is_set, get_db_setting
-
-    values: dict[str, str | None] = {"RECORD_TRANSCRIPTS": None}
-    if db_setting_is_set("record_transcripts"):
-        values["RECORD_TRANSCRIPTS"] = (
-            "true" if get_settings().record_transcripts else "false"
-        )
-    for key in _SIDECAR_BRIDGE_SETTINGS:
-        values[key.upper()] = get_db_setting(key) if db_setting_is_set(key) else None
-    write_sidecar_env_bridge(values)
-
-
-def _apply_log_level_setting() -> None:
-    """Apply a DB-configured log_level to the rootcoz logger tree (restart-required).
-
-    Every rootcoz module logger is created NOTSET and inherits from the
-    ``rootcoz`` parent logger (see rootcoz.get_child_logger), so setting
-    the parent level covers the whole tree — including modules imported
-    lazily after this ran, which the old walk-existing-loggers approach
-    missed.
-    """
-    from rootcoz.config import db_setting_is_set, get_settings
-
-    if not db_setting_is_set("log_level"):
-        return
-    name = get_settings().log_level.strip().upper()
-    if not name:
-        # Explicit empty override (#352) — nothing to apply; the boot env
-        # level (or the logger default) governs.
-        return
-    level = getattr(logging, name, None)
-    if not isinstance(level, int):
-        logger.warning("Ignoring invalid log_level setting: %r", name)
-        return
-    logging.getLogger("rootcoz").setLevel(level)
-    logger.info("Applied DB log_level=%s to the rootcoz logger tree", name)
+def _settings_hooks() -> settings_registry.SettingsRuntimeHooks:
+    """Process-local callbacks passed into the settings registry lifecycle."""
+    return settings_registry.SettingsRuntimeHooks(
+        apply_log_file=_apply_log_file_settings,
+        sync_transcript_recording=sidecar_transcripts.sync_transcript_recording,
+        broadcast_change=_broadcast_settings_change,
+        exporter_names=lambda: list(_EXPORTER_CLASSES),
+        live_provider_spellings=_live_provider_spellings,
+        deployment_authenticated_providers=_deployment_authenticated_provider_ids,
+    )
 
 
 async def _apply_transcript_recording_setting() -> bool:
-    """Persist + live-apply the record_transcripts DB state.
-
-    An explicit DB override is bridged to the entrypoint AND pushed to the
-    running sidecar through its runtime toggle (pi-sidecar >= 4.14.0 — no
-    restart needed). Without an override nothing is assigned and the
-    deployment environment governs, both on disk and at runtime.
-
-    The bridge write carries every sidecar setting (#347), not just
-    RECORD_TRANSCRIPTS — the other sidecar vars have no runtime toggle and
-    apply at the next restart.
-
-    Returns True when the runtime toggle reached the sidecar (or had nothing
-    to push); False when the sidecar was unreachable/rejected it — callers
-    surface that so admins know the change applies only after a restart or
-    a later successful sync.
-    """
-    from rootcoz.config import db_setting_is_set
-
-    enabled = (
-        get_settings().record_transcripts
-        if db_setting_is_set("record_transcripts")
-        else None
+    """Persist + live-apply the record_transcripts DB state and sidecar bridge."""
+    return await settings_registry.apply_transcript_recording_setting(
+        hooks=_settings_hooks()
     )
-    _write_sidecar_env_bridge()
-    return await sidecar_transcripts.sync_transcript_recording(enabled)
 
 
 @asynccontextmanager
@@ -17262,100 +16391,10 @@ def _strip_url_userinfo(url: str) -> str:
 async def get_default_server_settings(
     settings: Settings = _SETTINGS_DEP,
 ) -> dict[str, Any]:
-    """Return all non-sensitive server settings.
-
-    Authenticated (any role). Iterates all Settings model fields and
-    excludes sensitive fields (passwords, tokens, credentials, SecretStr).
-    Structured string fields (peer_ai_configs, additional_repos,
-    tests_repo_url) are parsed into their rich representations.
-    """
-    from pydantic import SecretStr as _SecretStr
-
-    result: dict[str, Any] = {}
-    for field_name in type(settings).model_fields:
-        if field_name in _SENSITIVE_SETTINGS or field_name in _DEFAULTS_HIDDEN_SETTINGS:
-            continue
-        value = getattr(settings, field_name)
-        # Skip SecretStr fields (defensive — all should be in _SENSITIVE_SETTINGS)
-        if isinstance(value, _SecretStr):
-            continue
-        result[field_name] = value
-
-    # Resolve AI provider/model using the shared resolution helper
-    ai_provider, ai_model = _resolve_ai_provider_model(settings=settings)
-    result["ai_provider"] = ai_provider
-    result["ai_model"] = ai_model
-
-    # Parse peer_ai_configs string → list of dicts
-    if settings.peer_ai_configs:
-        try:
-            result["peer_ai_configs"] = parse_peer_configs(settings.peer_ai_configs)
-        except ValueError:
-            logger.warning(
-                "Failed to parse PEER_AI_CONFIGS for default-server-settings"
-            )
-            result["peer_ai_configs"] = []
-    else:
-        result["peer_ai_configs"] = []
-
-    # Parse additional_repos string → list of dicts (tokens + userinfo stripped)
-    if settings.additional_repos:
-        try:
-            parsed = parse_additional_repos(settings.additional_repos)
-            result["additional_repos"] = [
-                {
-                    **{k: v for k, v in repo.items() if k != "token"},
-                    "url": _strip_url_userinfo(repo["url"]),
-                }
-                for repo in parsed
-            ]
-        except ValueError:
-            logger.warning(
-                "Failed to parse ADDITIONAL_REPOS for default-server-settings"
-            )
-            result["additional_repos"] = []
-    else:
-        result["additional_repos"] = []
-
-    # Split tests_repo_url into URL and ref, strip userinfo
-    tests_url, tests_ref = safe_parse_repo_ref(settings.tests_repo_url or "")
-    result["tests_repo_url"] = _strip_url_userinfo(tests_url)
-    result["tests_repo_ref"] = tests_ref
-    feedback_url, _ = parse_repo_ref(settings.feedback_repo_url or "")
-    result["feedback_repo_url"] = _strip_url_userinfo(feedback_url)
-
-    # Coerce None → "" only for optional string fields; keep None for booleans/others
-    _OPTIONAL_STRING_FIELDS = frozenset(
-        {
-            "tests_repo_url",
-            "jira_cloud_url",
-            "jira_server_url",
-            "jira_project_key",
-            "jenkins_url",
-            "prow_url",
-            "gcs_bucket",
-            "reportportal_url",
-            "reportportal_project",
-        }
+    """Return all non-sensitive server settings."""
+    return settings_registry.get_default_server_settings_payload(
+        settings, _resolve_ai_provider_model
     )
-    for key, value in result.items():
-        if value is None and key in _OPTIONAL_STRING_FIELDS:
-            result[key] = ""
-
-    # Add computed jira_enabled for UI display (safe: no secrets)
-    result["jira_enabled"] = settings.jira_enabled
-
-    # Strip userinfo from all URL-like values
-    for key, value in result.items():
-        if isinstance(value, str) and "://" in value:
-            result[key] = _strip_url_userinfo(value)
-
-    # Belt-and-suspenders: pop any sensitive keys that might have slipped through
-    for key in SENSITIVE_KEYS:
-        result.pop(key, None)
-    # strip_sensitive_from_response is a no-op for this dict shape (no request_params key),
-    # but required by compliance rule 805017 for all API response paths.
-    return strip_sensitive_from_response(result)
 
 
 class JiraProjectsRequest(BaseModel):
@@ -25106,745 +24145,9 @@ async def get_admin_settings(
 ) -> JSONResponse:
     """Get all server settings with metadata, current values, and sources."""
     _require_admin(request)
-    metadata = _get_settings_metadata()
-
-    # The admin picker for server providers lists what holds a server
-    # credential — the same derivation the Server providers card below reads
-    # (#586). The sidecar's catalog is not the source: a provider keyed from
-    # the DB has no catalog entry, so the picker used to come up empty.
-    for item in metadata:
-        if item["key"] == "active_server_providers":
-            from rootcoz.ai_client import server_provider_options
-
-            item["options"] = await server_provider_options()
-
-    # Internal jira_verified_method row on the jira_auth_mode item (last
-    # method whose test SUCCEEDED, "" when never verified; recorded only
-    # for successful tests of a SELECTED method; not user-editable).
-    db_overrides = await storage.get_server_settings()
-    verified_method = db_overrides.get("jira_verified_method", {}).get("value", "")
-    for item in metadata:
-        if item["key"] == "jira_auth_mode":
-            item["jira_verified_method"] = verified_method
-
-    # Load the dotenv source once for the source calculation below.
-    dotenv = _settings_dotenv_values()
-
-    # Update source and value for DB-overridden settings
-    for item in metadata:
-        key = item["key"]
-        if key in db_overrides:
-            override = db_overrides[key]
-            item["source"] = "db"
-            db_value = override["value"]
-            # Decrypt sensitive values stored encrypted in DB
-            if item["sensitive"] and db_value:
-                try:
-                    from rootcoz.encryption import decrypt_value
-
-                    db_value = decrypt_value(db_value)
-                except (RuntimeError, TypeError, ValueError, UnicodeError) as exc:
-                    logger.debug(
-                        "Failed to decrypt settings value for %s: %s", key, exc
-                    )
-            item["value"] = _normalize_setting_override(key, db_value)
-            item["updated_by"] = override.get("updated_by", "")
-            item["updated_at"] = override.get("updated_at", "")
-            # Flag if an OS env var also exists (from configmap/container),
-            # distinct from DB-injected env vars loaded at startup.
-            # Since DB values are NOT written to os.environ, checking
-            # os.environ directly tells us if an OS env var also exists.
-            env_val = os.environ.get(item["env_var"])
-            if env_val is not None:
-                item["has_env_var"] = True
-                if not item["sensitive"]:
-                    # Strip userinfo from URL-like values for safety
-                    item["env_var_value"] = (
-                        _strip_url_userinfo(env_val) if "://" in env_val else env_val
-                    )
-        elif _settings_env_value(key, dotenv) is not None:
-            # Env-sourced means resolvable from the same sources Settings
-            # merges (dotenv included) — those values are persistable, so
-            # the UI must offer Save to DB for them, not label them default.
-            item["source"] = "env"
-        else:
-            item["source"] = "default"
-
-    # Mask sensitive values — only reveal the specifically requested key
-    reveal_all = reveal_key == "__all__"
-    for item in metadata:
-        if (
-            item["sensitive"]
-            and item["value"]
-            and not reveal_all
-            and item["key"] != reveal_key
-        ):
-            item["value"] = "••••••••"
-
-    return JSONResponse(content=metadata)
-
-
-def _settings_dotenv_values() -> dict[str, str]:
-    """The dotenv values Settings merges (DotEnvSettingsSource), by field.
-
-    Unreadable dotenv sources resolve to an empty mapping — Settings would
-    merge nothing from them either.
-    """
-    from pydantic_settings import DotEnvSettingsSource
-
-    try:
-        return DotEnvSettingsSource(
-            Settings,
-            env_file=Settings.model_config.get("env_file"),
-            env_file_encoding=Settings.model_config.get("env_file_encoding"),
-        )()
-    except OSError:
-        logger.debug("Unable to read dotenv sources", exc_info=True)
-        return {}
-
-
-def _setting_is_int(key: str) -> bool:
-    """True when the Settings field behind ``key`` is integer-typed."""
-    annotation = Settings.model_fields[key].annotation
-    return annotation is int or (
-        hasattr(annotation, "__args__") and int in getattr(annotation, "__args__", ())
+    return JSONResponse(
+        content=await settings_registry.list_admin_settings(reveal_key=reveal_key)
     )
-
-
-def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str | None:
-    """Resolve a setting's environment value the same way Settings does.
-
-    os.environ first, then the configured dotenv file — the sources
-    pydantic-settings merges for ``Settings``. Pass ``dotenv`` to reuse an
-    already-loaded mapping (e.g. once per request); ``None`` loads it on
-    demand. DB overrides are deliberately excluded: when the effective
-    value only exists in the DB store there is no env value to persist, and
-    the caller must report no-env-value rather than re-persisting the DB's
-    own value.
-
-    A blank value on an integer field reads as no env value: ``Settings``
-    coerces it to the field default (the sidecar does the same with
-    ``Number("")``), so reporting it as env-sourced would offer a
-    ``Save to DB`` the persist endpoint must refuse.
-    """
-    env_var = key.upper()
-    if key == "jira_auth_mode":
-        # DB-only setting (#346): no env var ever maps to it — a stray
-        # JIRA_AUTH_MODE in the environment is ignored, matching the
-        # pydantic-settings source that drops it.
-        return None
-    env_value: str | None
-    if os.environ.get(env_var) is not None:
-        env_value = os.environ[env_var]
-    else:
-        env_value = (dotenv if dotenv is not None else _settings_dotenv_values()).get(
-            key
-        )
-    if env_value == "" and _setting_is_int(key):
-        return None
-    return env_value
-
-
-async def _live_provider_spellings() -> dict[str, str]:
-    """Lowercased provider ID → the spelling the deployment registers.
-
-    Union of the current model catalog and the sidecar's key-capable
-    providers. An empty result means both sources are unavailable — a cold
-    catalog plus no discovery answer — and must never be read as "no provider
-    exists". The first spelling seen wins for a provider known to both.
-    """
-    spellings = {
-        provider.lower(): provider for provider in _cached_catalog_provider_ids()
-    }
-    for provider in await supported_key_providers():
-        spellings.setdefault(provider.lower(), provider)
-    return spellings
-
-
-def _known_providers_hint(known: set[str]) -> str:
-    """Readable ``known: a, b, ...`` listing for a rejection message."""
-    return ", ".join(sorted(known))
-
-
-async def _deployment_authenticated_provider_ids(
-    ids: list[str],
-) -> frozenset[str] | None:
-    """Normalized provider IDs the deployment itself can authenticate.
-
-    An ambient provider never consumes a per-session key, so something else
-    must hold its credential. Two sources answer that, both the runtime's:
-
-    1. :func:`deployment_provider_credentials` — the same lookup sessions and
-       key-scoped listings use: an ambient ``<PROVIDER>_API_KEY`` variable or
-       a manifest ``$VAR``/``${VAR}`` ``apiKey``.
-    2. The sidecar's own auth status for the provider
-       (``authStatus.configured``), which is how a provider authenticated
-       from the deployment environment — e.g. ADC or OAuth —
-       reports itself. A provider the sidecar does not register answers
-       ``404`` and stays unauthenticated.
-
-    ``None`` means the deployment could not be inspected — cold catalog,
-    unreadable manifest, unreachable sidecar, an answer without
-    ``authStatus`` — and must never be read as "no provider is authenticated".
-    """
-    from pi_sidecar_client import get_sidecar_client
-
-    from rootcoz.ai_client import deployment_provider_credentials
-
-    credentials = deployment_provider_credentials()
-    if credentials is None:
-        return None
-    authenticated = {normalize_provider(name) for name in credentials}
-    for provider in ids:
-        if normalize_provider(provider) in authenticated:
-            continue
-        try:
-            status = await get_sidecar_client().get_model_provider_status(provider)
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                # Not registered on the sidecar: nothing authenticates it.
-                continue
-            logger.warning(
-                "Provider status unavailable for provider=%s (HTTP %d) — "
-                "accepting AMBIENT_AUTH_PROVIDERS without validating it",
-                provider,
-                exc.response.status_code,
-            )
-            return None
-        except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
-            logger.warning(
-                "Provider status unavailable for provider=%s — accepting "
-                "AMBIENT_AUTH_PROVIDERS without validating it",
-                provider,
-            )
-            return None
-        auth_status = status.get("authStatus") if isinstance(status, dict) else None
-        if not isinstance(auth_status, dict) or "configured" not in auth_status:
-            logger.warning(
-                "Sidecar reported no auth status for provider=%s — accepting "
-                "AMBIENT_AUTH_PROVIDERS without validating it",
-                provider,
-            )
-            return None
-        if auth_status["configured"] is True:
-            authenticated.add(normalize_provider(provider))
-    return frozenset(authenticated)
-
-
-async def _normalize_ambient_auth_providers(value: str) -> tuple[list[str], str | None]:
-    """Canonical AMBIENT_AUTH_PROVIDERS IDs, plus a rejection when unbacked.
-
-    Shared by every write path (PUT, settings import, persist-from-env): the
-    returned IDs are stored, and an accepted ID is replaced with the spelling
-    the deployment registers so the DB holds the sidecar's id — a caller typing
-    ``Google-Vertex-Claude`` must not persist a spelling the consumer's
-    exclusion cannot match. An empty known set means a cold catalog *and* no
-    key-capable answer from discovery — far more likely a transient sidecar
-    gap than a real "no providers exist" — so the value is accepted unchanged
-    rather than failing a save, as is a value whose deployment credentials
-    cannot be resolved right now (#379 E2E-J08).
-    """
-    ids = parse_ambient_auth_provider_ids(value)
-    if not ids:
-        # Nothing declared ambient: no catalog or credential lookup is needed.
-        return ids, None
-    spellings = await _live_provider_spellings()
-    if not spellings:
-        logger.warning(
-            "No provider catalog — accepting AMBIENT_AUTH_PROVIDERS=%r "
-            "without validating the provider IDs",
-            value,
-        )
-        return ids, None
-    # Currently stored ambient IDs stay valid: ``supported_key_providers()``
-    # excludes them from its own answer, so an unchanged re-save must not fail.
-    known = set(spellings) | {
-        provider.lower()
-        for provider in parse_ambient_auth_provider_ids(
-            get_settings().ambient_auth_providers or ""
-        )
-    }
-    if unknown := [provider for provider in ids if provider.lower() not in known]:
-        return ids, (
-            "Unknown provider id(s) in AMBIENT_AUTH_PROVIDERS: "
-            f"{', '.join(unknown)} (known: {_known_providers_hint(known)})"
-        )
-    authenticated = await _deployment_authenticated_provider_ids(ids)
-    if authenticated is None:
-        logger.warning(
-            "Deployment credentials unknown — accepting "
-            "AMBIENT_AUTH_PROVIDERS=%r without checking that the deployment "
-            "authenticates its providers",
-            value,
-        )
-    elif unbacked := [
-        provider
-        for provider in ids
-        if normalize_provider(provider) not in authenticated
-    ]:
-        return ids, (
-            "AMBIENT_AUTH_PROVIDERS: no deployment credential for "
-            f"{', '.join(unbacked)} — a provider declared ambient must be "
-            "one the deployment authenticates itself (an ambient "
-            '<PROVIDER>_API_KEY variable, a manifest "$VAR" apiKey, or a '
-            "credential the sidecar reports as configured)"
-        )
-    return [spellings.get(provider.lower(), provider) for provider in ids], None
-
-
-def _exporter_plugin_names() -> list[str]:
-    """Machine names of the registered exporter plugins.
-
-    Read through the registry (not ``_available_exporters``) so a configured
-    but currently-disabled plugin is still a valid value: an admin may save
-    the target before enabling its credentials. Empty means no plugin has
-    been loaded yet, which must never be read as "no exporter exists".
-    """
-    return list(_EXPORTER_CLASSES)
-
-
-def _normalize_auto_push_exporters(value: str) -> tuple[list[str], str | None]:
-    """Canonical exporter plugin names, plus a rejection when unknown.
-
-    Case-insensitive against the plugin registry, and an accepted name is
-    replaced with the registry's spelling — the auto-push consumer matches
-    plugin names exactly, so a differently-cased spelling would be silently
-    dropped. Fails open on an empty registry (cold start): an admin must not
-    be blocked from saving because no plugin loaded yet.
-    """
-    names = [part.strip() for part in value.split(",") if part.strip()]
-    spellings = {name.lower(): name for name in _exporter_plugin_names()}
-    if not spellings:
-        logger.warning(
-            "Exporter registry is empty — accepting auto_push_exporters=%r "
-            "without validating the plugin names",
-            value,
-        )
-        return names, None
-    if unknown := [name for name in names if name.lower() not in spellings]:
-        return names, (
-            "auto_push_exporters: unknown exporter plugin(s): "
-            f"{', '.join(unknown)} "
-            f"(known: {', '.join(sorted(spellings.values()))})"
-        )
-    return [spellings[name.lower()] for name in names], None
-
-
-def _normalize_allowed_users(value: str) -> tuple[list[str], str | None]:
-    """Comma-separated usernames, stripped and in order, plus a shape error.
-
-    Only the shape is validated: a username the store does not know is
-    legitimate (SSO and trusted-proxy deployments provision the account on
-    first login), so membership is never checked here.
-    """
-    names = csv_entries(value, lower=False)
-    if any(any(ch.isspace() for ch in name) for name in names):
-        return names, (
-            "allowed_users: must be comma-separated usernames — "
-            "one username per entry, no spaces inside a name"
-        )
-    return names, None
-
-
-async def _normalize_enumerated_value(key: str, value: str) -> tuple[str, str | None]:
-    """Canonical value for an enumerated setting, plus a rejection when invalid.
-
-    Shared by every write path (PUT, settings import, persist-from-env) so the
-    stored value is always one the picker offers and no path can save a value
-    the server would then silently ignore. Keys without an enumerated rule
-    (the pydantic-validated ones) pass through untouched.
-    """
-    if key == "log_level":
-        return str(value).strip().upper(), _log_level_error(value)
-    if key == "auto_push_exporters":
-        names, error = _normalize_auto_push_exporters(value)
-        return ", ".join(names), error
-    if key == "allowed_users":
-        names, error = _normalize_allowed_users(value)
-        return ", ".join(names), error
-    if key == "sso_allowed_domains":
-        try:
-            domains = sorted(normalize_domain_list(value))
-        except ValueError as exc:
-            return value, f"sso_allowed_domains: {exc}"
-        return ", ".join(domains), None
-    if key == "ambient_auth_providers":
-        ids, error = await _normalize_ambient_auth_providers(value)
-        return ", ".join(ids), error
-    if key == "datadog_site":
-        # Store the bare hostname the exporter builds its URLs from, so a
-        # pasted "https://datadoghq.eu/" cannot leave two spellings of one
-        # site in the database. Anything that is not a hostname is refused
-        # with the same hostname hint the exporter raises at push time.
-        site = normalize_datadog_site(str(value))
-        if not site:
-            return value, (
-                f"datadog_site: {value!r} is not a Datadog site hostname — "
-                f"pick one of {', '.join(DATADOG_SITES)}, or type the bare "
-                "hostname of your regional site"
-            )
-        return site, None
-    return value, None
-
-
-# Serializes validate+write+audit operations on ``tag_facets`` so concurrent
-# admin saves cannot observe a stale vanished-tag baseline and reintroduce
-# removed dead-tag options.
-_TAG_FACETS_WRITE_LOCK = asyncio.Lock()
-
-
-def _persisted_tag_facet_option_sets() -> list[frozenset[str]]:
-    """Return option tag sets from the persisted DB ``tag_facets`` override only.
-
-    Never reads unvalidated env defaults so env-sourced unknown tags cannot
-    exempt themselves from live-label validation on PUT or persist.
-    """
-    from rootcoz.config import get_db_setting
-
-    stored = get_db_setting("tag_facets")
-    if not stored:
-        return []
-    return collect_option_tag_sets(parse_tag_facets(stored, strict=False))
-
-
-async def _validate_and_normalize_tag_facets(
-    raw_facets: Any,
-    *,
-    allow_missing_tags: bool = False,
-    existing_option_sets: Sequence[frozenset[str]] | None = None,
-) -> str:
-    """Validate ``tag_facets`` schema and (optionally) live tag existence.
-
-    Raises HTTP 422 on schema violations or newly-introduced unknown tags
-    missing from ``job_metadata_labels``. Existing options holding a vanished
-    tag are matched 1-to-1 via *existing_option_sets* so renaming or
-    reordering options/facets and persisting env config still succeed, while
-    duplicating a vanished tag into additional options or introducing a new
-    unknown tag fails with 422.
-    """
-    if raw_facets is None or (isinstance(raw_facets, str) and not raw_facets.strip()):
-        return "[]"
-    try:
-        parsed_facets = parse_tag_facets(raw_facets, strict=True)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=f"tag_facets: {exc}") from exc
-    if not allow_missing_tags and parsed_facets:
-        live_labels = await storage.get_live_job_labels()
-        unknown_tags = find_newly_introduced_unknown_tags(
-            parsed_facets, live_labels, existing_option_sets
-        )
-        if unknown_tags:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "tag_facets: unknown tag(s) not present in job "
-                    f"metadata: {', '.join(unknown_tags)}"
-                ),
-            )
-    return serialize_tag_facets(parsed_facets)
-
-
-def _validate_effective_setting(updates: dict[str, Any]) -> Settings:
-    """Validate candidate setting values against the values in effect.
-
-    Every field not named in *updates* carries its currently effective value —
-    the DB override when one is stored, else the env/default — instead of its
-    model default. ``Settings`` holds cross-field rules (the device poll
-    interval must be shorter than the code TTL), and a candidate built from one
-    key alone compares against the *default* of the other: saving a TTL below a
-    stored interval was accepted, and the persisted pair then made
-    ``get_settings()`` refuse to load, so the server could not read its own
-    settings.
-
-    Args:
-        updates: Candidate values by Settings field name, in the form they will
-            be stored in.
-
-    Returns:
-        The Settings built from the effective values plus *updates*.
-
-    Raises:
-        pydantic.ValidationError: When the candidate settings are invalid.
-    """
-    return Settings.model_validate(get_settings().model_dump(mode="python") | updates)
-
-
-async def _validate_settings_updates(
-    settings_updates: dict[str, Any],
-    *,
-    allow_missing_facet_tags: bool = False,
-) -> list[str]:
-    """Validate admin settings updates; return per-entry error messages.
-
-    Shared by the PUT update and the settings import endpoints so every
-    write path applies the same rules. Mutates *settings_updates* the same
-    way the PUT path always has: fields with model-level validators are
-    normalized in place.
-    """
-    errors: list[str] = []
-
-    # Validate keys exist in Settings model
-    valid_keys = set(Settings.model_fields.keys())
-    invalid_keys = set(settings_updates.keys()) - valid_keys
-    if invalid_keys:
-        errors.append(f"Unknown settings: {', '.join(sorted(invalid_keys))}")
-
-    # Block writes to server-only settings — these are env-only toggles
-    server_only_keys = set(settings_updates.keys()) & _SERVER_ONLY_SETTINGS
-    if server_only_keys:
-        errors.append(
-            f"Server-only settings (env var only): "
-            f"{', '.join(sorted(server_only_keys))}"
-        )
-
-    # Pre-validate fields with Pydantic model-level validators
-    for key in (
-        "prow_url",
-        "gcs_bucket",
-        "jira_auth_mode",
-        "default_user_role",
-        "sso_allowed_domains",
-        "sso_openshift_issuer",
-        "sso_openshift_api_url",
-        "sso_redhat_issuer",
-    ):
-        if key not in settings_updates:
-            continue
-        value = settings_updates[key]
-        if value is None or value == "":
-            continue
-        try:
-            if key == "prow_url":
-                # Rule 1 of #562: the ``Settings`` validator degrades a *stored*
-                # value, so a caller-supplied one is refused here instead.
-                from rootcoz.prow_validation import normalize_prow_url
-
-                settings_updates[key] = normalize_prow_url(value)
-            else:
-                validated = _validate_effective_setting({key: value})
-                settings_updates[key] = getattr(validated, key)
-        except ValidationError as exc:
-            for err in exc.errors():
-                ctx_err = err.get("ctx", {}).get("error")
-                errors.append(str(ctx_err) if ctx_err else err.get("msg", str(err)))
-        except (TypeError, ValueError) as exc:
-            errors.append(str(exc))
-
-    # ``additional_repos`` is one "name:url,name:url" string and the name is
-    # the clone directory, so a repeated name silently loses a repo at analysis
-    # time. Refuse it here, with the message the analysis path raises (#402).
-    # Other malformed shapes stay accepted: an env-sourced value may still be
-    # one, and export/import mask those (#361).
-    if settings_updates.get("additional_repos") and (
-        dupes := duplicate_additional_repo_names(
-            str(settings_updates["additional_repos"])
-        )
-    ):
-        errors.append(f"Duplicate additional repo names: {', '.join(dupes)}")
-
-    # An account-ID-shaped cloud ID is rejected with a direct 422 — the
-    # same status and clear message the per-request model validator
-    # produces, on every write path (PUT and settings import) that shares
-    # this function.
-    cloud_id = settings_updates.get("atlassian_oauth_cloud_id")
-    if cloud_id and (cloud_id_error := atlassian_cloud_id_error(str(cloud_id))):
-        raise HTTPException(status_code=422, detail=cloud_id_error)
-
-    # ``jira_site_url`` is the base of every Jira browse link, so a value that
-    # is an API base (the scoped api.atlassian.com gateway) or not a URL at
-    # all would render links that resolve to no ticket (#496). Refuse it
-    # here, before it reaches the resolve path that omits the link silently.
-    site_url = settings_updates.get("jira_site_url")
-    if site_url and (site_error := jira_site_url_error(str(site_url))):
-        raise HTTPException(status_code=422, detail=site_error)
-
-    # Admin-defined tag facets (#658): validate schema and check newly-added
-    # tags against live job_metadata_labels (imports allow missing tags so
-    # restoring a backup onto an empty DB succeeds).
-    if "tag_facets" in settings_updates:
-        existing_option_sets = (
-            None if allow_missing_facet_tags else _persisted_tag_facet_option_sets()
-        )
-        settings_updates["tag_facets"] = await _validate_and_normalize_tag_facets(
-            settings_updates["tag_facets"],
-            allow_missing_tags=allow_missing_facet_tags,
-            existing_option_sets=existing_option_sets,
-        )
-
-    # Values this batch already accepted. A later key is validated against
-    # them, not against their pre-save effective value: a batch that writes
-    # both sides of a cross-field rule must be judged as the pair it stores.
-    accepted: dict[str, Any] = {}
-
-    for key, value in settings_updates.items():
-        if key not in valid_keys:
-            continue
-        field_info = Settings.model_fields[key]
-        # Skip validation for None/empty — those reset to default
-        if value is None or value == "":
-            continue
-        # Enumerated settings (#379): one rule per kind, shared with every
-        # other write path, and the canonical form is what gets stored.
-        if key in _SETTING_CHOICES:
-            canonical, enum_error = await _normalize_enumerated_value(key, str(value))
-            if enum_error:
-                errors.append(enum_error)
-            else:
-                settings_updates[key] = canonical
-        if key in ("prow_url", "gcs_bucket", "default_user_role"):
-            continue
-        # Sidecar listener overrides persist under /data and every restart
-        # re-probes them — reject values that would brick container boot
-        # (#347): a non-numeric/out-of-range port, or a bind address the
-        # loopback health probe can never reach.
-        if key == "sidecar_port":
-            try:
-                port = int(str(value).strip())
-            except ValueError, TypeError:
-                port = 0
-            if not 1 <= port <= 65535:
-                errors.append("sidecar_port: must be an integer between 1 and 65535")
-        if key == "sidecar_host":
-            host = str(value).strip()
-            if host and not _sidecar_host_supports_loopback_probe(host):
-                errors.append(
-                    f"sidecar_host: '{host}' would break the container loopback "
-                    "health probe (startup would fail on every restart) — use "
-                    "127.0.0.1, 0.0.0.0, or leave it empty"
-                )
-            # Save the stripped host — the env bridge exports the stored
-            # value verbatim, so padding would reach pi-config's listen host.
-            settings_updates[key] = host
-        # Integer fields get explicit bounds first — some clamp in
-        # mode="before" validators (session_ttl_hours), so model_validate
-        # alone would accept out-of-range values. When this check already
-        # flagged the key, model_validate is skipped: a violation must
-        # produce exactly one message, not the manual one plus pydantic's
-        # duplicate (#361 Qodo r2).
-        is_int = _setting_is_int(key)
-        int_error = False
-        if is_int:
-            try:
-                # A JSON boolean is not an integer setting: int(True) passes
-                # every bound, and str(True) then persists "True", which fails
-                # the merged-settings build and drops *every* DB override.
-                if isinstance(value, bool):
-                    raise TypeError("a boolean is not an integer")
-                if isinstance(value, float) and value.is_integer():
-                    # A whole JSON float (30.0) is the integer the admin
-                    # meant; its string form "30.0" reads as unusable, which
-                    # for the transcript budgets persists as 0 (disabled).
-                    value = settings_updates[key] = int(value)
-                int_val = int(value)
-                # Check constraints from Field metadata
-                metadata = field_info.metadata
-                for meta in metadata:
-                    if (
-                        hasattr(meta, "gt")
-                        and meta.gt is not None
-                        and int_val <= meta.gt
-                    ):
-                        errors.append(f"{key}: must be > {meta.gt}")
-                        int_error = True
-                    if (
-                        hasattr(meta, "ge")
-                        and meta.ge is not None
-                        and int_val < meta.ge
-                    ):
-                        errors.append(f"{key}: must be >= {meta.ge}")
-                        int_error = True
-                    if (
-                        hasattr(meta, "le")
-                        and meta.le is not None
-                        and int_val > meta.le
-                    ):
-                        errors.append(f"{key}: must be <= {meta.le}")
-                        int_error = True
-            except ValueError, TypeError:
-                errors.append(f"{key}: must be an integer")
-                int_error = True
-        if int_error:
-            continue
-        # Type-check every remaining value against its Settings field — an
-        # invalid value (e.g. "not-a-bool" for a bool field) would otherwise
-        # be persisted, and once get_settings() cannot validate the merged
-        # overrides it silently falls back to the base env settings.
-        try:
-            validated = _validate_effective_setting({**accepted, key: value})
-        except ValidationError as exc:
-            # Separate field-level errors (non-empty loc) from model-level
-            # cross-field errors (empty loc).  A cross-field error on a
-            # partial batch is not conclusive — the remaining keys may
-            # satisfy the rule — so it is deferred to the batch-level
-            # check below.
-            field_errs = [e for e in exc.errors() if e.get("loc")]
-            if field_errs:
-                for err in field_errs:
-                    ctx_err = err.get("ctx", {}).get("error")
-                    errors.append(
-                        f"{key}: {ctx_err if ctx_err else err.get('msg', str(err))}"
-                    )
-                continue
-            # Only model-level errors — the field value itself is valid.
-            # Accept it so the batch-level check sees the complete pair.
-            if is_int:
-                settings_updates[key] = str(int(value))
-            accepted[key] = int(value) if is_int else value
-            continue
-        if is_int:
-            # Canonical decimal form: "+14" and " 14 " persist as "14" in the
-            # DB and in the sidecar env bridge the entrypoint sources. Read it
-            # back from the validated model — a before-validator may return a
-            # different value than ``int(value)`` (1.5 → 720 for
-            # session_ttl_hours, → 587 for smtp_port), and persisting the raw
-            # integer would undo the fallback the model just applied.
-            validated_int = getattr(validated, key)
-            if validated_int == 0 and int_val != 0:
-                # A fractional float (1.5) truncates past the manual bounds
-                # check and lands on the before-validator's fallback, which
-                # persists as "0" — and 0 means no pruning, so the save would
-                # silently disable the transcript budget the admin just set.
-                errors.append(f"{key}: must be an integer")
-                continue
-            settings_updates[key] = str(validated_int)
-        accepted[key] = getattr(validated, key)
-
-    # Cross-field validation on the complete batch: a pair like
-    # (ttl=2, interval=1) is valid only when both keys are present, but
-    # per-key validation deferred model-level errors because the second key
-    # was not yet in `accepted`.  Validate once with every accepted key so
-    # the cross-field rule sees the pair the batch will store.
-    if not errors and accepted:
-        try:
-            _validate_effective_setting(accepted)
-        except ValidationError as exc:
-            for err in exc.errors():
-                ctx_err = err.get("ctx", {}).get("error")
-                errors.append(str(ctx_err) if ctx_err else err.get("msg", str(err)))
-
-    # A provider whose id and secret are saved without PUBLIC_BASE_URL is a
-    # provider the login page hides: the callback cannot be built without a
-    # trusted origin, and nothing else reports it, so the administrator would
-    # find the feature simply missing. Refused here rather than in a startup
-    # validator — an env-configured deployment must still boot into Server
-    # Settings to be fixed. Only a batch that touches these settings is judged,
-    # so a deployment already in that state can still save anything else.
-    if not errors and settings_updates.keys() & _SSO_BROWSER_LOGIN_SETTINGS:
-        try:
-            effective = _validate_effective_setting(settings_updates)
-        except ValidationError:
-            # Every unusable key was reported above; the pair rule cannot judge
-            # a candidate that does not load.
-            effective = None
-        if effective is not None and (
-            hidden_provider := browser_provider_without_base_url(effective)
-        ):
-            errors.append(
-                f"{hidden_provider}: PUBLIC_BASE_URL must be set for browser"
-                " sign-in — without it this provider is hidden from the login page"
-            )
-
-    return errors
 
 
 _TAG_FACET_AUDIT_ACTIONS: dict[str, str] = {
@@ -25855,14 +24158,13 @@ _TAG_FACET_AUDIT_ACTIONS: dict[str, str] = {
 
 
 async def _record_tag_facet_audit_rows(
-    before: Sequence[TagFacet],
-    after: Sequence[TagFacet],
+    changes: Sequence[dict[str, Any]],
     *,
     actor: str,
     request: Request,
 ) -> None:
     """Write one audit row per created/updated/deleted tag facet (never the blob)."""
-    for change in diff_tag_facets(before, after):
+    for change in changes:
         op = change["op"]
         facet_id = change["facet_id"]
         changed_fields = change["changed_fields"]
@@ -25881,23 +24183,15 @@ async def _record_tag_facet_audit_rows(
         )
 
 
-@asynccontextmanager
-async def _audit_tag_facets_change(
-    should_track: bool, *, actor: str, request: Request
-) -> AsyncIterator[None]:
-    """Serialize ``tag_facets`` validate+write and emit per-facet audit rows after."""
-    if not should_track:
-        yield
-        return
-    async with _TAG_FACETS_WRITE_LOCK:
-        before = get_settings().parsed_tag_facets
-        yield
-        await _record_tag_facet_audit_rows(
-            before,
-            get_settings().parsed_tag_facets,
-            actor=actor,
-            request=request,
-        )
+def _tag_facet_audit_hook(
+    *, actor: str, request: Request
+) -> settings_registry.TagFacetAuditCallback:
+    """Emit per-facet audit rows inside ``TAG_FACETS_WRITE_LOCK`` in DB write order."""
+
+    async def _emit(changes: Sequence[dict[str, Any]]) -> None:
+        await _record_tag_facet_audit_rows(changes, actor=actor, request=request)
+
+    return _emit
 
 
 @app.put("/api/admin/settings", operation_id="updateAdminSettings")
@@ -25906,151 +24200,37 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     _require_admin(request)
     body = await request.json()
     settings_updates = body.get("settings", {})
-
-    if not settings_updates:
-        raise HTTPException(status_code=400, detail="No settings provided")
-
     username = request.state.username or "admin"
-    async with _audit_tag_facets_change(
-        "tag_facets" in settings_updates, actor=username, request=request
-    ):
-        errors = await _validate_settings_updates(settings_updates)
-        if errors:
-            raise HTTPException(
-                status_code=400, detail=f"Invalid settings: {'; '.join(errors)}"
-            )
-        warnings = await _save_settings_to_db(settings_updates, username)
-        changed_keys = list(settings_updates.keys())
 
-        logger.info(
-            "Admin settings updated: keys=%s, by=%s",
-            changed_keys,
-            username,
-        )
-        await record_audit(
-            action="settings.update",
-            actor=username,
-            message=f"Admin settings updated: keys={changed_keys}, by={username}",
-            target_type="setting",
-            details={
-                "changed_keys": changed_keys,
-                "redacted_keys": [
-                    key for key in changed_keys if key in _SENSITIVE_SETTINGS
-                ],
-                # Kept for consumers of the original shape.
-                "keys": changed_keys,
-            },
-            request=request,
-        )
-
-    content: dict[str, Any] = {"updated": changed_keys}
-    if warnings:
-        content["warnings"] = warnings
-    return JSONResponse(
-        content=content,
-        status_code=200,
+    result = await settings_registry.update_settings(
+        settings_updates,
+        username,
+        hooks=_settings_hooks(),
+        on_tag_facet_changes=_tag_facet_audit_hook(actor=username, request=request),
+    )
+    logger.info(
+        "Admin settings updated: keys=%s, by=%s",
+        result.changed_keys,
+        username,
+    )
+    await record_audit(
+        action="settings.update",
+        actor=username,
+        message=f"Admin settings updated: keys={result.changed_keys}, by={username}",
+        target_type="setting",
+        details={
+            "changed_keys": result.changed_keys,
+            "redacted_keys": result.redacted_keys,
+            # Kept for consumers of the original shape.
+            "keys": result.changed_keys,
+        },
+        request=request,
     )
 
-
-# Schema version of the settings export document — bumped on breaking
-# changes to the export shape so imports can reject mismatched documents.
-_SETTINGS_EXPORT_VERSION = 1
-
-# Warning shown when an export includes decrypted sensitive values.
-_SETTINGS_EXPORT_SECRETS_WARNING = (
-    "This export contains decrypted secrets in plaintext — store and "
-    "transfer it securely and delete it once imported."
-)
-
-
-def _transform_additional_repos(
-    raw: str, url_fn: Callable[[str], str], token_suffix: str
-) -> str | None:
-    """Rebuild an ``additional_repos`` value, transforming each repo URL.
-
-    ``url_fn`` is applied to every URL (strip or mask credentials). An
-    embedded ``@token`` is replaced by ``token_suffix`` — empty drops the
-    credential entirely, ``"***"`` masks it for display. Returns None for
-    a malformed stored value: its credentials could sit anywhere a parser
-    cannot find, so callers must skip (export) or mask it whole (diff).
-    """
-    try:
-        repos = parse_additional_repos(raw)
-    except ValueError:
-        return None
-    parts = []
-    for repo in repos:
-        part = f"{repo['name']}:{url_fn(repo['url'])}"
-        if repo.get("ref"):
-            part += f":{repo['ref']}"
-        if repo.get("token") and token_suffix:
-            part += f"@{token_suffix}"
-        parts.append(part)
-    return ",".join(parts)
-
-
-def _sanitize_export_value(key: str, value: str) -> str | None:
-    """Strip credentials from a non-sensitive value on default exports.
-
-    ``additional_repos`` entries can carry an embedded ``@token`` and repo
-    URLs can carry userinfo or a query/fragment token — those must not
-    leave without the ``include_sensitive`` opt-in. Returns None when the
-    stored value is too malformed to sanitize (fail closed: the key is
-    skipped).
-    """
-    if key == "additional_repos":
-        return _transform_additional_repos(value, strip_url_credentials, "")
-    return redact_urls_in_text(value)
-
-
-def _mask_diff_value(key: str, value: str | None) -> str | None:
-    """Mask credential substrings (URL userinfo, repo tokens) in diff display."""
-    if value is None:
-        return None
-    if key == "additional_repos":
-        masked = _transform_additional_repos(value, mask_url_credentials_in_text, "***")
-        # A malformed value is masked whole — its credentials could sit
-        # anywhere a parser cannot find (#361 Qodo r2).
-        return "***" if masked is None else masked
-    return mask_url_credentials_in_text(value)
-
-
-def _diff_import_updates(
-    updates: dict[str, str], db_settings: dict[str, dict[str, Any]]
-) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
-    """Diff import values against current DB overrides.
-
-    Returns ``(applied, unchanged, restart_required)`` — sensitive values
-    are masked as ``"***"`` and never appear in the diff.
-    """
-    applied: dict[str, dict[str, Any]] = {}
-    unchanged: list[str] = []
-    restart_required: list[str] = []
-    for key, value in updates.items():
-        old = db_settings[key]["value"] if key in db_settings else None
-        if old and key in _SENSITIVE_SETTINGS:
-            # Compare against decrypted plaintext; an undecryptable value
-            # (key rotation) counts as changed so the import overwrites it.
-            old = decrypt_value_or_none(old)
-        if old == value or (
-            old is not None
-            and key not in _SENSITIVE_SETTINGS
-            # A default (sanitized) export drops credentials; importing it
-            # must not wipe them from the target — when the document carries
-            # nothing new for a key, the target's credential-bearing value
-            # wins (#361 Qodo r2).
-            and value == _sanitize_export_value(key, old)
-        ):
-            unchanged.append(key)
-            continue
-        masked = key in _SENSITIVE_SETTINGS
-        applied[key] = {
-            "from": "***" if masked else _mask_diff_value(key, old),
-            "to": "***" if masked else _mask_diff_value(key, value),
-        }
-        if key in _RESTART_REQUIRED_SETTINGS:
-            restart_required.append(key)
-    return applied, unchanged, restart_required
+    content: dict[str, Any] = {"updated": result.changed_keys}
+    if result.warnings:
+        content["warnings"] = result.warnings
+    return JSONResponse(content=content, status_code=200)
 
 
 @app.get("/api/admin/settings/export", operation_id="exportServerSettings")
@@ -26060,102 +24240,37 @@ async def export_server_settings(
         False, description="Include decrypted sensitive settings in the export"
     ),
 ) -> JSONResponse:
-    """Export all DB-stored server settings as a JSON document.
-
-    Only database overrides are exported — env-only values are deployment
-    config, not server settings. Sensitive settings are excluded unless
-    ``include_sensitive`` is set; when included they are decrypted plaintext
-    (re-encrypted values would only be usable with the same
-    ``ROOTCOZ_ENCRYPTION_KEY``), and the response carries a warning.
-    """
+    """Export all DB-stored server settings as a JSON document."""
     _require_admin(request)
-
-    settings: dict[str, str] = {}
-    sensitive_included = False
-    for key, row in sorted((await storage.get_server_settings()).items()):
-        # Internal bookkeeping rows (e.g. jira_verified_method), server-only
-        # bootstrap values, and derived settings are not transferable
-        # settings — a derived value (e.g. sidecar_url from sidecar_port) is
-        # instance-computed, and shipping it would pin a stale URL on
-        # another instance (same rule the persist endpoint enforces).
-        if (
-            key not in _FIELD_TO_CATEGORY
-            or key in _SERVER_ONLY_SETTINGS
-            or key in _DERIVED_SETTINGS
-        ):
-            continue
-        value = row["value"]
-        if key in _SENSITIVE_SETTINGS:
-            if not include_sensitive:
-                continue
-            if value == "":
-                # An explicit empty override is meaningful (it deliberately
-                # beats the env value) — export it as-is; there is nothing
-                # to decrypt.
-                settings[key] = ""
-                continue
-            sensitive_included = True
-            decrypted = decrypt_value_or_none(value)
-            if decrypted is None:
-                # Undecryptable ciphertext (key rotation) is useless in an
-                # export — skip rather than ship garbage.
-                logger.debug("Cannot decrypt setting %s for export; skipping", key)
-                continue
-            value = decrypted
-        elif not include_sensitive:
-            # Default exports must not leak embedded credentials — repo
-            # tokens and URL userinfo leave only with the opt-in. A value
-            # too malformed to sanitize is skipped, never shipped raw.
-            sanitized = _sanitize_export_value(key, value)
-            if sanitized is None:
-                logger.warning(
-                    "Skipping setting %s from default export: unparseable stored value",
-                    key,
-                )
-                continue
-            value = sanitized
-        settings[key] = value
-
-    content: dict[str, Any] = {
-        "version": _SETTINGS_EXPORT_VERSION,
-        "exported_at": datetime.now(UTC).isoformat(),
-        "settings": settings,
-    }
-    if sensitive_included:
-        content["warning"] = _SETTINGS_EXPORT_SECRETS_WARNING
-
+    result = await settings_registry.export_settings(
+        include_sensitive=include_sensitive
+    )
     logger.info(
         "Admin settings exported: keys=%d, include_sensitive=%s, by=%s",
-        len(settings),
+        result.key_count,
         include_sensitive,
         request.state.username,
     )
-    # The count is what is left after the export's own filtering, and
-    # ``include_sensitive`` is the difference between a shareable file and
-    # plaintext secrets — both belong in the trail. Never the values.
     await record_audit(
         action="admin.settings_export",
         actor=request.state.username,
         message=(
-            f"Admin '{request.state.username}' exported {len(settings)} server"
+            f"Admin '{request.state.username}' exported {result.key_count} server"
             f" settings (include_sensitive={include_sensitive})"
         ),
         target_type="settings",
-        details={"include_sensitive": include_sensitive, "keys": len(settings)},
+        details={
+            "include_sensitive": include_sensitive,
+            "keys": result.key_count,
+        },
         request=request,
     )
-    return JSONResponse(content=content, headers={"Cache-Control": "no-store"})
+    return JSONResponse(content=result.content, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/admin/settings/import", operation_id="importServerSettings")
 async def import_server_settings(request: Request) -> JSONResponse:
-    """Import a settings export document (validated, atomic, with a diff).
-
-    Body: an export document, optionally with ``"dry_run": true`` to
-    validate and report the diff without applying anything. Every key and
-    value is validated before anything is written — one invalid entry
-    rejects the whole import (422 with the offending entries listed).
-    """
+    """Import a settings export document (validated, atomic, with a diff)."""
     _require_admin(request)
     try:
         body = await request.json()
@@ -26163,320 +24278,62 @@ async def import_server_settings(request: Request) -> JSONResponse:
         raise HTTPException(
             status_code=422, detail="Body must be a JSON settings export document"
         )
-    if not isinstance(body, dict) or body.get("version") != _SETTINGS_EXPORT_VERSION:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Unsupported export document: expected version "
-                f"{_SETTINGS_EXPORT_VERSION}"
-            ),
-        )
-    raw_settings = body.get("settings")
-    if not isinstance(raw_settings, dict) or not raw_settings:
-        raise HTTPException(status_code=422, detail="No settings in export document")
-    updates = {
-        str(k): _normalize_setting_override(str(k), "" if v is None else str(v))
-        for k, v in raw_settings.items()
-    }
-
-    # Validate the whole batch before anything is applied — the same
-    # rules the per-setting PUT enforces, plus the empty-override gates
-    # the shared save path applies (checked here so a rejection is a 422
-    # before any DB write, keeping the import atomic).
-    errors = await _validate_settings_updates(updates, allow_missing_facet_tags=True)
-    for key, value in updates.items():
-        if key in _DERIVED_SETTINGS:
-            # Same rule the persist endpoint enforces: a derived value is
-            # computed from sidecar_port at boot — importing one would pin
-            # a stale URL from the exporting instance.
-            errors.append(
-                f"{key} is derived from sidecar_port — set sidecar_port instead"
-            )
-        if not value and (error := _empty_override_error(key)):
-            errors.append(error)
-    if errors:
-        raise HTTPException(
-            status_code=422, detail=f"Invalid settings: {'; '.join(errors)}"
-        )
-
-    applied, unchanged, restart_required = _diff_import_updates(
-        updates, await storage.get_server_settings()
-    )
-    content: dict[str, Any] = {
-        "applied": applied,
-        "unchanged": unchanged,
-        "restart_required": restart_required,
-    }
-    if body.get("dry_run"):
-        content["dry_run"] = True
-        return JSONResponse(content=content)
-
     username = request.state.username or "admin"
-    async with _audit_tag_facets_change(
-        "tag_facets" in applied, actor=username, request=request
-    ):
-        # Only keys the diff marked as applied are written — unchanged keys
-        # (including sanitized-equal ones whose credentials the target keeps)
-        # must not be overwritten (#361 Qodo r2).
-        warnings = await _save_settings_to_db(
-            {key: value for key, value in updates.items() if key in applied},
-            username,
-        )
-        if warnings:
-            content["warnings"] = warnings
-        logger.info(
-            "Admin settings imported: applied=%d, unchanged=%d, by=%s",
-            len(applied),
-            len(unchanged),
-            username,
-        )
-        # Key names only — ``applied`` carries the old/new values of every change,
-        # which must not be copied into the audit trail.
-        changed_keys = list(applied)
-        await record_audit(
-            action="settings.import",
-            actor=username,
-            message=(
-                f"Admin settings imported: applied={len(applied)},"
-                f" unchanged={len(unchanged)}, by={username}"
-            ),
-            target_type="setting",
-            details={
-                "changed_keys": changed_keys,
-                "redacted_keys": [
-                    key for key in changed_keys if key in _SENSITIVE_SETTINGS
-                ],
-                # Kept for consumers of the original shape.
-                "keys": changed_keys,
-            },
-            request=request,
-        )
-    return JSONResponse(content=content)
+    result = await settings_registry.import_settings(
+        body,
+        username,
+        hooks=_settings_hooks(),
+        on_tag_facet_changes=_tag_facet_audit_hook(actor=username, request=request),
+    )
+    if result.dry_run:
+        return JSONResponse(content=result.content)
 
-
-# Settings where an explicit empty override is unsafe regardless of type:
-# the sidecar env bridge would export SIDECAR_HOST=''/SIDECAR_PORT='' and
-# pi-config's nullish coalescing selects the empty string over its loopback/
-# default fallbacks — an empty host binds an unspecified address (exposure)
-# and an empty port breaks the entrypoint's startup probe (#352 Qodo r1).
-_EMPTY_OVERRIDE_FORBIDDEN: frozenset[str] = frozenset({"sidecar_host", "sidecar_port"})
-
-
-def _empty_override_error(key: str) -> str | None:
-    """User-facing error when an explicit empty override is invalid for key.
-
-    Returns None when saving an empty string is a valid override. Three
-    gates, all of which protect ``get_settings()`` from storing a value
-    that fails pydantic validation (which would silently drop the entire
-    DB override set) or that would break the sidecar bridge (#352 Qodo r1):
-    string-typed fields only (str / SecretStr), field validators must
-    accept the empty value (``default_user_role`` is str-typed but its
-    validator rejects ""), and infrastructure settings with unsafe empty
-    semantics are denied outright.
-    """
-    if key not in Settings.model_fields:
-        # Unknown keys are already reported by the shared validator —
-        # indexing model_fields here would turn a 422 into a 500.
-        return None
-    if key in _EMPTY_OVERRIDE_FORBIDDEN:
-        return (
-            f"Setting '{key}' cannot be empty — the sidecar bridge would "
-            "export a blank value. Use Reset to fall back to the "
-            "env/default value."
-        )
-    annotation = Settings.model_fields[key].annotation
-    types = get_args(annotation) or (annotation,)
-    if not all(t is str or t is SecretStr or t is type(None) for t in types):
-        return (
-            f"Setting '{key}' cannot be empty — its type does not accept "
-            "an empty override. Use Reset to fall back to the env/default "
-            "value."
-        )
-    try:
-        Settings.model_validate({key: ""})
-    except ValidationError:
-        return (
-            f"Setting '{key}' cannot be empty — its validator rejects an "
-            "empty value. Use Reset to fall back to the env/default value."
-        )
-    return None
-
-
-def _normalize_setting_override(key: str, value: str) -> str:
-    """Normalize persisted setting overrides whose blank values coerce to a fixed default."""
-    if key == "feedback_repo_url":
-        return normalize_feedback_repo_url(value)
-    return value
-
-
-async def _save_settings_to_db(
-    settings_updates: dict[str, Any], username: str
-) -> list[str]:
-    """Persist validated settings updates to the DB store and apply them.
-
-    Shared save path for the PUT update and the env→DB persist endpoints.
-    A saved value — empty or not — is an explicit DB override: the row's
-    presence beats the OS env (request → DB → env). To fall back to the
-    env/default value, use the reset endpoint (DELETE) instead of saving
-    an empty value (#352). Invalid empty overrides are rejected for ALL
-    keys before ANY key is written — a rejected save never applies a
-    partial update. Returns user-facing warnings; values are never logged.
-    """
-    # Pre-flight: reject invalid empty overrides for the whole batch
-    # before the first DB write, so a 400 never leaves a partial save.
-    for key, value in settings_updates.items():
-        str_value = str(value) if value is not None else ""
-        if not str_value:
-            error = _empty_override_error(key)
-            if error:
-                raise HTTPException(status_code=400, detail=error)
-
-    normalized_updates = {
-        key: _normalize_setting_override(key, str(value) if value is not None else "")
-        for key, value in settings_updates.items()
-    }
-    db_values: dict[str, str] = {}
-    for key, str_value in normalized_updates.items():
-        # Upsert (empty allowed — an explicit empty override beats env).
-        # Sensitive values are encrypted only when non-empty; the empty
-        # override stays a plain empty string (nothing to protect).
-        if str_value and key in _SENSITIVE_SETTINGS:
-            from rootcoz.encryption import encrypt_value
-
-            db_values[key] = encrypt_value(str_value)
-        else:
-            db_values[key] = str_value
-    # One atomic batch write — a mid-batch failure must not leave earlier
-    # keys applied while later ones are missing (half-applied import).
-    await storage.set_server_settings_batch(db_values, updated_by=username)
-
-    # Changed Jira credentials or auth mode invalidate the verified-method
-    # record — it reflects the last successful test of the previous setup.
-    if settings_updates.keys() & _JIRA_VERIFIED_INVALIDATING_KEYS:
-        try:
-            await storage.delete_server_setting(
-                "jira_verified_method", deleted_by=username
-            )
-            remove_from_db_settings_cache(["jira_verified_method"])
-        except Exception:
-            logger.warning("Failed to clear jira_verified_method", exc_info=True)
-
-    # Update in-memory cache so get_settings() picks up changes. Saved
-    # values — empty included — are explicit overrides that beat env;
-    # falling back to env/default is the reset endpoint's job (DELETE).
-    update_db_settings_cache(normalized_updates)
-
-    # The log-file budget and floor apply to the running handler, not the next
-    # boot: rebuilding it here covers the PUT, the import and the env→DB persist.
-    if settings_updates.keys() & _LOG_FILE_SETTINGS:
-        _apply_log_file_settings()
-
-    # Persist the transcript recording switch (and the other sidecar
-    # settings) for the container entrypoint — the sidecar reads these from
-    # its process env at start, so the bridge file is how a DB toggle
-    # reaches it after a restart.
-    warnings: list[str] = []
-    if "record_transcripts" in settings_updates or any(
-        key in settings_updates for key in _SIDECAR_BRIDGE_SETTINGS
-    ):
-        synced = await _apply_transcript_recording_setting()
-        if not synced and "record_transcripts" in settings_updates:
-            warnings.append(
-                "record_transcripts was saved, but the running sidecar could "
-                "not be updated — it applies after a restart or a later "
-                "successful sync"
-            )
-    # A non-loopback sidecar bind is exposed to the network — same trust
-    # class as trust_proxy_headers: only safe behind a trusted network.
-    if "sidecar_host" in settings_updates:
-        host = str(settings_updates.get("sidecar_host") or "").strip()
-        if host and not _is_loopback_host(host):
-            warnings.append(
-                f"sidecar_host '{host}' is not a loopback address — the sidecar "
-                "will listen on an external interface. Only do this on a "
-                "trusted network (same trust class as trust_proxy_headers)."
-            )
-
-    _broadcast_settings_change()
-    return warnings
+    logger.info(
+        "Admin settings imported: applied=%d, unchanged=%d, by=%s",
+        len(result.changed_keys),
+        result.unchanged_count,
+        username,
+    )
+    await record_audit(
+        action="settings.import",
+        actor=username,
+        message=(
+            f"Admin settings imported: applied={len(result.changed_keys)},"
+            f" unchanged={result.unchanged_count}, by={username}"
+        ),
+        target_type="setting",
+        details={
+            "changed_keys": result.changed_keys,
+            "redacted_keys": result.redacted_keys,
+            # Kept for consumers of the original shape.
+            "keys": result.changed_keys,
+        },
+        request=request,
+    )
+    return JSONResponse(content=result.content)
 
 
 @app.post("/api/admin/settings/{key}/persist", operation_id="persistAdminSetting")
 async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
-    """Persist an env-sourced setting's current value to the DB store.
-
-    The migration path for env ↔ Server Settings parity (#347): deployments
-    save their current env values once, then drop the envs — the setting no
-    longer reverts to its default on restart. Runs server-side because the
-    UI never sees decrypted sensitive env values.
-    """
+    """Persist an env-sourced setting's current value to the DB store."""
     _require_admin(request)
-    if key not in Settings.model_fields:
-        raise HTTPException(status_code=400, detail=f"Unknown setting: {key}")
-    if key in _SERVER_ONLY_SETTINGS:
-        raise HTTPException(
-            status_code=400, detail=f"Server-only setting (env var only): {key}"
-        )
-    if key in _DERIVED_SETTINGS:
-        # The entrypoint exports the DERIVED SIDECAR_URL into the process
-        # env, so it shows as env-sourced — persisting it would pin an
-        # explicit URL that beats the port derivation (#347).
-        raise HTTPException(
-            status_code=400,
-            detail=f"{key} is derived from sidecar_port — persist sidecar_port instead",
-        )
-    # Env var name per the Settings field mapping (see _get_settings_metadata)
-    # — resolved through the same sources Settings reads (dotenv included);
-    # a DB-only value correctly reports no env value.
-    env_value = _settings_env_value(key)
-    if not env_value:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Setting '{key}' has no env value set",
-        )
-    # Enumerated settings get the shared canonicalisation and validation
-    # (#379) so persist-from-env cannot store a value the PUT/import paths
-    # would reject — or a spelling the picker does not offer. A no-op for
-    # every other key.
-    env_value, enum_error = await _normalize_enumerated_value(key, env_value)
-    if enum_error:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid env value for '{key}': {enum_error}",
-        )
-    # Same validation the PUT path applies to admin-typed values
-    try:
-        validated = _validate_effective_setting({key: env_value})
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid env value for '{key}'"
-        ) from exc
-    if _setting_is_int(key):
-        # Canonical decimal form — the env bridge exports this verbatim.
-        env_value = str(getattr(validated, key))
-
     username = request.state.username or "admin"
-    async with _audit_tag_facets_change(
-        key == "tag_facets", actor=username, request=request
-    ):
-        if key == "tag_facets":
-            env_value = await _validate_and_normalize_tag_facets(
-                env_value,
-                allow_missing_tags=False,
-                existing_option_sets=_persisted_tag_facet_option_sets(),
-            )
-        await _save_settings_to_db({key: env_value}, username)
-
-        await record_audit(
-            action="admin.setting_persist",
-            actor=username,
-            message=f"Admin setting persisted from env: key={key}, by={username}",
-            target_type="setting",
-            target_id=key,
-            details=_audit_setting_details(key),
-            request=request,
-        )
-    return JSONResponse(content={"key": key, "source": "db"})
+    result = await settings_registry.persist_setting(
+        key,
+        username,
+        hooks=_settings_hooks(),
+        on_tag_facet_changes=_tag_facet_audit_hook(actor=username, request=request),
+    )
+    await record_audit(
+        action="admin.setting_persist",
+        actor=username,
+        message=f"Admin setting persisted from env: key={key}, by={username}",
+        target_type="setting",
+        target_id=key,
+        details=_audit_setting_details(key),
+        request=request,
+    )
+    return JSONResponse(content={"key": result.key, "source": "db"})
 
 
 @app.get("/api/admin/settings/history", operation_id="getSettingsHistory")
@@ -26487,73 +24344,35 @@ async def get_settings_history(
 ) -> JSONResponse:
     """Get server settings change history."""
     _require_admin(request)
-    history = await storage.get_server_settings_history(key=key or None, limit=limit)
-    # Mask sensitive values in history
-    for entry in history:
-        if entry.get("key") in _SENSITIVE_SETTINGS:
-            if entry.get("value"):
-                entry["value"] = "••••••••"
-            if entry.get("previous_value"):
-                entry["previous_value"] = "••••••••"
-    return JSONResponse(content=history)
+    return JSONResponse(
+        content=await settings_registry.get_masked_settings_history(
+            key=key, limit=limit
+        )
+    )
 
 
 @app.delete("/api/admin/settings/{key}", operation_id="resetAdminSetting")
 async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     """Reset a server setting to its env/default value (removes DB override)."""
     _require_admin(request)
-    if key not in Settings.model_fields:
-        raise HTTPException(status_code=404, detail=f"Unknown setting: {key}")
-    if key in _SERVER_ONLY_SETTINGS:
-        raise HTTPException(
-            status_code=400, detail=f"Server-only setting (env var only): {key}"
-        )
-
     username = request.state.username or "admin"
-    async with _audit_tag_facets_change(
-        key == "tag_facets", actor=username, request=request
-    ):
-        deleted = await storage.delete_server_setting(key, deleted_by=username)
-        if not deleted:
-            raise HTTPException(
-                status_code=404, detail=f"Setting '{key}' has no DB override"
-            )
-
-        # Remove from in-memory cache so get_settings() falls back to env/default
-        remove_from_db_settings_cache([key])
-        if key in _LOG_FILE_SETTINGS:
-            _apply_log_file_settings()
-
-        # Keep the sidecar transcript env bridge in sync with the reset — the
-        # bridge must stop assigning the removed override so the deployment
-        # environment controls the sidecar again, and the runtime override is
-        # dropped so the boot env governs immediately.
-        content: dict[str, Any] = {"reset": key}
-        if key == "record_transcripts" or key in _SIDECAR_BRIDGE_SETTINGS:
-            synced = await _apply_transcript_recording_setting()
-            if not synced and key == "record_transcripts":
-                content["warnings"] = [
-                    (
-                        "record_transcripts was reset, but the running sidecar could "
-                        "not be updated — it keeps its current recording state until "
-                        "a restart or a later successful sync"
-                    )
-                ]
-
-        _broadcast_settings_change()
-
-        logger.info("Admin setting reset: key=%s, by=%s", key, request.state.username)
-        await record_audit(
-            action="settings.reset",
-            actor=username,
-            message=f"Admin setting reset: key={key}, by={request.state.username}",
-            target_type="setting",
-            target_id=key,
-            details=_audit_setting_details(key),
-            request=request,
-        )
-
-    return JSONResponse(content=content)
+    result = await settings_registry.reset_setting(
+        key,
+        username,
+        hooks=_settings_hooks(),
+        on_tag_facet_changes=_tag_facet_audit_hook(actor=username, request=request),
+    )
+    logger.info("Admin setting reset: key=%s, by=%s", key, request.state.username)
+    await record_audit(
+        action="settings.reset",
+        actor=username,
+        message=f"Admin setting reset: key={key}, by={request.state.username}",
+        target_type="setting",
+        target_id=key,
+        details=_audit_setting_details(key),
+        request=request,
+    )
+    return JSONResponse(content=result.content)
 
 
 # -- Integration connection tests --------------------------------------------

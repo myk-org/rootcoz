@@ -1329,15 +1329,17 @@ class TestLogFileReconfigure:
 
     def test_the_three_settings_are_server_settings_applied_at_runtime(self) -> None:
         """Server Settings metadata + labels for the live-applied keys (#481)."""
+        from rootcoz import settings_registry
+
         metadata = {
-            entry["key"]: entry for entry in rootcoz.main._get_settings_metadata()
+            entry["key"]: entry for entry in settings_registry.get_settings_metadata()
         }
-        assert rootcoz.main._LOG_FILE_SETTINGS == {
+        assert settings_registry.LOG_FILE_SETTINGS == {
             "log_max_bytes",
             "log_backup_count",
             "log_min_free_bytes",
         }
-        for key in sorted(rootcoz.main._LOG_FILE_SETTINGS):
+        for key in sorted(settings_registry.LOG_FILE_SETTINGS):
             entry = metadata[key]
             assert entry["category"] == "Logging", key
             assert entry["type"] == "integer", key
