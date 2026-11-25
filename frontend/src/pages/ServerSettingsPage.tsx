@@ -103,6 +103,16 @@ interface ServerSetting {
    * so a missing field means "always visible".
    */
   visible_when?: { key: string; in: string[] }
+  /**
+   * Which SSO provider owns this row, when one does. Sent by the server from the
+   * provider registry (`settings_fields`), so a provider this UI has never heard
+   * of still reaches its own section — the frontend must not enumerate providers.
+   */
+  section?: string
+  /** Display name for that section (the provider's own label). */
+  section_label?: string
+  /** True when this section should render as a collapsible block (provider rows). */
+  section_collapsible?: boolean
 }
 
 interface CategoryGroup {
@@ -822,6 +832,9 @@ export function ServerSettingsPage() {
   const [settingsIoError, setSettingsIoError] = useState<string | null>(null)
   const importFileRef = useRef<HTMLInputElement>(null)
 
+  // Collapsible SSO provider sections — collapsed by default.
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(() => new Set())
+
   // Debounced search
   const [searchInput, setSearchInput] = useState('')
   useEffect(() => {
@@ -1410,7 +1423,8 @@ export function ServerSettingsPage() {
         return
       }
     }
-    const category = state.settings.find(s => s.key === highlighted)?.category
+    const setting = state.settings.find(s => s.key === highlighted)
+    const category = setting?.category
     if (category) {
       if (state.collapsedCategories.has(category)) {
         dispatch({ type: 'TOGGLE_CATEGORY', category })
@@ -1421,10 +1435,15 @@ export function ServerSettingsPage() {
         return
       }
     }
+    // Auto-expand a collapsible section that contains the highlighted setting.
+    if (setting?.section && setting.section_collapsible && !expandedSections.has(setting.section)) {
+      setExpandedSections((prev) => new Set(prev).add(setting.section!))
+      return
+    }
     document
       .querySelector(`[data-setting-key="${CSS.escape(highlighted)}"]`)
       ?.scrollIntoView({ block: 'center' })
-  }, [highlighted, searchInput, state.search, state.settings, state.collapsedCategories, effectiveTab])
+  }, [highlighted, searchInput, state.search, state.settings, state.collapsedCategories, effectiveTab, expandedSections])
 
   // ---- Per-category card (shared by the tab view and search results) ----
   function renderCategory(category: string, settings: ServerSetting[]) {
@@ -1820,7 +1839,12 @@ export function ServerSettingsPage() {
             dispatch({
               type: 'START_EDIT',
               key: setting.key,
-              currentValue: state.revealedValues[setting.key] ?? setting.value,
+              // Unrevealed sensitive settings must never seed the editor with
+              // the server's masked value — start empty so the admin must type
+              // a replacement (#585 Qodo finding 15).
+              currentValue: setting.sensitive
+                ? (state.revealedValues[setting.key] ?? '')
+                : setting.value,
             })
           }
           onCancelEdit={() => dispatch({ type: 'CANCEL_EDIT' })}
@@ -1830,6 +1854,122 @@ export function ServerSettingsPage() {
           onToggleReveal={() => handleToggleReveal(setting.key)}
           onBooleanToggle={() => handleBooleanToggle(setting.key, setting.value)}
         />
+      )
+    }
+
+    // One row: the shared key, the addressable data attribute and the highlight
+    // mark live here, so neither the flat list nor the SSO sub-sections can
+    // render a row nothing can address.
+    function renderSettingRowInRow(setting: ServerSetting) {
+      return (
+        <div
+          key={setting.key}
+          data-setting-key={setting.key}
+          // A mark that costs no layout: no border, no size change.
+          className={highlighted === setting.key ? 'rounded-md bg-signal-blue/10' : undefined}
+        >
+          {renderSettingRow(setting)}
+        </div>
+      )
+    }
+
+    // Section-aware renderer: ungrouped rows on top, then non-collapsible
+    // sections (e.g. generic SSO policy), then collapsible sections (providers).
+    // The server declares which section owns each setting and whether it is
+    // collapsible, so a provider this UI has never heard of still gets its own
+    // block — the frontend never enumerates providers.
+    function renderSections(settings: ServerSetting[]) {
+      const ungrouped = settings.filter((s) => !s.section)
+      const nonCollapsible = new Map<string, { label: string; rows: ServerSetting[] }>()
+      const collapsible = new Map<string, { label: string; rows: ServerSetting[] }>()
+      for (const s of settings) {
+        if (!s.section) continue
+        const target = s.section_collapsible ? collapsible : nonCollapsible
+        const entry = target.get(s.section) ?? {
+          label: s.section_label || s.section,
+          rows: [],
+        }
+        entry.rows.push(s)
+        target.set(s.section, entry)
+      }
+
+      // Auto-expand collapsible sections that contain the highlighted or
+      // searched setting so the row is visible.
+      const autoExpand = (rows: ServerSetting[]) =>
+        Boolean(state.search) ||
+        (!!highlighted && rows.some((r) => r.key === highlighted))
+
+      return (
+        <>
+          {ungrouped.length > 0 && (
+            <div className="divide-y divide-border-default">
+              {ungrouped.map(renderSettingRowInRow)}
+            </div>
+          )}
+          {Array.from(nonCollapsible.entries()).map(([id, { label: sectionLabel, rows }]) => (
+            <div key={id} className="mt-5 border-t border-border-default pt-4" data-setting-section={id}>
+              <h4 className="mb-2 text-xs font-semibold tracking-wide text-text-tertiary uppercase">
+                {sectionLabel}
+              </h4>
+              <div className="divide-y divide-border-default">
+                {rows.map(renderSettingRowInRow)}
+              </div>
+            </div>
+          ))}
+          {Array.from(collapsible.entries()).map(([id, { label: sectionLabel, rows }]) => {
+            const isOpen = expandedSections.has(id) || autoExpand(rows)
+            const setCount = rows.filter((r) => r.is_set ?? Boolean(r.value)).length
+            const badgeClass =
+              setCount === rows.length && rows.length > 0
+                ? 'border-signal-green/30 bg-signal-green/10 text-signal-green'
+                : setCount > 0
+                  ? 'border-signal-amber/30 bg-signal-amber/10 text-signal-amber'
+                  : 'border-border-muted bg-surface-elevated text-text-tertiary'
+            const badgeText =
+              setCount === rows.length && rows.length > 0
+                ? 'Configured'
+                : setCount > 0
+                  ? `Partial (${setCount}/${rows.length})`
+                  : 'Not configured'
+
+            return (
+              <div key={id} className="mt-4" data-sso-provider={id}>
+                <button
+                  type="button"
+                  aria-expanded={isOpen}
+                  className="flex w-full items-center gap-2 rounded-md px-1 py-1.5 text-left transition-colors hover:bg-surface-hover"
+                  onClick={() =>
+                    setExpandedSections((prev) => {
+                      const next = new Set(prev)
+                      if (next.has(id)) next.delete(id)
+                      else next.add(id)
+                      return next
+                    })
+                  }
+                >
+                  {isOpen ? (
+                    <ChevronDown className="h-4 w-4 shrink-0 text-text-tertiary" />
+                  ) : (
+                    <ChevronRight className="h-4 w-4 shrink-0 text-text-tertiary" />
+                  )}
+                  <span className="text-xs font-semibold tracking-wide text-text-tertiary uppercase">
+                    {sectionLabel}
+                  </span>
+                  <span
+                    className={`ml-auto inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${badgeClass}`}
+                  >
+                    {badgeText}
+                  </span>
+                </button>
+                {isOpen && (
+                  <div className="divide-y divide-border-default">
+                    {rows.map(renderSettingRowInRow)}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </>
       )
     }
 
@@ -1932,18 +2072,13 @@ export function ServerSettingsPage() {
                 cloudId={state.settings.find(s => s.key === 'atlassian_oauth_cloud_id')?.value ?? ''}
               />
             )}
-            <div className="divide-y divide-border-default">
-              {rowSettings.map((setting) => (
-                <div
-                  key={setting.key}
-                  data-setting-key={setting.key}
-                  // A mark that costs no layout: no border, no size change.
-                  className={highlighted === setting.key ? 'rounded-md bg-signal-blue/10' : undefined}
-                >
-                  {renderSettingRow(setting)}
+            {rowSettings.some((s) => s.section)
+              ? renderSections(rowSettings)
+              : (
+                <div className="divide-y divide-border-default">
+                  {rowSettings.map(renderSettingRowInRow)}
                 </div>
-              ))}
-            </div>
+              )}
             {category === 'Analysis' && <ServerProvidersCard />}
             {showsTranscriptsUsage(category, rowSettings)
               && (
@@ -2532,6 +2667,11 @@ function SettingRow({
       : ''
 
   // ---- Editing mode ----
+  // A set, unrevealed secret must not be saveable without a replacement value
+  // — submitting empty would send the mask and corrupt the credential (#585).
+  const isUnrevealedSecret = setting.sensitive && isSet && revealedValue === undefined
+  const saveBlocked = isUnrevealedSecret && !editValue.trim()
+
   if (isEditing) {
     return (
       <div className="py-3 space-y-2">
@@ -2541,10 +2681,11 @@ function SettingRow({
           type={setting.type === 'integer' ? 'number' : setting.sensitive ? 'password' : 'text'}
           autoComplete={setting.sensitive ? 'new-password' : 'off'}
           value={editValue}
+          placeholder={isUnrevealedSecret ? 'Enter new value to replace' : undefined}
           disabled={disabled}
           onChange={(e) => onSetEditValue(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') onSave()
+            if (e.key === 'Enter' && !saveBlocked) onSave()
             if (e.key === 'Escape') onCancelEdit()
           }}
           className="h-9 font-mono text-sm"
@@ -2553,7 +2694,7 @@ function SettingRow({
         {trap && <ValueTrap text={trap} />}
         {hint && <p className="text-xs text-text-quaternary">{hint}</p>}
         <div className="flex items-center gap-2">
-          <Button size="sm" onClick={onSave} disabled={saving || disabled} className="h-7 text-xs">
+          <Button size="sm" onClick={onSave} disabled={saving || disabled || saveBlocked} className="h-7 text-xs">
             {saving ? (
               <>
                 <Loader2 className="mr-1 h-3 w-3 animate-spin" />

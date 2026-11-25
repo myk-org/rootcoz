@@ -303,6 +303,42 @@ def test_settings_endpoint_labels_every_entry(client):
     assert by_key["admin_key"]["env_var"] == "ADMIN_KEY"
 
 
+def test_sso_settings_carry_the_provider_that_owns_them(client):
+    """The provider registry decides the sub-section, not a list in the UI.
+
+    A provider declares the fields it reads, so a provider the frontend has never
+    heard of still reaches its own section — the UI used to guess from the key
+    against a hand-written map, which filed a new provider's fields under the
+    generic policy block.
+    """
+    response = client.get("/api/admin/settings", headers=_admin_headers())
+    assert response.status_code == 200
+    by_key = {item["key"]: item for item in response.json()}
+
+    # Declared per provider class: collapsible sub-sections.
+    for provider in main.auth_sso.PROVIDER_CLASSES:
+        for field in provider.settings_fields:
+            assert by_key[field]["section"] == provider.name, field
+            assert by_key[field]["section_label"] == provider.display_name, field
+            assert by_key[field]["section_collapsible"] is True, field
+
+    # Generic SSO policy: non-collapsible "sso" section.
+    for generic in (
+        "sso_allowed_domains",
+        "sso_state_ttl_seconds",
+        "sso_device_code_ttl_seconds",
+        "sso_device_poll_interval_seconds",
+    ):
+        assert by_key[generic]["section"] == "sso", generic
+        assert by_key[generic]["section_label"] == "SSO", generic
+        assert "section_collapsible" not in by_key[generic], generic
+
+    # Nothing outside SSO claims a section.
+    assert "section" not in by_key["admin_key"]
+    assert "section" not in by_key["ai_model"]
+    assert "section" not in by_key["jenkins_url"]
+
+
 def test_jira_atst_setting_registration(client):
     """jira_atst_token is registered like every Jira method credential."""
     response = client.get("/api/admin/settings", headers=_admin_headers())
@@ -1564,6 +1600,22 @@ _EXPECTED_CATEGORIES: dict[str, set[str]] = {
         "session_ttl_hours",
         "login_lockout_enabled",
         "login_lockout_threshold",
+        # SSO merged into Auth & Security (#197).
+        "sso_allowed_domains",
+        "sso_state_ttl_seconds",
+        "sso_device_code_ttl_seconds",
+        "sso_device_poll_interval_seconds",
+        "sso_github_client_id",
+        "sso_github_client_secret",
+        "sso_google_client_id",
+        "sso_google_client_secret",
+        "sso_openshift_api_url",
+        "sso_openshift_client_id",
+        "sso_openshift_client_secret",
+        "sso_openshift_issuer",
+        "sso_redhat_client_id",
+        "sso_redhat_client_secret",
+        "sso_redhat_issuer",
     },
     "Notifications": {
         "smtp_host",
@@ -1646,7 +1698,7 @@ _JIRA_ALWAYS_VISIBLE = {
 
 
 def test_settings_categories_match_the_agreed_tabs():
-    """Every one of the 120 settings sits in its agreed tab (#585, #622)."""
+    """Every one of the 135 settings sits in its agreed tab (#585, #622)."""
     actual = {cat: set(fields) for cat, fields in main._SETTINGS_CATEGORIES.items()}
     assert actual == _EXPECTED_CATEGORIES
     # Tab order is the page order — pinned so a reorder is a visible change.
@@ -1661,7 +1713,7 @@ def test_settings_categories_match_the_agreed_tabs():
     placed = [key for fields in _EXPECTED_CATEGORIES.values() for key in fields]
     assert len(placed) == len(set(placed)), "a setting sits in two tabs"
     assert set(placed) == set(Settings.model_fields)
-    assert len(placed) == 121
+    assert len(placed) == 136
 
 
 def test_every_setting_has_a_description():

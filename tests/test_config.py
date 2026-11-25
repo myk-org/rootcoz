@@ -2,19 +2,25 @@
 
 import logging
 import os
+from dataclasses import replace
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
+from rootcoz.auth import identity as auth_identity
+from rootcoz.auth.sso.base import AuthError, ClaimSet
 from rootcoz.config import (
     Settings,
+    browser_provider_without_base_url,
     clear_settings_cache,
     duplicate_additional_repo_names,
     get_settings,
     jira_availability,
     jira_method_missing_fields,
     jira_unavailable_reason,
+    normalize_domain_list,
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
@@ -24,6 +30,7 @@ from rootcoz.config import (
 )
 from rootcoz.jira import resolve_jira_connection
 from tests.conftest import build_test_env as _build_env
+from tests.conftest import capture_main_logs
 
 
 class TestSettings:
@@ -1292,3 +1299,228 @@ class TestDefaultUserRole:
             pytest.raises(Exception, match="DEFAULT_USER_ROLE"),
         ):
             Settings(_env_file=None)
+
+
+class TestSSOIssuerPaths:
+    """Only the settings an origin is appended to refuse a path."""
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("sso_openshift_issuer", "https://oauth-openshift.example.com/some/path"),
+            ("sso_openshift_api_url", "https://api.cluster:6443/extra"),
+        ],
+    )
+    def test_a_path_on_an_openshift_origin_is_refused(
+        self, field: str, value: str
+    ) -> None:
+        """The provider appends /oauth/... and /api/... to these origins."""
+        with (
+            patch.dict(os.environ, _build_env(), clear=True),
+            pytest.raises(ValidationError, match="bare origin"),
+        ):
+            Settings(_env_file=None, **{field: value})
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("sso_openshift_issuer", "https://oauth-openshift.example.com"),
+            ("sso_openshift_api_url", "https://api.cluster:6443"),
+            # A Keycloak realm issuer is a path by design, so it still passes.
+            ("sso_redhat_issuer", "https://sso.example.com/auth/realms/myrealm"),
+        ],
+    )
+    def test_a_bare_origin_or_realm_path_is_accepted(
+        self, field: str, value: str
+    ) -> None:
+        """A bare origin, and the Red Hat realm path, are the valid shapes."""
+        with patch.dict(os.environ, _build_env(), clear=True):
+            assert getattr(Settings(_env_file=None, **{field: value}), field) == value
+
+
+class TestDeviceCodePollInterval:
+    """The poll interval must leave the CLI time to poll a live code."""
+
+    @pytest.mark.parametrize("interval", [600, 601])
+    def test_interval_at_or_above_the_ttl_is_refused(self, interval: int) -> None:
+        """An interval that long means no poll happens before the code expires."""
+        with (
+            patch.dict(os.environ, _build_env(), clear=True),
+            pytest.raises(ValidationError, match="must be shorter than"),
+        ):
+            Settings(
+                _env_file=None,
+                sso_device_code_ttl_seconds=600,
+                sso_device_poll_interval_seconds=interval,
+            )
+
+    def test_interval_below_the_ttl_is_accepted(self) -> None:
+        """A shorter interval leaves room for at least one poll."""
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings(
+                _env_file=None,
+                sso_device_code_ttl_seconds=600,
+                sso_device_poll_interval_seconds=599,
+            )
+            assert settings.sso_device_poll_interval_seconds == 599
+
+    def test_defaults_are_accepted(self) -> None:
+        """The shipped defaults (600s TTL, 5s interval) stay valid."""
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings(_env_file=None)
+            assert settings.sso_device_code_ttl_seconds == 600
+            assert settings.sso_device_poll_interval_seconds == 5
+
+
+class TestBrowserProviderWithoutBaseUrl:
+    """A configured provider with no public origin cannot complete a login.
+
+    One predicate, asked by the settings save path (which refuses to introduce
+    it) and by ``get_settings`` (which says so once). The device flow is not
+    covered: the CLI joins a relative verification URL itself.
+    """
+
+    _GOOGLE: ClassVar[dict[str, str]] = {
+        "SSO_GOOGLE_CLIENT_ID": "client-id",
+        "SSO_GOOGLE_CLIENT_SECRET": "client-secret",  # pragma: allowlist secret
+    }
+
+    def _settings(self, **env: str) -> Settings:
+        with patch.dict(os.environ, _build_env(**env), clear=True):
+            return Settings(_env_file=None)
+
+    def test_a_device_only_deployment_is_correctly_configured(self) -> None:
+        """No provider and no base URL is the shipped CLI-only setup."""
+        assert browser_provider_without_base_url(self._settings()) is None
+
+    def test_a_configured_provider_without_a_base_url_is_named(self) -> None:
+        """The name is what makes the refusal and the warning actionable."""
+        settings = self._settings(**self._GOOGLE)
+        assert browser_provider_without_base_url(settings) == "google"
+
+    def test_a_whitespace_base_url_is_no_base_url(self) -> None:
+        """It cannot build a URL, so it must not read as configured."""
+        settings = self._settings(**self._GOOGLE, PUBLIC_BASE_URL="   ")
+        assert browser_provider_without_base_url(settings) == "google"
+
+    def test_a_base_url_settles_it(self) -> None:
+        """The pair a deployment needs: credentials and an origin."""
+        settings = self._settings(**self._GOOGLE, PUBLIC_BASE_URL="https://x.example")
+        assert browser_provider_without_base_url(settings) is None
+
+    def test_half_a_credential_is_not_a_provider(self) -> None:
+        """No secret means the button was never offered, so nothing is hidden."""
+        settings = self._settings(SSO_GOOGLE_CLIENT_ID="client-id")
+        assert browser_provider_without_base_url(settings) is None
+
+    def test_the_misconfiguration_is_warned_about_once(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A rebuild repeats neither the line nor its absence; startup stays up."""
+        from rootcoz import config
+
+        monkeypatch.setattr(config, "_warned_missing_base_url", None)
+        with patch.dict(os.environ, _build_env(**self._GOOGLE), clear=True):
+            clear_settings_cache()
+            with capture_main_logs(
+                caplog, level=logging.WARNING, logger="rootcoz.config"
+            ):
+                settings = get_settings()
+                clear_settings_cache()
+                get_settings()
+
+            lines = [
+                r.getMessage()
+                for r in caplog.records
+                if "PUBLIC_BASE_URL" in r.getMessage()
+            ]
+            assert len(lines) == 1
+            assert "'google'" in lines[0]
+        # The load itself never fails: Server Settings is where this is fixed.
+        assert settings.public_base_url is None
+
+
+class TestSSODomainAllowList:
+    """An allow-list entry no email domain can match is a lockout, not a typo."""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # An address pasted whole: no email domain ever equals it.
+            "alice@redhat.com",
+            # An empty label can never appear in a host name.
+            "redhat..com",
+            # A label may not start or end with '-', nor carry a path.
+            "-x.com",
+            "x-.com",
+            "redhat.com/foo",
+            # A single label admits nothing a mail domain can satisfy.
+            "com",
+            # 64 characters is one past the DNS limit.
+            f"{'a' * 64}.com",
+            # Not a legal IDNA name at all (a label is empty after encoding).
+            "münchen..de",
+        ],
+    )
+    def test_an_entry_that_cannot_match_is_refused(self, raw: str) -> None:
+        """Saved as-is, each of these would refuse every SSO sign-in."""
+        with pytest.raises(ValueError, match="Invalid SSO domain entry"):
+            normalize_domain_list(raw)
+
+    def test_an_overlong_name_is_refused_despite_valid_labels(self) -> None:
+        """Five 63-character labels pass the label rule but exceed 253 characters."""
+        name = ".".join(["a" * 63] * 5)
+        assert all(len(label) == 63 for label in name.split("."))
+        with pytest.raises(ValueError, match="Invalid SSO domain entry"):
+            normalize_domain_list(name)
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("@RedHat.com", frozenset({"redhat.com"})),
+            ("redhat.com.", frozenset({"redhat.com"})),
+            # A Unicode entry is kept in its punycode form — the one a claim is
+            # compared in.
+            ("münchen.de", frozenset({"xn--mnchen-3ya.de"})),
+            ("MÜNCHEN.DE", frozenset({"xn--mnchen-3ya.de"})),
+            ("eng.redhat.com", frozenset({"eng.redhat.com"})),
+            ("@RedHat.com,example.org", frozenset({"redhat.com", "example.org"})),
+            # Punycode is plain ASCII, so it is a usable entry.
+            ("xn--mnchen-3ya.de", frozenset({"xn--mnchen-3ya.de"})),
+        ],
+    )
+    def test_a_real_domain_is_normalised(
+        self, raw: str, expected: frozenset[str]
+    ) -> None:
+        """The '@', the trailing dot and the case never change the meaning."""
+        assert normalize_domain_list(raw) == expected
+
+    def test_a_unicode_entry_admits_both_spellings_of_the_claim(self) -> None:
+        """The IdP may report either form, so both sides are compared as IDNA."""
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings(_env_file=None, sso_allowed_domains="münchen.de")
+        assert settings.sso_allowed_domains_set == frozenset({"xn--mnchen-3ya.de"})
+
+        claim = ClaimSet(
+            subject="1", username_hint="alice", claims={"email_verified": True}
+        )
+        for email in ("alice@münchen.de", "alice@xn--mnchen-3ya.de"):
+            auth_identity.check_domain(replace(claim, email=email), settings)
+
+        # A look-alike suffix is still refused, and a domain that cannot be
+        # encoded matches nothing rather than raising out of the callback.
+        for refused in ("alice@notmünchen.de", "alice@münchen..de"):
+            with pytest.raises(AuthError) as excinfo:
+                auth_identity.check_domain(replace(claim, email=refused), settings)
+            assert excinfo.value.reason == "domain_not_allowed"
+
+    def test_a_blank_value_disables_the_check(self) -> None:
+        """Unset means no restriction, and so does whitespace alone."""
+        assert normalize_domain_list("") == frozenset()
+        assert normalize_domain_list(None) == frozenset()
+        assert normalize_domain_list("   ") == frozenset()
+
+    def test_a_list_of_separators_is_refused(self) -> None:
+        """Reading it as 'no restriction' would silently disable the policy."""
+        with pytest.raises(ValueError, match="Invalid SSO domain entry"):
+            normalize_domain_list(",")

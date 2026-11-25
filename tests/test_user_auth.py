@@ -125,27 +125,58 @@ class TestUserRegistration:
         assert first.status_code == 200
         resp = client.post("/api/auth/register", json={"username": "dupuser"})
         assert resp.status_code == 400
-        assert "already has" in resp.json()["detail"].lower()
+        assert "already exists" in resp.json()["detail"].lower()
 
-    def test_register_legacy_user_migration(self, client, temp_db_path):
-        """Pre-tracked user (cookie-only, no key) can register to get an API key."""
-        # Simulate a legacy user created by track_user (no api_key_hash)
+    def test_register_legacy_keyless_user_is_refused(self, client, temp_db_path):
+        """A keyless row (cookie-only legacy, proxy-provisioned) is not claimable.
+
+        Registration is insert-only, so having tracked the name once must never
+        turn into an API key for whoever registers it first.
+        """
         with patch.object(storage, "DB_PATH", temp_db_path):
             asyncio.run(storage.track_user("legacyuser"))
 
         resp = client.post("/api/auth/register", json={"username": "legacyuser"})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "api_key" in data
-        assert data["api_key"].startswith("rootcoz_")
-        assert "rootcoz_session" in resp.cookies
 
-        # Can now login with the new key
-        login_resp = client.post(
-            "/api/auth/login",
-            json={"username": "legacyuser", "api_key": data["api_key"]},
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == storage._REGISTRATION_NAME_TAKEN.format(
+            username="legacyuser"
         )
-        assert login_resp.status_code == 200
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            assert asyncio.run(storage.user_has_key("legacyuser")) is False
+
+    def test_register_refuses_a_keyless_and_a_keyed_name_identically(
+        self, client, temp_db_path
+    ):
+        """Both shapes get one message, so a stranger learns only the name is used."""
+        assert (
+            client.post(
+                "/api/auth/register", json={"username": "keyedname"}
+            ).status_code
+            == 200
+        )
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(storage.create_keyless_user("keylessname", created_via="proxy"))
+
+        keyed = client.post("/api/auth/register", json={"username": "keyedname"})
+        keyless = client.post("/api/auth/register", json={"username": "keylessname"})
+
+        assert keyed.status_code == keyless.status_code == 400
+        assert keyed.json()["detail"] == keyless.json()["detail"].replace(
+            "keylessname", "keyedname"
+        )
+
+    def test_a_rotated_key_works_for_a_refused_keyless_name(self, client, temp_db_path):
+        """The named remedy — an audited rotation — really does produce a key."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(storage.create_keyless_user("keylessname", created_via="proxy"))
+            raw_key = asyncio.run(storage.rotate_user_key("keylessname"))
+
+        login = client.post(
+            "/api/auth/login",
+            json={"username": "keylessname", "api_key": raw_key},
+        )
+        assert login.status_code == 200
 
     def test_register_public_no_auth_needed(self, client):
         """Registration endpoint is accessible without any authentication."""
@@ -559,28 +590,28 @@ class TestStorageCreateUser:
     def test_create_user_duplicate_with_key(self, _init_db, temp_db_path):
         async def run():
             await storage.create_user("duptest")
-            with pytest.raises(ValueError, match="already has"):
+            with pytest.raises(ValueError, match="already exists"):
                 await storage.create_user("duptest")
 
         with patch.object(storage, "DB_PATH", temp_db_path):
             asyncio.run(run())
 
-    def test_create_user_existing_without_key_generates_key(
-        self, _init_db, temp_db_path
-    ):
-        """If user exists without key, create_user generates one."""
+    def test_create_user_existing_without_key_is_refused(self, _init_db, temp_db_path):
+        """An existing keyless row is refused, not handed a key.
+
+        ``track_user`` (cookie-only) and ``create_keyless_user`` (proxy header)
+        both leave rows with no key; minting one on a name claim would take the
+        account over.
+        """
 
         async def run():
-            # Track user (creates user without key)
             await storage.track_user("tracked_no_key")
             assert not await storage.user_has_key("tracked_no_key")
 
-            # create_user should generate a key for existing user without one
-            _, api_key = await storage.create_user("tracked_no_key")
-            assert api_key.startswith("rootcoz_")
+            with pytest.raises(ValueError, match="already exists"):
+                await storage.create_user("tracked_no_key")
 
-            # User now has a key
-            assert await storage.user_has_key("tracked_no_key")
+            assert not await storage.user_has_key("tracked_no_key")
 
         with patch.object(storage, "DB_PATH", temp_db_path):
             asyncio.run(run())
@@ -682,7 +713,7 @@ class TestCaseInsensitiveUsernames:
         assert resp.status_code == 200
         resp2 = client.post("/api/auth/register", json={"username": "Charlie"})
         assert resp2.status_code == 400
-        assert "already has" in resp2.json()["detail"].lower()
+        assert "already exists" in resp2.json()["detail"].lower()
 
     def test_create_admin_user_normalizes(self, _init_db, temp_db_path):
         """create_admin_user normalizes username to lowercase."""
@@ -761,6 +792,74 @@ class TestCaseInsensitiveUsernames:
                 assert len(rows) == 1
                 assert rows[0]["username"] == "frank"
                 assert rows[0]["role"] == "admin"
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(run())
+
+    def test_upgrade_from_a_pre_sso_database_merges_case_variants(self, temp_db_path):
+        """A database that predates SSO upgrades without tripping over SSO tables.
+
+        ``_migrate_lowercase_usernames`` deletes a merged duplicate's dependants
+        through ``_delete_user_dependants``, which deletes from
+        ``user_identities`` and ``sso_device_codes`` unconditionally. ``init_db``
+        must therefore create those tables *before* it runs the merge: on a
+        database that predates them the merge would otherwise fail with
+        ``no such table: user_identities`` and the server would not start at all
+        on upgrade. This test pins that ordering, not just the merge result.
+        """
+
+        async def table_names() -> set[str]:
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+                return {dict(row)["name"] for row in await cursor.fetchall()}
+
+        async def run():
+            # A pre-SSO schema: only ``users``, and two names that differ by case.
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "CREATE TABLE IF NOT EXISTS users ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "username TEXT UNIQUE NOT NULL, "
+                    "api_key_hash TEXT UNIQUE, "
+                    "role TEXT NOT NULL DEFAULT 'reviewer', "
+                    "status TEXT NOT NULL DEFAULT 'active', "
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+                    "last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+                )
+                await db.execute(
+                    "INSERT INTO users (username, role, created_at) "
+                    "VALUES ('Heidi', 'operator', '2024-01-01 00:00:00')"
+                )
+                await db.execute(
+                    "INSERT INTO users (username, role, created_at) "
+                    "VALUES ('HEIDI', 'reviewer', '2024-06-01 00:00:00')"
+                )
+                await db.commit()
+
+            # The starting point is what makes the test meaningful: no SSO table
+            # exists when init_db begins, so the merge below can only succeed if
+            # init_db created them first.
+            assert not {"user_identities", "sso_device_codes", "sso_link_tickets"} & (
+                await table_names()
+            )
+
+            await storage.init_db()
+
+            assert {
+                "user_identities",
+                "sso_device_codes",
+                "sso_link_tickets",
+            } <= await table_names()
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT username, role FROM users WHERE lower(username) = 'heidi'"
+                )
+                rows = [dict(r) for r in await cursor.fetchall()]
+            assert len(rows) == 1
+            assert rows[0]["username"] == "heidi"
+            assert rows[0]["role"] == "operator"
 
         with patch.object(storage, "DB_PATH", temp_db_path):
             asyncio.run(run())

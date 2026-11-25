@@ -1152,8 +1152,13 @@ def test_logout_is_audited(app_client) -> None:
     assert event["target_type"] == "user"
     assert event["target_id"] == "admin"
     assert event["outcome"] == "success"
-    # The session cookie is cleared, but its value is never a detail.
-    assert event["details"] == {"session_cleared": True}
+    # The session cookie is cleared, but its value is never a detail. The row
+    # also says why an IdP logout was or was not offered — `not_sso` for this
+    # API-key login.
+    assert event["details"] == {"session_cleared": True, "idp_logout": "not_sso"}
+    # Logout is reachable while anonymous, so the actor is read from the session
+    # row rather than from the middleware.
+    assert event["actor"] == "admin"
 
 
 def test_settings_update_audits_keys_without_values(app_client) -> None:
@@ -8462,3 +8467,61 @@ def test_review_refusal_names_the_test_without_the_forged_markup(app_client) -> 
     assert "missing" in detail
     assert "[AUDIT]" not in detail and "\n" not in detail
     assert "ghp_" not in detail
+
+
+class TestThrottleFamiliesAreSeparate:
+    """A flood of one family must not spend another family's budget.
+
+    The families used to share one per-minute allowance, so anonymous SSO starts —
+    a public POST anyone can drive — could drop the ``auth.login_failed`` rows an
+    incident is reconstructed from.
+    """
+
+    def test_the_families_are_disjoint_and_their_union_is_the_throttled_set(self):
+        from rootcoz import main as main_module
+
+        seen: set[str] = set()
+        for name, actions in main_module._AUDIT_THROTTLE_GROUPS.items():
+            assert not (seen & actions), f"{name} overlaps another family"
+            seen |= actions
+        assert seen == set(main_module._AUDIT_THROTTLED_ACTIONS)
+
+    def test_a_credential_failure_counts_only_credential_failures(self):
+        from rootcoz import main as main_module
+
+        family = main_module.audit_throttle_actions("auth.login_failed")
+        assert family is not None
+        assert "auth.login_failed" in family
+        # The noisy family is absent, so its flood cannot spend this budget.
+        assert "auth.sso_login_start" not in family
+        assert "auth.sso_device_started" not in family
+
+    def test_an_unthrottled_action_has_no_family(self):
+        from rootcoz import main as main_module
+
+        assert main_module.audit_throttle_actions("auth.login") is None
+
+    async def test_a_flood_of_anonymous_starts_still_records_a_login_failure(
+        self, audit_db: Path
+    ):
+        """The behavioural half: another family's spend is not this family's."""
+        from datetime import UTC, datetime, timedelta
+
+        from rootcoz import main as main_module
+
+        family = main_module.audit_throttle_actions("auth.login_failed")
+        assert family is not None
+        throttle = storage.AuditThrottle(
+            limit=1,
+            actions=family,
+            since=storage.audit_timestamp(datetime.now(UTC) - timedelta(seconds=60)),
+        )
+        for _ in range(5):
+            await storage.insert_audit_event(
+                action="auth.sso_login_start", actor="anonymous"
+            )
+
+        event = await storage.insert_audit_event(
+            action="auth.login_failed", actor="alice", throttle=throttle
+        )
+        assert event is not None

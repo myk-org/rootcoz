@@ -71,6 +71,10 @@ interface TestSetting {
   category: string
   sensitive: boolean
   is_set?: boolean
+  // Sent by the server for SSO rows: which provider owns the setting.
+  section?: string
+  section_label?: string
+  section_collapsible?: boolean
   restart_required: boolean
   source: 'default' | 'env' | 'db'
   updated_by: string
@@ -3414,5 +3418,246 @@ describe('ServerSettingsPage shipped tab taxonomy (#585 E2E)', () => {
 
     await waitFor(() => expect(testIntegration).toHaveBeenCalledWith('github'))
     expect(await screen.findByRole('status')).toHaveTextContent('Connection successful')
+  })
+})
+
+
+describe('Auth & Security SSO section grouping', () => {
+  /**
+   * SSO settings are now under Auth & Security. Generic SSO rows have
+   * `section: 'sso'`, provider rows have `section_collapsible: true`.
+   */
+  const ssoSection = { section: 'sso', section_label: 'SSO' }
+  const providerSection = (key: string, label: string) => ({
+    section: key,
+    section_label: label,
+    section_collapsible: true,
+  })
+  const ssoSettings = () => [
+    mk('sso_allowed_domains', 'Auth & Security', 'redhat.com', ssoSection),
+    mk('sso_state_ttl_seconds', 'Auth & Security', '600', ssoSection),
+    mk('sso_device_code_ttl_seconds', 'Auth & Security', '600', ssoSection),
+    mk('sso_device_poll_interval_seconds', 'Auth & Security', '5', ssoSection),
+    mk('sso_google_client_id', 'Auth & Security', 'gid', providerSection('google', 'Google')),
+    mk('sso_google_client_secret', 'Auth & Security', 'gsecret', { sensitive: true, ...providerSection('google', 'Google') }),
+    mk('sso_github_client_id', 'Auth & Security', 'hid', providerSection('github', 'GitHub')),
+    mk('sso_openshift_issuer', 'Auth & Security', 'https://oauth.example', providerSection('openshift', 'OpenShift')),
+    mk('sso_openshift_api_url', 'Auth & Security', 'https://api.example:6443', providerSection('openshift', 'OpenShift')),
+    mk('sso_redhat_issuer', 'Auth & Security', 'https://sso.example/auth/realms/x', providerSection('redhat', 'Red Hat SSO')),
+    mk('sso_redhat_client_id', 'Auth & Security', 'rid', providerSection('redhat', 'Red Hat SSO')),
+  ]
+
+  async function openAuthTab() {
+    get.mockResolvedValue([...baseSettings(), ...ssoSettings()] as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Auth & Security' }))
+    await waitForRow('admin_key')
+  }
+
+  it('no SSO tab exists — SSO settings live under Auth & Security', async () => {
+    get.mockResolvedValue([...baseSettings(), ...ssoSettings()] as never)
+    renderPage()
+    await screen.findByRole('tab', { name: 'Auth & Security' })
+    expect(screen.queryByRole('tab', { name: 'SSO' })).not.toBeInTheDocument()
+  })
+
+  it('puts general Auth & Security rows above the SSO section which is above provider sections', async () => {
+    await openAuthTab()
+
+    // admin_key is an ungrouped Auth & Security row.
+    const generalRow = row('admin_key')!
+    // The SSO section heading.
+    const ssoHeading = screen.getByRole('heading', { name: 'SSO' })
+    expect(generalRow.compareDocumentPosition(ssoHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    // SSO generic row is above the first provider section.
+    const ssoRow = row('sso_allowed_domains')!
+    const googleProvider = document.querySelector('[data-sso-provider="google"]')!
+    expect(ssoRow.compareDocumentPosition(googleProvider) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // SSO generic rows are not inside any provider block.
+    for (const key of ['sso_state_ttl_seconds', 'sso_device_code_ttl_seconds', 'sso_device_poll_interval_seconds']) {
+      expect(row(key)!.closest('[data-sso-provider]')).toBeNull()
+    }
+  })
+
+  it('provider sections are collapsed by default with status badges', async () => {
+    await openAuthTab()
+
+    // All provider sections have aria-expanded="false" and show a status badge.
+    for (const name of ['Google', 'GitHub', 'OpenShift', 'Red Hat SSO']) {
+      const btn = screen.getByRole('button', { name: new RegExp(name) })
+      expect(btn).toHaveAttribute('aria-expanded', 'false')
+      // Each provider button contains a status badge.
+      expect(within(btn).getByText(/Configured|Partial|Not configured/)).toBeInTheDocument()
+    }
+    // Provider fields not in the DOM while collapsed.
+    expect(row('sso_google_client_id')).toBeNull()
+    expect(row('sso_github_client_id')).toBeNull()
+  })
+
+  it('clicking a provider header expands it and reveals only its own fields', async () => {
+    await openAuthTab()
+
+    const googleBtn = screen.getByRole('button', { name: /Google/ })
+    fireEvent.click(googleBtn)
+
+    expect(googleBtn).toHaveAttribute('aria-expanded', 'true')
+    expect(row('sso_google_client_id')).not.toBeNull()
+    expect(row('sso_google_client_secret')).not.toBeNull()
+    // Other providers stay collapsed.
+    expect(row('sso_github_client_id')).toBeNull()
+
+    // Click again to collapse.
+    fireEvent.click(googleBtn)
+    expect(googleBtn).toHaveAttribute('aria-expanded', 'false')
+    expect(row('sso_google_client_id')).toBeNull()
+  })
+
+  it('search auto-expands matching provider sections', async () => {
+    get.mockResolvedValue([...baseSettings(), ...ssoSettings()] as never)
+    renderPage()
+
+    // Type a search term that matches a Google SSO setting.
+    const searchInput = screen.getByLabelText('Search settings')
+    fireEvent.change(searchInput, { target: { value: 'sso_google_client_id' } })
+    await waitForRow('sso_google_client_id')
+
+    // The Google row is visible (auto-expanded by search).
+    expect(row('sso_google_client_id')).not.toBeNull()
+  })
+
+  it('gives an unknown provider its own collapsible section with zero frontend provider list', async () => {
+    get.mockResolvedValue([
+      ...baseSettings(),
+      ...ssoSettings(),
+      mk('sso_keycloak_client_id', 'Auth & Security', 'kid', {
+        section: 'keycloak',
+        section_label: 'Keycloak',
+        section_collapsible: true,
+      }),
+    ] as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Auth & Security' }))
+    await waitForRow('admin_key')
+
+    const keycloakBtn = screen.getByRole('button', { name: /Keycloak/ })
+    expect(keycloakBtn).toHaveAttribute('aria-expanded', 'false')
+
+    // Expand it.
+    fireEvent.click(keycloakBtn)
+    expect(keycloakBtn).toHaveAttribute('aria-expanded', 'true')
+    const keycloak = document.querySelector('[data-sso-provider="keycloak"]')
+    expect(keycloak).not.toBeNull()
+    expect(keycloak!.contains(row('sso_keycloak_client_id'))).toBe(true)
+  })
+
+  it('shows Not configured badge for a provider with no values set', async () => {
+    get.mockResolvedValue([
+      ...baseSettings(),
+      mk('sso_allowed_domains', 'Auth & Security', 'redhat.com', ssoSection),
+      mk('sso_empty_client_id', 'Auth & Security', '', providerSection('empty', 'Empty Provider')),
+    ] as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Auth & Security' }))
+    await waitForRow('sso_allowed_domains')
+
+    const emptyBtn = screen.getByRole('button', { name: /Empty Provider/ })
+    expect(within(emptyBtn).getByText('Not configured')).toBeInTheDocument()
+  })
+})
+
+
+describe('Editing a configured unrevealed SSO client secret (#585 Qodo finding 15)', () => {
+  const providerSection = (key: string, label: string) => ({ section: key, section_label: label, section_collapsible: true })
+  const ssoSettings = () => [
+    mk('sso_allowed_domains', 'Auth & Security', 'redhat.com', { section: 'sso', section_label: 'SSO' }),
+    mk('sso_google_client_id', 'Auth & Security', 'gid', providerSection('google', 'Google')),
+    mk('sso_google_client_secret', 'Auth & Security', 'gsecret', { sensitive: true, is_set: true, source: 'db' as const, ...providerSection('google', 'Google') }),
+  ]
+
+  async function openSsoTab() {
+    get.mockResolvedValue([...baseSettings(), ...ssoSettings()] as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Auth & Security' }))
+    // Expand the Google provider section to see its fields.
+    const googleBtn = await screen.findByRole('button', { name: /Google/ })
+    fireEvent.click(googleBtn)
+    await waitForRow('sso_google_client_secret')
+  }
+
+  it('starts with an empty input (not the mask) and blocks Save / Enter without a replacement', async () => {
+    await openSsoTab()
+
+    // Click Edit on the unrevealed secret
+    const editBtn = within(row('sso_google_client_secret')!).getByRole('button', { name: 'Edit SSO_GOOGLE_CLIENT_SECRET' })
+    fireEvent.click(editBtn)
+
+    // The editor input must be empty — never the server's masked value
+    const input = screen.getByLabelText('Edit SSO_GOOGLE_CLIENT_SECRET') as HTMLInputElement
+    expect(input.value).toBe('')
+    expect(input.placeholder).toBe('Enter new value to replace')
+
+    // Save button must be disabled when empty
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    // Pressing Enter must not fire a PUT
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it('enables Save once a replacement is typed and submits the new value', async () => {
+    await openSsoTab()
+    put.mockResolvedValue(undefined as never)
+
+    const editBtn = within(row('sso_google_client_secret')!).getByRole('button', { name: 'Edit SSO_GOOGLE_CLIENT_SECRET' })
+    fireEvent.click(editBtn)
+
+    const input = screen.getByLabelText('Edit SSO_GOOGLE_CLIENT_SECRET') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'new-secret-value' } })
+
+    // Save is now enabled
+    const saveBtn = screen.getByRole('button', { name: 'Save' })
+    expect(saveBtn).not.toBeDisabled()
+
+    fireEvent.click(saveBtn)
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { sso_google_client_secret: 'new-secret-value' }, // pragma: allowlist secret
+      }),
+    )
+  })
+
+  it('still seeds the editor with the plaintext when the secret has been revealed first', async () => {
+    // Reveal returns the real value
+    get.mockImplementation(async (url: unknown) => {
+      const key = typeof url === 'string' ? url.match(/reveal_key=([^&]+)/)?.[1] : undefined
+      if (key === 'sso_google_client_secret') {
+        const settings = [...baseSettings(), ...ssoSettings()]
+        const item = settings.find((s) => s.key === 'sso_google_client_secret')!
+        item.value = 'real-secret-plaintext' // pragma: allowlist secret
+        return settings
+      }
+      return [...baseSettings(), ...ssoSettings()]
+    })
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Auth & Security' }))
+    // Expand the Google provider section.
+    const googleBtn = await screen.findByRole('button', { name: /Google/ })
+    fireEvent.click(googleBtn)
+    await waitForRow('sso_google_client_secret')
+
+    // Reveal the secret first
+    fireEvent.click(within(row('sso_google_client_secret')!).getByRole('button', { name: 'Reveal value' }))
+    await waitFor(() =>
+      expect(within(row('sso_google_client_secret')!).getByRole('button', { name: 'Edit SSO_GOOGLE_CLIENT_SECRET' }).textContent).toBe('real-secret-plaintext'),
+    )
+
+    // Now edit — the editor starts with the revealed plaintext, not empty
+    fireEvent.click(within(row('sso_google_client_secret')!).getByRole('button', { name: 'Edit SSO_GOOGLE_CLIENT_SECRET' }))
+    const input = screen.getByLabelText('Edit SSO_GOOGLE_CLIENT_SECRET') as HTMLInputElement
+    expect(input.value).toBe('real-secret-plaintext')
+
+    // Save is enabled (it has a real value)
+    expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled()
   })
 })

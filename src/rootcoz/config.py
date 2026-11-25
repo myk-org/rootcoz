@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from typing import Any, NamedTuple
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import (
@@ -23,6 +23,7 @@ from rootcoz.tag_facets import TagFacet, parse_tag_facets
 from rootcoz.url_utils import (
     _parse_valid_url,
     has_whitespace_or_control,
+    is_safe_navigation_url,
     mask_stored_url,
     validate_http_url,
 )
@@ -991,6 +992,210 @@ class Settings(BaseSettings):
         ),
     )
 
+    # first-party SSO (issue #197). A provider is offered only when both its id
+    # and its secret are set; PUBLIC_BASE_URL is required to build the callback,
+    # because the redirect must never be derived from request headers.
+    sso_google_client_id: str = Field(
+        default="",
+        description=(
+            "OAuth client id from the Google Cloud Console. Google sign-in is"
+            " offered only when this and the client secret are both set."
+        ),
+    )
+    sso_google_client_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "OAuth client secret for that client. Stored encrypted and masked;"
+            " clearing it hides the Google button."
+        ),
+    )
+
+    # GitHub is OAuth2, not OIDC: no issuer, and the email comes from its API.
+    sso_github_client_id: str = Field(
+        default="",
+        description=(
+            "OAuth App client id from GitHub. GitHub sign-in is offered only when"
+            " this and the client secret are both set; the app needs the"
+            " 'user:email' scope so a verified address is available."
+        ),
+    )
+    sso_github_client_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "OAuth App client secret from GitHub. Stored encrypted and masked."
+        ),
+    )
+
+    # OpenShift needs two origins (its OAuth server and its API server), Red Hat
+    # SSO one; both are per deployment rather than fixed like Google's.
+    sso_openshift_client_id: str = Field(
+        default="",
+        description=(
+            "OAuth client id from the cluster's OpenShift OAuth server."
+            " OpenShift sign-in is offered only when the id, the secret,"
+            " SSO_OPENSHIFT_ISSUER and SSO_OPENSHIFT_API_URL are all set."
+        ),
+    )
+    sso_openshift_client_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "OAuth client secret for the OpenShift OAuth client. Stored encrypted"
+            " and masked."
+        ),
+    )
+    sso_openshift_issuer: str = Field(
+        default="",
+        description=(
+            "OAuth-server origin of the cluster, used for the code exchange, e.g."
+            " 'https://oauth-openshift.apps.example.com'. OpenShift issues opaque"
+            " access tokens and no ID token, so there is no 'iss' claim to match:"
+            " the account, its identities and the email are read from"
+            " SSO_OPENSHIFT_API_URL. No '/.well-known/...' path and no trailing"
+            " path. Must be https (http only for a loopback dev server); any other"
+            " value is refused, so a misconfiguration cannot silently hide the"
+            " button."
+        ),
+    )
+    sso_openshift_api_url: str = Field(
+        default="",
+        description=(
+            "URL of the cluster's API server, e.g. 'https://api.example.com:6443'."
+            " The OAuth server above serves only '/oauth/*', so the account and"
+            " identity reads go here. Must be https (http only for a loopback dev"
+            " server); any other value is refused, so a misconfiguration cannot"
+            " silently fail every login."
+        ),
+    )
+    sso_redhat_client_id: str = Field(
+        default="",
+        description=(
+            "Client id of the Red Hat SSO (Keycloak) realm client. Red Hat SSO"
+            " sign-in is offered only when the id, the secret and"
+            " SSO_REDHAT_ISSUER are all set."
+        ),
+    )
+    sso_redhat_client_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Client secret for the Red Hat SSO realm client. Stored encrypted and"
+            " masked."
+        ),
+    )
+    sso_redhat_issuer: str = Field(
+        default="",
+        description=(
+            "Issuer of the Red Hat SSO realm — exactly the value it puts in its ID"
+            " token's 'iss' claim, e.g."
+            " 'https://sso.redhat.com/auth/realms/redhat-external'. Must be https"
+            " (http only for a loopback dev server); any other value is refused, so"
+            " a misconfiguration cannot silently hide the button."
+        ),
+    )
+
+    #: Email domains allowed to sign in through any SSO provider, comma-separated.
+    #: Unlike ``ALLOWED_USERS``, a malformed entry here is *rejected* at save time
+    #: rather than silently dropped: a silently dropped domain would quietly widen
+    #: or narrow who can sign in.
+    #: (``redhat.com,example.org``). Empty means no restriction. An entry matches
+    #: the domain itself and its subdomains, never a look-alike suffix.
+    sso_allowed_domains: str = Field(
+        default="",
+        description=(
+            "Comma-separated email domains allowed to sign in with SSO, e.g."
+            " 'redhat.com,example.org' (a leading '@' is accepted). An entry"
+            " admits that domain and its real subdomains — 'redhat.com' allows"
+            " 'eng.redhat.com' but not 'notredhat.com'. Checked on every SSO"
+            " login; a login whose address is missing or unverified is refused"
+            " while this is set. Empty disables the check."
+        ),
+    )
+
+    @field_validator(
+        "sso_openshift_issuer", "sso_openshift_api_url", "sso_redhat_issuer"
+    )
+    @classmethod
+    def _validate_issuer(cls, value: str, info: ValidationInfo) -> str:
+        """Require an absolute http(s) issuer or cluster API URL, where written.
+
+        A malformed issuer used to make the provider silently disappear from the
+        login page; refusing it at save time tells the admin instead. The cluster
+        API URL follows the same rule for the same reason: it crosses the network
+        with the caller's token. Only the wording of a refusal differs — the API
+        URL is not an issuer, so telling an admin "the issuer must be https" about
+        it would name the wrong field back to them.
+
+        A path is refused for the two OpenShift settings but allowed for the Red Hat
+        issuer: OpenShift's provider appends ``/oauth/authorize``, ``/oauth/token``
+        and ``/api/...`` to these origins, so a path left on them misroutes sign-in,
+        whereas the Red Hat issuer is a Keycloak realm whose path
+        (``/auth/realms/<realm>``) is part of the value in ``iss``.
+
+        Args:
+            value: The raw setting.
+            info: Which field is being validated, for the refusal's wording.
+
+        Returns:
+            The value without a trailing slash (the form discovery is built from).
+
+        Raises:
+            ValueError: When the value is set but is not an http(s) URL.
+        """
+        issuer = value.strip()
+        if not issuer:
+            return ""
+        if not issuer.startswith(("https://", "http://")):
+            msg = f"{issuer!r} is not an http(s) URL"
+            raise ValueError(msg)
+        # The Red Hat issuer is a Keycloak realm and carries ``/auth/realms/<realm>``;
+        # the two OpenShift settings are origins the provider appends paths to.
+        is_redhat_realm = info.field_name == "sso_redhat_issuer"
+        is_api_url = info.field_name == "sso_openshift_api_url"
+        noun = "cluster API URL" if is_api_url else "issuer"
+        problem = issuer_problem(issuer, noun=noun, allow_path=is_redhat_realm)
+        if problem is not None:
+            raise ValueError(f"{issuer!r}: {problem}")
+        return issuer.rstrip("/")
+
+    @field_validator("sso_allowed_domains")
+    @classmethod
+    def _validate_sso_allowed_domains(cls, value: str) -> str:
+        """Reject a malformed allow-list where it is written, not at login.
+
+        Args:
+            value: The raw setting.
+
+        Returns:
+            The value unchanged; validation only.
+
+        Raises:
+            ValueError: When an entry is a wildcard, a scheme or a path.
+        """
+        normalize_domain_list(value)
+        return value
+
+    #: How long a login attempt's state (CSRF nonce + PKCE verifier) stays valid.
+    sso_state_ttl_seconds: int = Field(
+        default=600,
+        gt=0,
+        description="Lifetime of an SSO login attempt's state cookie, in seconds.",
+    )
+    sso_device_code_ttl_seconds: int = Field(
+        default=600,
+        gt=0,
+        description=(
+            "Lifetime of a CLI device-authorization code, in seconds. The human "
+            "has this long to approve it in the browser."
+        ),
+    )
+    sso_device_poll_interval_seconds: int = Field(
+        default=5,
+        gt=0,
+        description=(
+            "Minimum interval the CLI must wait between device-code polls, in "
+            "seconds. The server refuses an earlier poll with 'slow_down'."
+        ),
+    )
+
     # GitHub (optional) -- for comment enrichment (PR status)
     github_token: SecretStr | None = Field(
         default=None,
@@ -1537,7 +1742,7 @@ class Settings(BaseSettings):
     # Consecutive failed logins before the account is locked (#379 §I.1).
     # There is no automatic expiry: "it unlocked itself after 15 minutes" is
     # exactly what an attacker waits for, so a lock needs an admin unlock.
-    # A lock blocks new logins only — see _account_block_reason.
+    # A lock blocks new logins only — see rootcoz.auth.approval.account_block_reason.
     login_lockout_threshold: int = Field(
         default=5,
         ge=0,
@@ -1605,8 +1810,11 @@ class Settings(BaseSettings):
         default=20,
         ge=0,
         description=(
-            "How many failed or blocked logins may be recorded in the audit "
-            "trail per minute — per username N, N×10 server-wide, plus at most "
+            "How many rows from the unauthenticated, per-request audit "
+            "actions (failed or blocked logins, SSO refusals, an anonymous "
+            "device-flow start, a refused proxy provisioning) may be recorded "
+            "per minute — "
+            "per username N, N×10 server-wide, plus at most "
             "N rescued rows per window for attempts against existing accounts. "
             "Cycling names does not reset the budget, no flood of junk "
             "usernames can starve the target's rows, and the total per window "
@@ -1635,7 +1843,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _normalize_optional_strings(self) -> Settings:
-        """Strip whitespace from optional string fields; blank becomes None."""
+        """Strip whitespace from string and secret fields; a blank one is not set.
+
+        A ``str | None`` field becomes ``None`` and a ``str`` field becomes
+        ``""`` — the shape each field already uses for "not configured".
+        """
         for field_name in (
             "tests_repo_url",
             "jira_email",
@@ -1663,6 +1875,17 @@ class Settings(BaseSettings):
             "gcs_bucket",
             "jira_cloud_url",
             "jira_server_url",
+            # An SSO credential that is only whitespace is not configured: the
+            # provider would otherwise be offered as a button that cannot finish
+            # a login. Blank stays "" — these fields are plain strings, and a
+            # None here would fail the re-validation `_build_settings` performs.
+            "sso_google_client_id",
+            "sso_github_client_id",
+            "sso_openshift_client_id",
+            "sso_openshift_issuer",
+            "sso_openshift_api_url",
+            "sso_redhat_client_id",
+            "sso_redhat_issuer",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
@@ -1688,6 +1911,10 @@ class Settings(BaseSettings):
             "reportportal_api_token",
             "datadog_api_key",
             "datadog_app_key",
+            "sso_google_client_secret",
+            "sso_github_client_secret",
+            "sso_openshift_client_secret",
+            "sso_redhat_client_secret",
         ):
             secret = getattr(self, field_name)
             if secret is not None:
@@ -1699,17 +1926,40 @@ class Settings(BaseSettings):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _validate_device_poll_interval(self) -> Settings:
+        """Refuse a poll interval that outlives the code it polls for.
+
+        The two settings are meaningful only against each other: a CLI that waits
+        the configured interval between polls would never poll a device code
+        before it expires, so the login could not complete.
+
+        Raises:
+            ValueError: When the interval is not strictly shorter than the TTL.
+        """
+        if self.sso_device_poll_interval_seconds >= self.sso_device_code_ttl_seconds:
+            msg = (
+                "sso_device_poll_interval_seconds"
+                f" ({self.sso_device_poll_interval_seconds}s) must be shorter than"
+                " sso_device_code_ttl_seconds"
+                f" ({self.sso_device_code_ttl_seconds}s): the CLI could never poll"
+                " the device code before it expires"
+            )
+            raise ValueError(msg)
+        return self
+
+    @property
+    def sso_allowed_domains_set(self) -> frozenset[str]:
+        """The SSO domain allow-list, normalised; empty means "no restriction"."""
+        return normalize_domain_list(self.sso_allowed_domains)
+
     @property
     def allowed_users_set(self) -> frozenset[str]:
         """Parse ALLOWED_USERS into a frozen set of lowercase usernames.
 
         Returns an empty frozenset when unset (open access).
         """
-        if not self.allowed_users or not self.allowed_users.strip():
-            return frozenset()
-        return frozenset(
-            u.strip().lower() for u in self.allowed_users.split(",") if u.strip()
-        )
+        return frozenset(csv_entries(self.allowed_users))
 
     @property
     def jira_enabled(self) -> bool:
@@ -1919,6 +2169,230 @@ def jira_site_url_error(value: str | None) -> str | None:
     return None
 
 
+def issuer_problem(
+    url: str, *, noun: str = "issuer", allow_path: bool = True
+) -> str | None:
+    """Why a configured OIDC issuer or cluster API URL is unusable.
+
+    Discovery is built by appending ``/.well-known/openid-configuration`` to an
+    issuer, and the HTTP client parses it on every login — so a query string
+    silently produces the wrong discovery URL and a non-numeric port raises inside
+    the client. Neither is caught by a scheme/host check, which is why the shape is
+    validated where an admin types it rather than at the first sign-in. A cluster
+    API URL (OpenShift's second origin) is held to the same shape because the
+    caller's token crosses it, even though nothing is discovered on it.
+
+    Args:
+        url: The value as configured.
+        noun: What the setting is called, so a refusal names the field the admin
+            actually typed into.
+        allow_path: Whether the value may carry a path. A Keycloak realm issuer
+            needs one (``/auth/realms/<realm>``); an origin the provider appends
+            its own paths to must not have one.
+
+    Returns:
+        A human-readable reason to refuse it, or ``None``.
+    """
+    candidate = (url or "").strip()
+    if not candidate:
+        return f"a {noun} is required"
+    if not issuer_is_secure(candidate):
+        return f"the {noun} must be https (http is accepted only for a loopback host)"
+    try:
+        parsed = urlparse(candidate)
+        # Accessing .port raises for a non-numeric port, so this is the check.
+        _ = parsed.port
+    except ValueError:
+        return f"the {noun} has an invalid port"
+    if parsed.query:
+        return f"the {noun} must not carry a query string"
+    if parsed.fragment:
+        return f"the {noun} must not carry a fragment"
+    if parsed.params:
+        return f"the {noun} must not carry parameters"
+    if "/.well-known/" in parsed.path:
+        # A realm issuer legitimately carries a path (Keycloak:
+        # ``/auth/realms/<realm>``); what is never right is pasting the discovery
+        # URL itself, because discovery is appended to whatever is configured.
+        return (
+            f"the {noun} must be the value the provider puts in `iss`, not its"
+            " /.well-known/openid-configuration URL"
+        )
+    if parsed.path.rstrip("/").endswith("/.well-known"):
+        return f"the {noun} must not be the well-known discovery prefix"
+    if not allow_path and parsed.path not in ("", "/"):
+        # The OpenShift provider builds ``<origin>/oauth/authorize``, ``/oauth/token``
+        # and ``<api url>/apis/...`` itself, so a path here is concatenated in front
+        # of them and the sign-in silently targets a URL that does not exist.
+        return (
+            f"the {noun} must be a bare origin without a path, because the"
+            " provider appends its own /oauth/... and /api/... paths to it"
+        )
+    return None
+
+
+def issuer_is_secure(url: str) -> bool:
+    """Whether an issuer URL protects the tokens that travel over it.
+
+    Discovery, JWKS and the token exchange all cross this URL, so plaintext is
+    refused — except for a loopback development server, where there is no network
+    to intercept. The rule lives in :func:`rootcoz.url_utils.is_safe_navigation_url`
+    because the IdP logout URL needs the same answer.
+
+    Args:
+        url: The configured issuer.
+
+    Returns:
+        True for https, and for http on a loopback host.
+    """
+    return is_safe_navigation_url(url, allow_loopback_http=True)
+
+
+def csv_entries(value: str | None, *, lower: bool = True) -> list[str]:
+    """Split a comma-separated setting into entries.
+
+    One splitter for the settings layer, so every list-valued field strips,
+    drops blanks and (by default) lower-cases the same way; the *policy* on top
+    (wildcard rejection, ``@`` stripping, membership) stays with each setting.
+
+    Args:
+        value: The raw setting.
+        lower: Lower-case the entries.
+
+    Returns:
+        The entries in the order written.
+    """
+    if not value:
+        return []
+    entries = [raw.strip() for raw in value.split(",")]
+    entries = [entry for entry in entries if entry]
+    return [entry.lower() for entry in entries] if lower else entries
+
+
+#: One DNS label: 1-63 characters of a-z, 0-9 and '-', not starting or ending
+#: with '-'. Applied to an already lower-cased entry, so no re.IGNORECASE.
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
+
+#: Longest DNS name: 253 characters (255 octets less the length bytes and the
+#: root dot). A longer name can never be a real email domain, so the entry would
+#: match nothing and, while it is the only one, refuse every SSO sign-in — the
+#: same fail-closed lockout reason as the 63-character label limit.
+_MAX_DOMAIN_LENGTH = 253
+
+
+def canonical_domain(name: str) -> str | None:
+    """The one form both sides of the allow-list compare in: IDNA ASCII.
+
+    An IdP may return ``alice@münchen.de`` while the admin wrote either
+    ``münchen.de`` or its punycode spelling, so the configured entry and the
+    claim's domain are both converted here before they are compared. A trailing
+    dot (the DNS root) is dropped first: ``redhat.com.`` is the same domain.
+
+    Args:
+        name: A domain, as an admin wrote it or as an IdP reported it.
+
+    Returns:
+        The lower-cased ASCII (punycode where needed) form, or ``None`` when the
+        name cannot be encoded — an unencodable claim then matches no entry, so
+        the login fails closed instead of raising inside the callback.
+    """
+    try:
+        return name.strip().rstrip(".").lower().encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+
+
+def domain_entry_is_valid(candidate: str) -> bool:
+    """Whether a normalised allow-list entry can ever equal an email domain.
+
+    A DNS label is one dot-separated piece of a host name: 1-63 characters drawn
+    from ``a-z``, ``0-9`` and ``-``, and it may not begin or end with ``-``. A
+    name needs at least two labels, so a single label such as ``com`` is refused:
+    it admits nothing an operator means (a mail domain always has a registrable
+    part) and is almost always a truncated paste. The whole name is bounded too
+    (253 characters): five correctly sized labels add up to a name no email
+    domain can satisfy, and an entry that admits nobody locks the deployment out.
+
+    The check also swallows the wildcard, scheme, path, space and leading-dot
+    cases: none of them is a legal label, so ``*``, ``https://redhat.com``,
+    ``redhat.com/x`` and ``.redhat.com`` all fail here.
+
+    Args:
+        candidate: One entry, already lower-cased, stripped of ``@`` and in its
+            IDNA ASCII form.
+
+    Returns:
+        True when the entry is a plausible email domain.
+    """
+    labels = candidate.split(".")
+    # A one-label name (or none at all) can never match `local@domain`.
+    if len(labels) < 2:
+        return False
+    if len(candidate) > _MAX_DOMAIN_LENGTH:
+        return False
+    return all(
+        len(label) <= 63 and _DNS_LABEL.fullmatch(label) is not None for label in labels
+    )
+
+
+def normalize_domain_list(value: str | None) -> frozenset[str]:
+    """Parse a comma-separated domain allow-list.
+
+    Entries are trimmed, lower-cased, and a leading ``@`` is dropped, so
+    ``@RedHat.com`` and ``redhat.com`` mean the same thing; a trailing dot (the
+    DNS root) is stripped. Every entry must then be a real domain name (see
+    :func:`domain_entry_is_valid`), and a list whose entries are all blank is
+    refused because it would otherwise disable the policy.
+
+    This setting is admission control, so an entry that no email address can
+    match is a lockout, not a typo the operator will notice: while it is the only
+    entry, every SSO sign-in is refused with ``domain_not_allowed``. Hence an
+    entry such as ``alice@redhat.com`` (an address pasted whole) or
+    ``redhat..com`` is rejected where it is saved.
+
+    Every entry is stored in its IDNA ASCII form (see :func:`canonical_domain`),
+    the same form the claim is compared in, so a ``münchen.de`` entry is kept as
+    ``xn--mnchen-3ya.de`` and admits either spelling of the address.
+
+    Args:
+        value: The raw setting.
+
+    Returns:
+        The domains. Empty means "no restriction".
+
+    Raises:
+        ValueError: When an entry is not a real domain name (wildcard, scheme,
+            path, a pasted address, a single label, a name that cannot be written
+            as IDNA, a label or name that is too long), or when the value
+            contains no usable domain at all.
+    """
+    if not value or not value.strip():
+        # Unset (or whitespace alone) means "no restriction"; a list of bare
+        # separators such as "," is refused below.
+        return frozenset()
+    entries = csv_entries(value)
+    domains: set[str] = set()
+    for entry in entries:
+        candidate = entry.lstrip("@")
+        if not candidate:
+            continue
+        # Validate the canonical form: it is the one a claim is compared against.
+        canonical = canonical_domain(candidate)
+        if canonical is None:
+            msg = f"Invalid SSO domain entry: '{entry}': not a valid IDNA domain"
+            raise ValueError(msg)
+        if not domain_entry_is_valid(canonical):
+            msg = f"Invalid SSO domain entry: '{entry}'"
+            raise ValueError(msg)
+        domains.add(canonical)
+    if not domains:
+        # A value was written but every entry was blank: treating that as "no
+        # restriction" would silently disable the policy.
+        msg = "Invalid SSO domain entry: no domain in the list"
+        raise ValueError(msg)
+    return frozenset(domains)
+
+
 def normalize_jira_auth_mode(value: str | None) -> str:
     """Canonical ``jira_auth_mode`` value; ``""`` when unset or invalid.
 
@@ -2061,6 +2535,68 @@ def jira_unavailable_reason(settings: Settings) -> str:
 # detection, pat/api-token fallback chain) was removed in #346:
 # jira_auth_mode is required — unset disables Jira entirely. Each
 # selected method's token is read directly by the resolver in jira.py.
+
+
+def browser_provider_without_base_url(settings: Settings) -> str | None:
+    """Name the provider that is configured but cannot complete a browser login.
+
+    A provider is *configured* when its client id and secret (and its issuer,
+    where it needs one) are set — :meth:`SSOProvider.from_settings` owns that
+    question. Offering its button additionally needs ``PUBLIC_BASE_URL``,
+    because the callback must never be derived from request headers; without it
+    the login page hides the provider and nothing else says so.
+
+    The device flow is deliberately out of scope: the CLI joins a relative
+    verification URL itself, so a deployment with no base URL and no browser
+    provider is correctly configured, and requiring one there would break it.
+
+    Args:
+        settings: Application settings to judge.
+
+    Returns:
+        The machine name of the first misconfigured provider in declaration
+        order, or ``None`` when a base URL is set or no provider is configured.
+    """
+    if (settings.public_base_url or "").strip():
+        return None
+    # Imported here because ``rootcoz.auth.sso`` reads this module at import
+    # time: a module-level import would be a cycle.
+    from rootcoz.auth.sso import PROVIDER_CLASSES
+
+    for provider_class in PROVIDER_CLASSES:
+        if provider_class.from_settings(settings) is not None:
+            return provider_class.name
+    return None
+
+
+#: Provider already reported by :func:`_warn_browser_provider_without_base_url`,
+#: so a settings rebuild repeats neither the line nor its absence.
+_warned_missing_base_url: str | None = None
+
+
+def _warn_browser_provider_without_base_url(settings: Settings) -> None:
+    """Log the base-URL misconfiguration once per state, without failing.
+
+    Startup stays up on purpose: a deployment that upgrades into this state is
+    env-configured and cannot be repaired from the shell of a process that
+    refused to boot — Server Settings is where its administrator fixes it, and
+    that page needs the process running.
+
+    Args:
+        settings: The settings that are about to be published.
+    """
+    global _warned_missing_base_url
+    missing = browser_provider_without_base_url(settings)
+    if missing == _warned_missing_base_url:
+        return
+    _warned_missing_base_url = missing
+    if missing is not None:
+        logger.warning(
+            "SSO provider %r is configured but PUBLIC_BASE_URL is not set, so"
+            " browser sign-in with it stays hidden until a public base URL is"
+            " configured (Server Settings or the environment)",
+            missing,
+        )
 
 
 # In-memory cache for DB settings overrides.
@@ -2243,6 +2779,7 @@ def get_settings() -> Settings:
             return _cached_settings
         generation = _settings_generation
     built = _build_settings()
+    _warn_browser_provider_without_base_url(built)
     hold_seconds = _settings_build_hold_seconds()
     if hold_seconds:
         time.sleep(hold_seconds)

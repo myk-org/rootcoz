@@ -22,7 +22,7 @@ from fastapi import BackgroundTasks, HTTPException
 from pydantic import SecretStr
 
 from rootcoz import storage, temp_paths
-from rootcoz.config import Settings
+from rootcoz.config import Settings, clear_settings_cache, get_settings
 from rootcoz.encryption import encrypt_sensitive_fields
 from rootcoz.engine.core import AnalysisIncompleteError
 from rootcoz.error_messages import (
@@ -35,7 +35,14 @@ from rootcoz.models import (
     FailureAnalysis,
 )
 from rootcoz.sources.jenkins_source import JenkinsError
-from tests.conftest import capture_main_logs, make_test_client
+from tests.conftest import (
+    admin_login,
+    build_test_env,
+    capture_main_logs,
+    make_app_client,
+    make_test_client,
+)
+from tests.test_auth import _assert_spa_page
 
 # Fake credentials for tests — annotated once to suppress Ruff S105/S106 globally.
 FAKE_JENKINS_PASSWORD = "not-a-real-password"  # pragma: allowlist secret
@@ -3440,6 +3447,62 @@ class TestSpaRoutes:
     ) -> None:
         response = test_client.get(path, follow_redirects=False)
         assert response.status_code in (200, 404)
+
+
+class TestProxyLoginRedirectScope:
+    """The proxy login redirect covers the login page, not every /login path.
+
+    ``/login/device`` is the CLI's device-approval screen. A visitor whose only
+    credential is ``X-Forwarded-User`` has no session a redirect to ``/`` could
+    satisfy, so the middleware must let the SPA serve that page.
+    """
+
+    @pytest.fixture
+    def proxy_client(self, temp_db_path: Path):
+        """A proxy deployment: trusted headers, readable cookies, no session."""
+        env = build_test_env(
+            DB_PATH=str(temp_db_path),
+            TRUST_PROXY_HEADERS="true",
+            SECURE_COOKIES="false",
+        )
+        yield from make_app_client(temp_db_path, env)
+
+    @pytest.mark.parametrize("path", ["/login", "/login/"])
+    def test_the_login_page_still_redirects_a_proxy_visitor(
+        self, proxy_client, path: str
+    ) -> None:
+        """Unchanged: the login page answers a proxy identity with a 303 to /."""
+        response = proxy_client.get(
+            path,
+            headers={"accept": "text/html", "X-Forwarded-User": "sso-user"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/"
+        assert response.cookies.get("rootcoz_username") == "sso-user"
+
+    @pytest.mark.parametrize("path", ["/login/device", "/login/device/"])
+    def test_the_device_approval_page_is_served_to_a_proxy_visitor(
+        self, proxy_client, path: str
+    ) -> None:
+        """The CLI must reach its approval page on a proxy-only credential."""
+        response = proxy_client.get(
+            path,
+            headers={"accept": "text/html", "X-Forwarded-User": "sso-device"},
+            follow_redirects=False,
+        )
+        assert response.status_code != 303, response.headers.get("location")
+        _assert_spa_page(response)
+
+    def test_the_login_page_is_unchanged_without_a_proxy_identity(
+        self, proxy_client
+    ) -> None:
+        """No header, no redirect: the page is served as before."""
+        response = proxy_client.get(
+            "/login", headers={"accept": "text/html"}, follow_redirects=False
+        )
+        assert response.status_code != 303
+        _assert_spa_page(response)
 
 
 class TestApiDashboardEndpoint:
@@ -15942,6 +16005,100 @@ class TestStaticAssetHeaders:
         )
 
 
+class TestSSOBaseURLSaveGuard:
+    """A browser provider saved without PUBLIC_BASE_URL is silently hidden.
+
+    The provider is offered only when its id and secret are set *and* a public
+    base URL can build the callback. Saving the credentials without it used to
+    be accepted and the button simply never appeared, so the administrator had no
+    signal at all.
+    """
+
+    _PROVIDER_SETTINGS: ClassVar[dict[str, str]] = {
+        "sso_google_client_id": "client-id",
+        "sso_google_client_secret": "client-secret",  # pragma: allowlist secret
+    }
+
+    def test_a_provider_saved_without_a_base_url_is_refused(self, test_client) -> None:
+        """The refusal names the provider and the setting that is missing."""
+        response = test_client.put(
+            "/api/admin/settings", json={"settings": self._PROVIDER_SETTINGS}
+        )
+
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "google" in detail
+        assert "PUBLIC_BASE_URL" in detail
+
+    def test_the_provider_and_its_base_url_may_be_saved_together(
+        self, test_client
+    ) -> None:
+        """One batch that stores both sides of the rule is the fix, not a refusal."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    **self._PROVIDER_SETTINGS,
+                    "public_base_url": "https://rootcoz.example",
+                }
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+
+    def test_a_half_configured_provider_is_not_judged(self, test_client) -> None:
+        """No secret means no provider: its button was never offered."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sso_google_client_id": "client-id"}},
+        )
+
+        assert response.status_code == 200, response.json()
+
+    def test_a_device_only_deployment_still_saves(self, test_client) -> None:
+        """With no browser provider there is nothing a base URL is needed for."""
+        assert get_settings().public_base_url is None
+
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sso_device_code_ttl_seconds": "900"}},
+        )
+
+        assert response.status_code == 200, response.json()
+        assert get_settings().sso_device_code_ttl_seconds == 900
+
+
+def test_an_env_configured_deployment_is_never_locked_out_of_settings(
+    temp_db_path: Path,
+) -> None:
+    """It boots into this state on purpose, so only what creates it is refused.
+
+    Credentials in the environment with no base URL is what an upgrade looks
+    like. Refusing every save would trap the administrator on the very page that
+    fixes it; the fix is one save, and anything unrelated stays savable.
+    """
+    for client in make_app_client(
+        temp_db_path,
+        {
+            "SSO_GOOGLE_CLIENT_ID": "client-id",
+            "SSO_GOOGLE_CLIENT_SECRET": "client-secret",  # pragma: allowlist secret
+        },
+    ):
+        admin_login(client)
+
+        unrelated = client.put(
+            "/api/admin/settings", json={"settings": {"audit_retention_days": "90"}}
+        )
+        assert unrelated.status_code == 200, unrelated.json()
+
+        fixed = client.put(
+            "/api/admin/settings",
+            json={"settings": {"public_base_url": "https://rootcoz.example"}},
+        )
+        assert fixed.status_code == 200, fixed.json()
+        assert get_settings().public_base_url == "https://rootcoz.example"
+
+
 class TestAdminSettingsEndpoints:
     """Tests for /api/admin/settings endpoints."""
 
@@ -16642,6 +16799,161 @@ class TestAdminSettingsEndpoints:
         )
         assert response.status_code == 400
         assert "https://" in response.json()["detail"]
+
+    def test_lowering_the_ttl_below_a_saved_poll_interval_is_refused(
+        self, test_client
+    ) -> None:
+        """Qodo: a per-key save is judged against the values in effect, not defaults.
+
+        The interval saves first (100s, fine against the default 600s TTL).
+        Saving a 50s TTL used to be accepted because the candidate carried the
+        *default* interval (5s); the stored 100/50 pair then made
+        ``get_settings()`` refuse to load, so the server could not read its own
+        settings. The refused TTL must leave the stored pair loadable.
+        """
+        from rootcoz.config import db_setting_is_set, get_settings
+
+        saved = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sso_device_poll_interval_seconds": "100"}},
+        )
+        assert saved.status_code == 200, saved.json()
+
+        refused = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sso_device_code_ttl_seconds": "50"}},
+        )
+        assert refused.status_code == 400
+        detail = refused.json()["detail"]
+        assert "sso_device_poll_interval_seconds" in detail
+        assert "sso_device_code_ttl_seconds" in detail
+        # Nothing was written: the old (default) TTL is still the one in effect.
+        assert db_setting_is_set("sso_device_code_ttl_seconds") is False
+        effective = get_settings()
+        assert (
+            effective.sso_device_poll_interval_seconds,
+            effective.sso_device_code_ttl_seconds,
+        ) == (100, 600)
+
+    def test_raising_the_poll_interval_above_a_saved_ttl_is_refused(
+        self, test_client
+    ) -> None:
+        """The other save order: a 50s TTL is stored, so a 100s interval is out."""
+        from rootcoz.config import db_setting_is_set, get_db_setting, get_settings
+
+        saved = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sso_device_code_ttl_seconds": "50"}},
+        )
+        assert saved.status_code == 200, saved.json()
+
+        refused = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sso_device_poll_interval_seconds": "100"}},
+        )
+        assert refused.status_code == 400
+        detail = refused.json()["detail"]
+        assert "sso_device_poll_interval_seconds" in detail
+        assert "sso_device_code_ttl_seconds" in detail
+        # The stored TTL is untouched and the settings still load.
+        assert db_setting_is_set("sso_device_poll_interval_seconds") is False
+        assert get_db_setting("sso_device_code_ttl_seconds") == "50"
+        assert get_settings().sso_device_code_ttl_seconds == 50
+
+    def test_a_valid_device_poll_interval_and_ttl_pair_saves(self, test_client) -> None:
+        """The rule still lets a valid pair through the same route."""
+        from rootcoz.config import get_settings
+
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "sso_device_poll_interval_seconds": "5",
+                    "sso_device_code_ttl_seconds": "600",
+                }
+            },
+        )
+        assert response.status_code == 200, response.json()
+        assert set(response.json()["updated"]) == {
+            "sso_device_poll_interval_seconds",
+            "sso_device_code_ttl_seconds",
+        }
+        effective = get_settings()
+        assert (
+            effective.sso_device_poll_interval_seconds,
+            effective.sso_device_code_ttl_seconds,
+        ) == (5, 600)
+
+    def test_an_invalid_device_poll_interval_and_ttl_batch_is_refused(
+        self, test_client
+    ) -> None:
+        """One request writing both sides is judged as the pair it would store."""
+        from rootcoz.config import db_setting_is_set
+
+        refused = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "sso_device_poll_interval_seconds": "100",
+                    "sso_device_code_ttl_seconds": "50",
+                }
+            },
+        )
+        assert refused.status_code == 400
+        detail = refused.json()["detail"]
+        assert "sso_device_poll_interval_seconds" in detail
+        assert "sso_device_code_ttl_seconds" in detail
+        # A rejected save writes neither key.
+        assert db_setting_is_set("sso_device_poll_interval_seconds") is False
+        assert db_setting_is_set("sso_device_code_ttl_seconds") is False
+
+    def test_device_timing_pair_valid_in_both_key_orders(self, test_client) -> None:
+        """A valid (ttl=2, interval=1) pair must save regardless of JSON key order."""
+        from rootcoz.config import get_settings
+
+        for settings in (
+            {
+                "sso_device_code_ttl_seconds": "2",
+                "sso_device_poll_interval_seconds": "1",
+            },
+            {
+                "sso_device_poll_interval_seconds": "1",
+                "sso_device_code_ttl_seconds": "2",
+            },
+        ):
+            response = test_client.put(
+                "/api/admin/settings", json={"settings": settings}
+            )
+            assert response.status_code == 200, (
+                f"order {list(settings)} failed: {response.json()}"
+            )
+            effective = get_settings()
+            assert effective.sso_device_poll_interval_seconds == 1
+            assert effective.sso_device_code_ttl_seconds == 2
+
+    def test_device_timing_pair_invalid_in_both_key_orders(self, test_client) -> None:
+        """An invalid pair (ttl=2, interval=3) must be refused in both orders."""
+        from rootcoz.config import db_setting_is_set
+
+        for settings in (
+            {
+                "sso_device_code_ttl_seconds": "2",
+                "sso_device_poll_interval_seconds": "3",
+            },
+            {
+                "sso_device_poll_interval_seconds": "3",
+                "sso_device_code_ttl_seconds": "2",
+            },
+        ):
+            refused = test_client.put(
+                "/api/admin/settings", json={"settings": settings}
+            )
+            assert refused.status_code == 400, (
+                f"order {list(settings)} should have failed"
+            )
+            assert "sso_device_poll_interval_seconds" in refused.json()["detail"]
+            assert db_setting_is_set("sso_device_poll_interval_seconds") is False
+            assert db_setting_is_set("sso_device_code_ttl_seconds") is False
 
     def test_put_settings_prow_url_with_credentials_rejected(self, test_client) -> None:
         response = test_client.put(
@@ -23298,3 +23610,436 @@ class TestUserLifecycleAndAdminSseRevocation:
             assert cleared == "event: pending-count\ndata: 0\n\n"
         finally:
             await body_nav.aclose()
+
+
+#: An HTTPS deployment at a known public origin — what the same-origin proof on
+#: the SSO write routes is measured against, and a configured IdP so the routes
+#: get past "unknown provider" and reach that proof.
+_SSO_HTTPS_ENV = {
+    "SSO_GOOGLE_CLIENT_ID": "test-client-id",
+    "SSO_GOOGLE_CLIENT_SECRET": "test-client-secret",  # pragma: allowlist secret
+    "PUBLIC_BASE_URL": "https://rootcoz.example.com",
+}
+
+#: The refusal the check already produces for a request that proves no origin.
+_APPROVE_CROSS_ORIGIN_DETAIL = "Approval must come from this server's own approval page"
+
+
+def _start_device_code(client: Any) -> dict[str, str]:
+    """Start a device flow and return the server's answer."""
+    response = client.post("/api/auth/sso/device/start", json={})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def _sign_in_as(client: Any, username: str, *, role: str = "reviewer") -> None:
+    """Create *username* with *role* and put its session cookie on *client*."""
+    await storage.create_user(username)
+    session = await storage.create_session(username, is_admin=False, role=role)
+    client.cookies.set("rootcoz_session", session)
+
+
+async def _sign_in_a_reviewer(client: Any) -> None:
+    """Create a reviewer account and put its session cookie on *client*."""
+    await _sign_in_as(client, "ruthn")
+
+
+async def test_a_viewer_reads_their_own_sign_in_methods(temp_db_path: Path) -> None:
+    """Reading your own linked providers is a read, not a role-gated write.
+
+    The list route deliberately does not call ``_require_reviewer``: the
+    settings card renders this for every role, and the caller's own rows are
+    all it can reach.
+    """
+    for client in make_app_client(temp_db_path):
+        await _sign_in_as(client, "vicky", role="viewer")
+        await storage.add_user_identity(
+            "vicky", "google", "sub-v", email="vicky@example.com"
+        )
+
+        response = client.get("/api/user/identities")
+
+        assert response.status_code == 200
+        assert [
+            (identity["provider"], identity["email"])
+            for identity in response.json()["identities"]
+        ] == [("google", "vicky@example.com")]
+
+
+async def test_an_anonymous_caller_cannot_list_sign_in_methods(
+    temp_db_path: Path,
+) -> None:
+    """No session, no account to scope the read to."""
+    for client in make_app_client(temp_db_path):
+        assert client.get("/api/user/identities").status_code == 401
+
+
+async def test_only_a_reviewer_can_unlink_a_sign_in_method(
+    temp_db_path: Path,
+) -> None:
+    """The writes stay reviewer-level: a viewer is refused, a reviewer proceeds."""
+    for client in make_app_client(temp_db_path):
+        await _sign_in_as(client, "vicky", role="viewer")
+        await storage.add_user_identity("vicky", "google", "sub-v")
+        await storage.add_user_identity("vicky", "github", "gh-v")
+
+        assert client.delete("/api/user/identities/github").status_code == 403
+        assert len(await storage.list_user_identities("vicky")) == 2
+
+        await _sign_in_as(client, "ruthn")
+        await storage.add_user_identity("ruthn", "google", "sub-r")
+        await storage.add_user_identity("ruthn", "github", "gh-r")
+
+        assert client.delete("/api/user/identities/github").status_code == 200
+        assert [
+            identity["provider"]
+            for identity in await storage.list_user_identities("ruthn")
+        ] == ["google"]
+
+
+async def _sso_ticket(client: Any, provider: str = "google") -> str:
+    """Mint a first-login ticket and attach the browser-binding cookie."""
+    from rootcoz.auth.sso import state as sso_state
+
+    binding = sso_state.new_ticket_binding()
+    ticket = await storage.create_sso_ticket(
+        provider=provider,
+        subject="sub-1",
+        email="alice@example.com",
+        suggested_username="alice",
+        binding=binding,
+    )
+    client.cookies.set(sso_state.TICKET_COOKIE, binding)
+    return ticket
+
+
+def _remove_the_google_provider() -> None:
+    """Clear Google's credentials, as an operator editing the deployment would."""
+    os.environ.pop("SSO_GOOGLE_CLIENT_ID")
+    os.environ.pop("SSO_GOOGLE_CLIENT_SECRET")
+    clear_settings_cache()
+
+
+async def test_a_ticket_for_a_removed_provider_creates_no_account(
+    temp_db_path: Path,
+) -> None:
+    """Redeeming asks the *current* configuration, not the ticket's provider."""
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        ticket = await _sso_ticket(client)
+        _remove_the_google_provider()
+
+        response = client.post(
+            "/api/auth/sso/create", json={"ticket": ticket, "username": "alice"}
+        )
+
+        # The answer a dead ticket gets: the caller learns nothing about which
+        # of the two it was, and the provider name never reaches the browser.
+        assert response.status_code == 404
+        assert response.json()["detail"] == "This sign-in link has expired"
+        assert await storage.get_user_by_username("alice") is None
+        refusal = (await storage.list_audit_events(limit=5))["events"][0]
+        assert refusal["action"] == "auth.sso_login_failed"
+        assert refusal["details"]["reason"] == "unknown_provider"
+
+        # Refused without spending the ticket: restoring the provider lets the
+        # same link finish, so the refusal consumed nothing.
+        os.environ.update(
+            {
+                "SSO_GOOGLE_CLIENT_ID": _SSO_HTTPS_ENV["SSO_GOOGLE_CLIENT_ID"],
+                "SSO_GOOGLE_CLIENT_SECRET": _SSO_HTTPS_ENV["SSO_GOOGLE_CLIENT_SECRET"],
+            }
+        )
+        clear_settings_cache()
+        retried = client.post(
+            "/api/auth/sso/create", json={"ticket": ticket, "username": "alice"}
+        )
+        assert retried.status_code == 200, retried.text
+
+
+async def test_a_ticket_for_a_removed_provider_links_nothing(
+    temp_db_path: Path,
+) -> None:
+    """The same rule on the other redemption: no identity is attached."""
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        _, api_key = await storage.create_user("bob", role="reviewer")
+        ticket = await _sso_ticket(client)
+        _remove_the_google_provider()
+
+        response = client.post(
+            "/api/auth/sso/link",
+            json={"ticket": ticket, "username": "bob", "api_key": api_key},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "This sign-in link has expired"
+        assert await storage.list_user_identities("bob") == []
+
+
+async def test_the_last_method_refusal_names_remedies_that_work(
+    temp_db_path: Path,
+) -> None:
+    """A keyless account cannot remove its sole SSO identity; remedies stay accurate."""
+    for client in make_app_client(temp_db_path):
+        await storage.create_keyless_user("alice", status="active", created_via="proxy")
+        await storage.add_user_identity("alice", "google", "sub-a")
+        session = await storage.create_session("alice", role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+
+        response = client.delete("/api/user/identities/google")
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "Connect another sign-in method" in detail
+        assert "generate an API key" in detail
+        assert "administrator to disable the account" in detail
+
+        # The admin route shares the sentence, so both name the same remedies.
+        await storage.create_keyless_user("bob", status="active", created_via="proxy")
+        await storage.add_user_identity("bob", "google", "sub-b")
+        admin_login(client)
+        admin = client.delete("/api/admin/users/bob/identities/google")
+
+        assert admin.status_code == 409
+        assert admin.json()["detail"] == detail
+
+
+async def test_one_account_never_sees_anothers_sign_in_methods(
+    temp_db_path: Path,
+) -> None:
+    """The read is the caller's own rows; a second account sees none of them."""
+    for client in make_app_client(temp_db_path):
+        await _sign_in_as(client, "alice")
+        await storage.add_user_identity(
+            "alice", "google", "sub-a", email="alice@example.com"
+        )
+        assert [
+            identity["email"]
+            for identity in client.get("/api/user/identities").json()["identities"]
+        ] == ["alice@example.com"]
+
+        await _sign_in_as(client, "bob")
+        assert client.get("/api/user/identities").json() == {
+            "identities": [],
+            "unlinkable": False,
+            "has_api_key": True,
+        }
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        # Plaintext page on the deployment's own host: scheme is part of the
+        # origin, and a proxy that authenticates the request cannot see it.
+        {"origin": "http://rootcoz.example.com"},
+        {"referer": "http://rootcoz.example.com/settings"},
+        # Same scheme and host, different port: an origin of its own.
+        {"origin": "https://rootcoz.example.com:8443"},
+        # Values that name no origin at all prove nothing.
+        {"origin": "null"},
+        {"origin": "/settings"},
+        {"origin": "//rootcoz.example.com"},
+        {"origin": "https://rootcoz.example.com:not-a-port"},
+    ],
+)
+async def test_device_approval_refuses_an_http_page_on_the_same_host(
+    temp_db_path: Path, headers: dict[str, str]
+) -> None:
+    """Only the deployment's own scheme/host/port may approve a code.
+
+    A trusted proxy authenticates the request itself, so nothing but the origin
+    distinguishes the plaintext page on that host from the HTTPS one — the
+    authority alone used to be enough, and it is not.
+    """
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        started = _start_device_code(client)
+        await _sign_in_a_reviewer(client)
+
+        response = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=headers,
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == _APPROVE_CROSS_ORIGIN_DETAIL
+        # Refused before the code was read: it is still there to approve.
+        assert await storage.get_device_code(started["device_code"]) is not None
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"origin": "https://rootcoz.example.com"},
+        # The default port for the scheme is the same origin.
+        {"origin": "https://rootcoz.example.com:443"},
+        {"referer": "https://rootcoz.example.com/settings"},
+    ],
+)
+async def test_device_approval_accepts_the_deployments_own_origin(
+    temp_db_path: Path, headers: dict[str, str]
+) -> None:
+    """An HTTPS origin naming this host (and port) still approves."""
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        started = _start_device_code(client)
+        await _sign_in_a_reviewer(client)
+
+        response = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=headers,
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["ok"] is True
+
+
+async def _approve_a_device_code(client: Any, username: str = "alice") -> str:
+    """Create *username*, approve a fresh device code from its session, return it."""
+    started = _start_device_code(client)
+    await storage.create_user(username)
+    session = await storage.create_session(username, is_admin=False, role="reviewer")
+    client.cookies.set("rootcoz_session", session)
+    approved = client.post(
+        "/api/auth/sso/device/approve",
+        json={"user_code": started["user_code"]},
+        headers={"origin": _SSO_HTTPS_ENV["PUBLIC_BASE_URL"]},
+    )
+    assert approved.status_code == 200, approved.text
+    client.cookies.clear()
+    return started["device_code"]
+
+
+async def _session_count(username: str) -> int:
+    """How many sessions *username* holds — a poll must not add a second one."""
+    async with storage._connect_db() as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) AS n FROM sessions WHERE username = ?", (username,)
+        )
+        return int((await cursor.fetchone())["n"])
+
+
+async def _wait_out_the_poll_interval() -> None:
+    """Rewind the code's poll clock so the throttle lets the next poll through."""
+    async with storage._connect_db() as db:
+        await db.execute(
+            "UPDATE sso_device_codes SET last_polled_at = '2000-01-01 00:00:00'"
+        )
+        await db.commit()
+
+
+async def test_a_fault_after_the_claim_leaves_the_code_redeemable(
+    temp_db_path: Path,
+) -> None:
+    """A code claimed by a poll that then faulted must not read as spent.
+
+    The claim is a committed write made before the account lookup; a fault in
+    that lookup would strand the terminal unless the claim is released.
+    """
+    real_lookup = storage.get_user_by_username
+    claimed_when_it_failed: list[bool] = []
+
+    async def lookup_failing_once(username: str) -> dict[str, Any] | None:
+        if not claimed_when_it_failed:
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT COUNT(*) AS n FROM sso_device_codes"
+                    " WHERE redeemed_at IS NOT NULL"
+                )
+                claimed_when_it_failed.append((await cursor.fetchone())["n"] == 1)
+            raise RuntimeError("storage down")
+        return await real_lookup(username)
+
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        device_code = await _approve_a_device_code(client)
+
+        # The test client re-raises the server error: the terminal sees a 500
+        # after its code was already claimed.
+        with (
+            patch.object(storage, "get_user_by_username", lookup_failing_once),
+            pytest.raises(RuntimeError),
+        ):
+            client.post("/api/auth/sso/device/poll", json={"device_code": device_code})
+
+        # The fault hit after the claim (the window this covers), no session was
+        # minted, and the release let the same terminal redeem the code.
+        assert claimed_when_it_failed == [True]
+        assert await _session_count("alice") == 1
+        await _wait_out_the_poll_interval()
+        retried = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": device_code}
+        ).json()
+        assert retried["status"] == "approved"
+        assert await storage.get_session(retried["token"]) is not None
+
+
+async def test_a_blocked_account_keeps_its_claimed_code_spent(
+    temp_db_path: Path,
+) -> None:
+    """A denial is deliberate: releasing the claim would let a blocked account in.
+
+    The code stays claimed, so a later poll gets nothing — only an unexpected
+    fault releases it.
+    """
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        device_code = await _approve_a_device_code(client)
+        async with storage._connect_db() as db:
+            await db.execute("UPDATE users SET disabled = 1 WHERE username = 'alice'")
+            await db.commit()
+
+        denied = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": device_code}
+        )
+        assert denied.json() == {"status": "denied"}
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT details FROM audit_events"
+                " WHERE action = 'auth.sso_login_failed' ORDER BY id DESC LIMIT 1"
+            )
+            refusal = json.loads((await cursor.fetchone())["details"])
+        assert refusal["reason"] == "account_disabled"
+
+        await _wait_out_the_poll_interval()
+        again = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": device_code}
+        )
+        assert again.json() == {"status": "expired"}
+        assert await _session_count("alice") == 1
+
+
+async def test_the_approved_code_hands_out_one_session_and_then_expires(
+    temp_db_path: Path,
+) -> None:
+    """Redemption consumes the code: the same code yields one session, ever."""
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        device_code = await _approve_a_device_code(client)
+
+        approved = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": device_code}
+        ).json()
+        assert approved["status"] == "approved"
+        assert approved["username"] == "alice"
+        assert await storage.get_session(approved["token"]) is not None
+        assert await _session_count("alice") == 2
+
+        again = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": device_code}
+        )
+        assert again.json() == {"status": "expired"}
+        assert await _session_count("alice") == 2
+
+
+async def test_link_start_refuses_an_http_page_on_the_same_host(
+    temp_db_path: Path,
+) -> None:
+    """The link start is a write too, so the scheme counts there as well."""
+    for client in make_app_client(temp_db_path, _SSO_HTTPS_ENV):
+        await _sign_in_a_reviewer(client)
+
+        response = client.post(
+            "/api/auth/sso/google/login?mode=link&next=/settings",
+            headers={"origin": "http://rootcoz.example.com"},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 303
+        assert response.headers["location"] == "/settings?sso_error=link_cross_site"

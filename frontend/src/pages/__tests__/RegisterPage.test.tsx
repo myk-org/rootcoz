@@ -14,7 +14,9 @@ const apiMock = vi.hoisted(() => ({
   }),
   put: vi.fn(async () => ({})),
 }))
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/api')>()
+  return {
   api: apiMock,
   ApiError: class ApiError extends Error {
     status: number
@@ -26,7 +28,10 @@ vi.mock('@/lib/api', () => ({
     }
   },
   isExpectedTokenSyncError: () => false,
-}))
+  // The real unwrapper, so this mock matches the module the page imports.
+  extractApiDetail: actual.extractApiDetail,
+  }
+})
 
 vi.mock('@/lib/auth', () => ({
   useAuth: () => ({

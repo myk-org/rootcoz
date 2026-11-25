@@ -25,6 +25,13 @@ export interface AuthUser {
   can_use_free_providers: boolean
 }
 
+export interface UserIdentitySummary {
+  provider: string
+  display_name?: string
+  email: string | null
+  created_at: string
+}
+
 export interface AdminUser {
   username: string
   role: string
@@ -40,6 +47,12 @@ export interface AdminUser {
   /** Admin-disabled: cannot log in until re-enabled; data stays intact. */
   disabled: boolean
   failed_login_count: number
+  /** Linked SSO sign-in methods for this account (empty when API-key/password only). */
+  identities?: UserIdentitySummary[]
+  /** True when at least one linked identity may be unlinked (more than one linked). */
+  identities_unlinkable?: boolean
+  /** Whether the account has a local API key (false for keyless proxy accounts). */
+  has_api_key?: boolean
 }
 
 /** GET /api/admin/users — one window of accounts plus the count of the whole match. */

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { useClipboard } from '@/lib/useClipboard'
 import { parsePageSize } from '@/lib/pageParams'
 import { RoleBadge } from '@/components/shared/RoleBadge'
@@ -25,7 +25,7 @@ import {
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { Copy, Check, RefreshCw, Trash2, UserPlus, Shield, CheckCircle, XCircle, Unlock, UserCheck, UserX, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Copy, Check, RefreshCw, Trash2, UserPlus, Shield, CheckCircle, XCircle, Unlock, UserCheck, UserX, ChevronLeft, ChevronRight, X } from 'lucide-react'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { formatTimestamp, formatRelativeTime, toIntInRange } from '@/lib/utils'
@@ -93,6 +93,139 @@ function CopyableKey({ label, value }: { label: string; value: string }) {
   )
 }
 
+function SsoBadge({
+  id,
+  muted,
+  unlinkable,
+  username,
+  onUnlink,
+}: {
+  id: { provider: string; display_name?: string; email?: string | null }
+  muted: boolean
+  unlinkable: boolean
+  username: string
+  onUnlink: (target: { username: string; provider: string; displayName: string; isLastSso: boolean }) => void
+}) {
+  const label = id.display_name || id.provider
+  const tooltipText = `${label}${id.email ? ` \u00b7 ${id.email}` : ''}${!unlinkable ? '\nOnly sign-in method \u2014 cannot be unlinked' : ''}`
+  return (
+    <TooltipProvider key={id.provider} delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
+              muted
+                ? 'border-border-muted bg-surface-elevated text-text-tertiary'
+                : 'border-signal-blue/30 bg-signal-blue/10 text-signal-blue'
+            }`}
+            title={tooltipText}
+          >
+            {label}
+            {unlinkable && (
+              <button
+                type="button"
+                aria-label={`Unlink ${label} from ${username}`}
+                className="-mr-0.5 rounded-full p-0.5 transition-colors hover:bg-signal-red/20 hover:text-signal-red"
+                onClick={() => onUnlink({ username, provider: id.provider, displayName: label, isLastSso: false })}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="whitespace-pre-line">{tooltipText}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+function SignInCell({
+  user,
+  muted,
+  onUnlink,
+}: {
+  user: AdminUser
+  muted: boolean
+  onUnlink: (target: { username: string; provider: string; displayName: string; isLastSso: boolean }) => void
+}) {
+  const identities = user.identities ?? []
+  const unlinkable = user.identities_unlinkable ?? (identities.length > 1 || Boolean(user.has_api_key))
+  const isLastSso = identities.length === 1
+  const wrappedOnUnlink = useCallback(
+    (target: { username: string; provider: string; displayName: string; isLastSso: boolean }) =>
+      onUnlink({ ...target, isLastSso }),
+    [onUnlink, isLastSso],
+  )
+  const [expanded, setExpanded] = useState(false)
+
+  if (identities.length === 0) {
+    if (user.has_api_key === false) {
+      return <span className="text-xs text-text-tertiary">None</span>
+    }
+    return <span className="text-xs text-text-tertiary">API key only</span>
+  }
+
+  if (identities.length === 1) {
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        <SsoBadge id={identities[0]} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={wrappedOnUnlink} />
+      </div>
+    )
+  }
+
+  // 2+ SSO providers
+  const overflow = identities.slice(1)
+  const allMethodsTooltip = identities
+    .map((id) => `${id.display_name || id.provider}${id.email ? ` · ${id.email}` : ''}`)
+    .join('\n')
+
+  if (!expanded) {
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        <SsoBadge id={identities[0]} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={wrappedOnUnlink} />
+        <TooltipProvider delayDuration={200}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className={`inline-flex items-center rounded-md border border-border-muted bg-surface-elevated px-1.5 py-0.5 text-xs font-medium transition-colors ${
+                  muted ? 'text-text-tertiary' : 'text-text-secondary hover:text-text-primary'
+                }`}
+                title={allMethodsTooltip}
+                aria-label={`Show ${overflow.length} more SSO provider${overflow.length > 1 ? 's' : ''} for ${user.username}`}
+                aria-expanded={false}
+                onClick={() => setExpanded(true)}
+              >
+                +{overflow.length}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent className="whitespace-pre-line">{allMethodsTooltip}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {identities.map((id) => (
+        <SsoBadge key={id.provider} id={id} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={wrappedOnUnlink} />
+      ))}
+      <button
+        type="button"
+        className={`inline-flex items-center rounded-md border border-border-muted bg-surface-elevated px-1.5 py-0.5 text-xs font-medium transition-colors ${
+          muted ? 'text-text-tertiary' : 'text-text-secondary hover:text-text-primary'
+        }`}
+        aria-label={`Show fewer SSO providers for ${user.username}`}
+        aria-expanded={true}
+        onClick={() => setExpanded(false)}
+      >
+        Less
+      </button>
+    </div>
+  )
+}
+
 export function UsersPage() {
   const { username: currentUser, refreshAuth } = useAuth()
   const [users, setUsers] = useState<AdminUser[]>([])
@@ -144,6 +277,10 @@ export function UsersPage() {
   // Delete dialog
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
+
+  // Unlink SSO identity dialog
+  const [unlinkTarget, setUnlinkTarget] = useState<{ username: string; provider: string; displayName: string; isLastSso: boolean } | null>(null)
+  const [unlinking, setUnlinking] = useState(false)
 
   // Disable dialog + the in-flight guard shared by disable/enable/unlock
   const [disableTarget, setDisableTarget] = useState<string | null>(null)
@@ -321,6 +458,27 @@ export function UsersPage() {
       }
     } finally {
       setDeleting(false)
+    }
+  }
+
+  async function handleUnlink() {
+    if (!unlinkTarget) return
+    setUnlinking(true)
+    setActionError(null)
+    try {
+      await api.delete(`/api/admin/users/${encodeURIComponent(unlinkTarget.username)}/identities/${encodeURIComponent(unlinkTarget.provider)}`)
+      setUsers((prev) =>
+        prev.map((u) => {
+          if (u.username !== unlinkTarget.username) return u
+          const nextIdentities = (u.identities ?? []).filter((id) => id.provider !== unlinkTarget.provider)
+          return { ...u, identities: nextIdentities, identities_unlinkable: nextIdentities.length > 1 || Boolean(u.has_api_key) }
+        }),
+      )
+      setUnlinkTarget(null)
+    } catch (err) {
+      setActionError(extractApiDetail(err) ?? (err instanceof ApiError ? `Failed to unlink provider (${err.status})` : 'Failed to unlink provider'))
+    } finally {
+      setUnlinking(false)
     }
   }
 
@@ -525,6 +683,7 @@ export function UsersPage() {
               <TableHead>Username</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Role</TableHead>
+              <TableHead>Sign-in</TableHead>
               <TableHead>View reports</TableHead>
               <TableHead>Server providers</TableHead>
               <TableHead>Created</TableHead>
@@ -587,6 +746,9 @@ export function UsersPage() {
                         </SelectContent>
                       </Select>
                     )}
+                  </TableCell>
+                  <TableCell>
+                    <SignInCell user={user} muted={muted} onUnlink={setUnlinkTarget} />
                   </TableCell>
                   <TableCell>
                     {user.role === 'admin' ? (
@@ -996,6 +1158,23 @@ export function UsersPage() {
         variant="destructive"
         onConfirm={() => { if (disableTarget) handleAccountState(disableTarget, 'disable') }}
         loading={accountBusy !== null}
+        error={actionError}
+      />
+
+      {/* Unlink SSO Identity Dialog */}
+      <ConfirmDialog
+        open={unlinkTarget !== null}
+        onOpenChange={(open) => { if (!open && !unlinking) { setUnlinkTarget(null); setActionError(null) } }}
+        title="Unlink SSO provider"
+        description={
+          unlinkTarget?.isLastSso
+            ? `Remove ${unlinkTarget.displayName} sign-in from "${unlinkTarget.username}"? This is their only connected SSO provider \u2014 after removing it, they will only be able to sign in with their RootCoz API key. Make sure they have it saved, or rotate their key if needed.`
+            : `Remove ${unlinkTarget?.displayName} sign-in from "${unlinkTarget?.username}"? They can still sign in with their remaining sign-in method(s).`
+        }
+        confirmLabel="Unlink"
+        variant="destructive"
+        onConfirm={handleUnlink}
+        loading={unlinking}
         error={actionError}
       />
     </div>
