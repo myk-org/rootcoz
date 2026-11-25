@@ -10073,14 +10073,31 @@ async def auto_include_free_pairs(
 async def track_user(username: str) -> None:
     """Track user activity — insert if new, update last_seen if existing.
 
-    Skips the reserved 'admin' username (bootstrap superuser).
-    New users are assigned the DEFAULT_USER_ROLE from settings.
+    Skips reserved or invalid usernames (e.g. ``admin``, ``rootcoz-ai``,
+    system tags, malformed values). Pre-existing legacy accounts with the
+    reserved ``rootcoz`` prefix still get ``last_seen`` updated in place
+    without ever inserting a new row. New users are assigned the
+    DEFAULT_USER_ROLE from settings.
     """
     username = _normalize_username(username)
-    # Skip reserved or invalid usernames (e.g. 'admin', system tags, malformed cookies)
+    # Skip reserved or invalid usernames (e.g. 'admin', system tags, malformed cookies),
+    # except updating last_seen on pre-existing legacy 'rootcoz*' accounts.
     try:
         _validate_username(username)
     except ValueError:
+        if (
+            username.startswith(RESERVED_USERNAME_PREFIX)
+            and username != AI_SYSTEM_USERNAME
+            and username not in _SYSTEM_TAGS
+            and ".." not in username
+            and USERNAME_PATTERN.match(username)
+        ):
+            async with _connect_db() as db:
+                await db.execute(
+                    "UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE username = ?",
+                    (username,),
+                )
+                await db.commit()
         return
 
     from rootcoz.config import get_settings

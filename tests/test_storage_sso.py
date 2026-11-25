@@ -1434,3 +1434,60 @@ async def test_add_user_identity_refuses_reserved_admin_even_with_legacy_row(
             )
 
         assert await _raw_identity_rows() == []
+
+
+async def test_track_user_updates_legacy_reserved_prefix_account(
+    setup_test_db: Path,
+) -> None:
+    """Pre-existing legacy ``rootcoz*`` accounts still get ``last_seen`` updates."""
+    old_ts = "2020-01-01 00:00:00"
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        async with storage._connect_db() as db:
+            await db.execute(
+                "INSERT INTO users (username, api_key_hash, role, last_seen)"
+                " VALUES ('rootcoz-legacy', NULL, 'reviewer', ?)",
+                (old_ts,),
+            )
+            await db.commit()
+
+        await storage.track_user("rootcoz-legacy")
+
+        user = await storage.get_user_by_username("rootcoz-legacy")
+        assert user is not None
+        assert user["last_seen"] != old_ts
+
+
+async def test_track_user_does_not_insert_missing_reserved_prefix_account(
+    setup_test_db: Path,
+) -> None:
+    """``track_user`` must never create a new ``rootcoz*`` row."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.track_user("rootcoz-nonexistent")
+        assert await storage.get_user_by_username("rootcoz-nonexistent") is None
+
+
+@pytest.mark.parametrize("username", ["rootcoz-ai", "admin"])
+async def test_track_user_never_inserts_or_updates_system_reserved_accounts(
+    setup_test_db: Path, username: str
+) -> None:
+    """``rootcoz-ai`` and ``admin`` are never inserted or updated by ``track_user``."""
+    old_ts = "2020-01-01 00:00:00"
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        # Without a row: nothing is inserted.
+        await storage.track_user(username)
+        assert await storage.get_user_by_username(username) is None
+
+        # Even if a legacy row exists: last_seen is untouched.
+        async with storage._connect_db() as db:
+            await db.execute(
+                "INSERT INTO users (username, api_key_hash, role, last_seen)"
+                " VALUES (?, NULL, 'operator', ?)",
+                (username, old_ts),
+            )
+            await db.commit()
+
+        await storage.track_user(username)
+
+        user = await storage.get_user_by_username(username)
+        assert user is not None
+        assert user["last_seen"] == old_ts
