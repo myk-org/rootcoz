@@ -543,6 +543,95 @@ class TestJobMetadataAPI:
         assert "alpha-job" in job_names
         assert "beta-job" in job_names
 
+    def test_get_result_includes_metadata_and_tags(
+        self, api_client, temp_db_path
+    ) -> None:
+        """GET /results/{job_id} returns job metadata and per-job tags, including sparse fields."""
+        import asyncio
+
+        async def _seed() -> None:
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                await storage.save_result(
+                    "res-with-meta",
+                    "https://jenkins.example.com/job/mtv-gate/123",
+                    "completed",
+                    {
+                        "job_name": "mtv-gate",
+                        "build_number": 123,
+                        "failures": [],
+                        "tags": ["re-analyze", "alice"],
+                    },
+                )
+                await storage.save_result(
+                    "res-without-meta",
+                    "https://jenkins.example.com/job/plain-job/1",
+                    "completed",
+                    {
+                        "job_name": "plain-job",
+                        "build_number": 1,
+                        "failures": [],
+                    },
+                )
+
+        asyncio.run(_seed())
+        api_client.put(
+            "/api/jobs/mtv-gate/metadata",
+            json={
+                "team": "mtv",
+                "tier": "critical",
+                "version": "2.12",
+                "labels": ["gating", "vsphere8"],
+            },
+        )
+
+        # Full response with metadata and tags
+        resp = api_client.get("/results/res-with-meta")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["metadata"] == {
+            "job_name": "mtv-gate",
+            "team": "mtv",
+            "tier": "critical",
+            "version": "2.12",
+            "labels": ["gating", "vsphere8"],
+        }
+        assert body["result"]["tags"] == ["re-analyze", "alice"]
+
+        # Full response without metadata returns explicit null
+        plain = api_client.get("/results/res-without-meta")
+        assert plain.status_code == 200
+        assert plain.json()["metadata"] is None
+
+        # Allowlist advertises metadata and result.tags
+        fields_resp = api_client.get("/api/results/fields")
+        assert fields_resp.status_code == 200
+        advertised = set(fields_resp.json()["fields"])
+        assert {"metadata", "result.tags"} <= advertised
+
+        # Sparse selection projects metadata and result.tags
+        sparse = api_client.get(
+            "/results/res-with-meta",
+            params={"fields": "metadata,result.tags"},
+        )
+        assert sparse.status_code == 200
+        assert sparse.json() == {
+            "metadata": {
+                "job_name": "mtv-gate",
+                "team": "mtv",
+                "tier": "critical",
+                "version": "2.12",
+                "labels": ["gating", "vsphere8"],
+            },
+            "result": {"tags": ["re-analyze", "alice"]},
+        }
+
+        sparse_plain = api_client.get(
+            "/results/res-without-meta",
+            params={"fields": "metadata,result.tags"},
+        )
+        assert sparse_plain.status_code == 200
+        assert sparse_plain.json() == {"metadata": None}
+
 
 # --- Dashboard submitted_by filter tests ---
 

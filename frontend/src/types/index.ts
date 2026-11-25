@@ -274,6 +274,8 @@ export interface AnalysisResult {
   incomplete_count?: number
   /** Per-tracker duplicate search record. Optional: older results predate it. */
   tracker_search?: { jira: TrackerSearch; github: TrackerSearch }
+  /** Per-job user and system tags (e.g. 're-analyze', submitter, custom tags). */
+  tags?: string[]
 }
 
 // -- Dashboard ------------------------------------------------------
@@ -563,6 +565,8 @@ export interface ResultResponse {
   queue?: AnalysisQueue
   /** Per-test tracked-in links (composite key → list of links). */
   tracked_in?: Record<string, TrackedInEntry[]>
+  /** Job-level metadata (team, tier, version, labels) keyed by job_name. */
+  metadata?: JobMetadata | null
   capabilities?: {
     github_issues_enabled: boolean
     jira_issues_enabled: boolean
