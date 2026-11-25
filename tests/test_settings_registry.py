@@ -446,6 +446,128 @@ async def test_list_admin_settings_uses_provider_options(
     assert items["active_server_providers"]["options"] == ["claude", "gemini"]
 
 
+@pytest.mark.asyncio
+async def test_tag_facets_audit_callback_runs_under_write_lock_in_write_order(
+    registry_db, monkeypatch
+) -> None:
+    """Per-facet audit callbacks must run while TAG_FACETS_WRITE_LOCK is held (#663)."""
+    import asyncio
+    import json
+
+    hooks, _ = _recording_hooks()
+    monkeypatch.setattr(
+        storage,
+        "get_live_job_labels",
+        AsyncMock(return_value={"team-a", "team-b"}),
+    )
+
+    facet_a = json.dumps(
+        [
+            {
+                "id": "team",
+                "name": "Team",
+                "options": [{"label": "A", "tags": ["team-a"]}],
+            }
+        ]
+    )
+    facet_b = json.dumps(
+        [
+            {
+                "id": "team",
+                "name": "Team",
+                "options": [{"label": "B", "tags": ["team-b"]}],
+            }
+        ]
+    )
+
+    observed: list[tuple[str, bool, list[str]]] = []
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def _on_first(changes):
+        observed.append(
+            (
+                "first",
+                settings_registry.TAG_FACETS_WRITE_LOCK.locked(),
+                [c["op"] for c in changes],
+            )
+        )
+        first_entered.set()
+        await release_first.wait()
+
+    async def _on_second(changes):
+        observed.append(
+            (
+                "second",
+                settings_registry.TAG_FACETS_WRITE_LOCK.locked(),
+                [c["op"] for c in changes],
+            )
+        )
+
+    # Start concurrent update #1 (holds lock inside callback) and update #2
+    t1 = asyncio.create_task(
+        settings_registry.update_settings(
+            {"tag_facets": facet_a},
+            "alice",
+            hooks=hooks,
+            on_tag_facet_changes=_on_first,
+        )
+    )
+    await asyncio.wait_for(first_entered.wait(), timeout=5.0)
+    t2 = asyncio.create_task(
+        settings_registry.update_settings(
+            {"tag_facets": facet_b},
+            "bob",
+            hooks=hooks,
+            on_tag_facet_changes=_on_second,
+        )
+    )
+    await asyncio.sleep(0.05)
+    # Second request must still be waiting for the lock — cannot emit out of order
+    assert len(observed) == 1
+    release_first.set()
+    await asyncio.gather(t1, t2)
+    assert observed == [
+        ("first", True, ["create"]),
+        ("second", True, ["update"]),
+    ]
+
+    # Verify import, reset, and persist also hold TAG_FACETS_WRITE_LOCK during callback
+    lock_states: dict[str, bool] = {}
+
+    async def _capture(name: str):
+        async def _cb(changes):
+            lock_states[name] = settings_registry.TAG_FACETS_WRITE_LOCK.locked()
+
+        return _cb
+
+    await settings_registry.import_settings(
+        {"version": 1, "settings": {"tag_facets": facet_a}},
+        "alice",
+        hooks=hooks,
+        on_tag_facet_changes=await _capture("import"),
+    )
+    await settings_registry.reset_setting(
+        "tag_facets",
+        "alice",
+        hooks=hooks,
+        on_tag_facet_changes=await _capture("reset"),
+    )
+    monkeypatch.setenv("TAG_FACETS", facet_b)
+    clear_settings_cache()
+    # Persist env-sourced tag_facets (diff against default empty before env? set DB to facet_a first)
+    await settings_registry.update_settings(
+        {"tag_facets": facet_a}, "alice", hooks=hooks
+    )
+    await settings_registry.persist_setting(
+        "tag_facets",
+        "alice",
+        hooks=hooks,
+        on_tag_facet_changes=await _capture("persist"),
+    )
+    assert lock_states == {"import": True, "reset": True, "persist": True}
+
+
 # ---------------------------------------------------------------------------
 # Architectural deepening invariants (#663)
 # ---------------------------------------------------------------------------
@@ -459,6 +581,15 @@ def test_main_py_owns_no_duplicated_settings_tables_or_lifecycle_helpers() -> No
         for node in main_tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
+    top_level_assigns: set[str] = set()
+    for node in main_tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    top_level_assigns.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            top_level_assigns.add(node.target.id)
+
     for removed in (
         "_get_settings_metadata",
         "_save_settings_to_db",
@@ -471,8 +602,29 @@ def test_main_py_owns_no_duplicated_settings_tables_or_lifecycle_helpers() -> No
         "_sso_sensitive_settings",
         "_sso_restart_required_settings",
         "_sso_section",
+        "_validate_settings_updates",
     ):
         assert removed not in top_level_funcs, f"{removed} still defined in main.py"
+
+    for dead_alias in (
+        "_DEFAULTS_HIDDEN_SETTINGS",
+        "_DERIVED_SETTINGS",
+        "_FIELD_TO_CATEGORY",
+        "_LOG_FILE_SETTINGS",
+        "_RESTART_REQUIRED_SETTINGS",
+        "_SENSITIVE_SETTINGS",
+        "_SERVER_ONLY_SETTINGS",
+        "_SETTING_LABEL_OVERRIDES",
+        "_SETTING_VISIBLE_WHEN",
+        "_SETTINGS_CATEGORIES",
+        "_SIDECAR_BRIDGE_SETTINGS",
+        "_get_settings_metadata",
+        "_humanize_setting_key",
+        "_setting_label",
+    ):
+        assert dead_alias not in top_level_assigns, (
+            f"Dead alias {dead_alias} still lingers in main.py"
+        )
 
 
 def test_config_py_has_no_hardcoded_sso_setting_tuples() -> None:

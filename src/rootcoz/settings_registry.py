@@ -2036,11 +2036,37 @@ async def save_settings_to_db(
     return warnings
 
 
+TagFacetAuditCallback = Callable[[Sequence[dict[str, Any]]], Awaitable[None]]
+
+
+async def _run_with_tag_facets_lock[T](
+    should_lock: bool,
+    fn: Callable[[], Awaitable[T]],
+    *,
+    on_tag_facet_changes: TagFacetAuditCallback | None = None,
+) -> tuple[T, list[dict[str, Any]]]:
+    """Serialize tag_facets validate+write+audit under ``TAG_FACETS_WRITE_LOCK``.
+
+    Holding the lock through ``on_tag_facet_changes`` guarantees that concurrent
+    tag-facet writes emit their per-facet audit rows in exact DB write order.
+    """
+    if not should_lock:
+        return await fn(), []
+    async with TAG_FACETS_WRITE_LOCK:
+        before = get_settings().parsed_tag_facets
+        result = await fn()
+        facet_changes = diff_tag_facets(before, get_settings().parsed_tag_facets)
+        if on_tag_facet_changes is not None and facet_changes:
+            await on_tag_facet_changes(facet_changes)
+        return result, facet_changes
+
+
 async def update_settings(
     settings_updates: dict[str, Any],
     username: str,
     *,
     hooks: SettingsRuntimeHooks | None = None,
+    on_tag_facet_changes: TagFacetAuditCallback | None = None,
 ) -> UpdateSettingsResult:
     """Validate, persist, and apply a settings update batch."""
     if not settings_updates:
@@ -2055,14 +2081,11 @@ async def update_settings(
         warnings = await save_settings_to_db(settings_updates, username, hooks=hooks)
         return list(settings_updates.keys()), warnings
 
-    if "tag_facets" in settings_updates:
-        async with TAG_FACETS_WRITE_LOCK:
-            before = get_settings().parsed_tag_facets
-            changed_keys, warnings = await _run()
-            facet_changes = diff_tag_facets(before, get_settings().parsed_tag_facets)
-    else:
-        changed_keys, warnings = await _run()
-        facet_changes = []
+    (changed_keys, warnings), facet_changes = await _run_with_tag_facets_lock(
+        "tag_facets" in settings_updates,
+        _run,
+        on_tag_facet_changes=on_tag_facet_changes,
+    )
 
     return UpdateSettingsResult(
         changed_keys=changed_keys,
@@ -2077,6 +2100,7 @@ async def persist_setting(
     username: str,
     *,
     hooks: SettingsRuntimeHooks | None = None,
+    on_tag_facet_changes: TagFacetAuditCallback | None = None,
 ) -> PersistSettingResult:
     """Persist an env-sourced setting's current value into the DB store."""
     if key not in Settings.model_fields:
@@ -2113,19 +2137,21 @@ async def persist_setting(
     if setting_is_int(key):
         env_value = str(getattr(validated, key))
 
-    if key == "tag_facets":
-        async with TAG_FACETS_WRITE_LOCK:
-            before = get_settings().parsed_tag_facets
-            env_value = await validate_and_normalize_tag_facets(
-                env_value,
+    async def _run() -> None:
+        value_to_save = env_value
+        if key == "tag_facets":
+            value_to_save = await validate_and_normalize_tag_facets(
+                value_to_save,
                 allow_missing_tags=False,
                 existing_option_sets=persisted_tag_facet_option_sets(),
             )
-            await save_settings_to_db({key: env_value}, username, hooks=hooks)
-            facet_changes = diff_tag_facets(before, get_settings().parsed_tag_facets)
-    else:
-        await save_settings_to_db({key: env_value}, username, hooks=hooks)
-        facet_changes = []
+        await save_settings_to_db({key: value_to_save}, username, hooks=hooks)
+
+    _, facet_changes = await _run_with_tag_facets_lock(
+        key == "tag_facets",
+        _run,
+        on_tag_facet_changes=on_tag_facet_changes,
+    )
 
     return PersistSettingResult(key=key, tag_facet_changes=facet_changes)
 
@@ -2135,6 +2161,7 @@ async def reset_setting(
     username: str,
     *,
     hooks: SettingsRuntimeHooks | None = None,
+    on_tag_facet_changes: TagFacetAuditCallback | None = None,
 ) -> ResetSettingResult:
     """Remove a DB setting override so the env/default value governs again."""
     active_hooks = hooks or default_runtime_hooks()
@@ -2168,14 +2195,11 @@ async def reset_setting(
         active_hooks.broadcast_change()
         return content
 
-    if key == "tag_facets":
-        async with TAG_FACETS_WRITE_LOCK:
-            before = get_settings().parsed_tag_facets
-            content = await _run()
-            facet_changes = diff_tag_facets(before, get_settings().parsed_tag_facets)
-    else:
-        content = await _run()
-        facet_changes = []
+    content, facet_changes = await _run_with_tag_facets_lock(
+        key == "tag_facets",
+        _run,
+        on_tag_facet_changes=on_tag_facet_changes,
+    )
 
     return ResetSettingResult(content=content, tag_facet_changes=facet_changes)
 
@@ -2294,6 +2318,7 @@ async def import_settings(
     username: str,
     *,
     hooks: SettingsRuntimeHooks | None = None,
+    on_tag_facet_changes: TagFacetAuditCallback | None = None,
 ) -> ImportSettingsResult:
     """Validate and optionally apply a settings export document atomically."""
     if not isinstance(body, dict) or body.get("version") != SETTINGS_EXPORT_VERSION:
@@ -2347,14 +2372,11 @@ async def import_settings(
         )
 
     applied_updates = {key: value for key, value in updates.items() if key in applied}
-    if "tag_facets" in applied:
-        async with TAG_FACETS_WRITE_LOCK:
-            before = get_settings().parsed_tag_facets
-            warnings = await save_settings_to_db(applied_updates, username, hooks=hooks)
-            facet_changes = diff_tag_facets(before, get_settings().parsed_tag_facets)
-    else:
-        warnings = await save_settings_to_db(applied_updates, username, hooks=hooks)
-        facet_changes = []
+    warnings, facet_changes = await _run_with_tag_facets_lock(
+        "tag_facets" in applied,
+        lambda: save_settings_to_db(applied_updates, username, hooks=hooks),
+        on_tag_facet_changes=on_tag_facet_changes,
+    )
 
     if warnings:
         content["warnings"] = warnings

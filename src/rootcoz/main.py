@@ -442,28 +442,14 @@ from rootcoz.xml_enrichment import (
 # Module-level Depends singletons (B008: avoid function calls in defaults)
 _SETTINGS_DEP = Depends(get_settings)
 
-# Single-source Server Settings views/helpers owned by settings_registry.py
-_DEFAULTS_HIDDEN_SETTINGS = settings_registry.DEFAULTS_HIDDEN_SETTINGS
-_DERIVED_SETTINGS = settings_registry.DERIVED_SETTINGS
-_FIELD_TO_CATEGORY = settings_registry.FIELD_TO_CATEGORY
-_LOG_FILE_SETTINGS = settings_registry.LOG_FILE_SETTINGS
-_RESTART_REQUIRED_SETTINGS = settings_registry.RESTART_REQUIRED_SETTINGS
-_SENSITIVE_SETTINGS = settings_registry.SENSITIVE_SETTINGS
-_SERVER_ONLY_SETTINGS = settings_registry.SERVER_ONLY_SETTINGS
-_SETTING_LABEL_OVERRIDES = settings_registry.SETTING_LABEL_OVERRIDES
-_SETTING_VISIBLE_WHEN = settings_registry.SETTING_VISIBLE_WHEN
-_SETTINGS_CATEGORIES = settings_registry.SETTINGS_CATEGORIES
-_SIDECAR_BRIDGE_SETTINGS = settings_registry.SIDECAR_BRIDGE_SETTINGS
+# Process-lifecycle & hook helpers owned by settings_registry.py
 _apply_log_level_setting = settings_registry.apply_log_level_setting
 _audit_setting_details = settings_registry.audit_setting_details
 _deployment_authenticated_provider_ids = (
     settings_registry.deployment_authenticated_provider_ids
 )
 _derive_sidecar_url_from_port = settings_registry.derive_sidecar_url_from_port
-_get_settings_metadata = settings_registry.get_settings_metadata
-_humanize_setting_key = settings_registry.humanize_setting_key
 _live_provider_spellings = settings_registry.live_provider_spellings
-_setting_label = settings_registry.setting_label
 
 # --- SSE broadcast for navbar badges ---
 _active_count_listeners: set[asyncio.Event] = set()
@@ -24153,19 +24139,6 @@ async def get_admin_settings(
     )
 
 
-async def _validate_settings_updates(
-    settings_updates: dict[str, Any],
-    *,
-    allow_missing_facet_tags: bool = False,
-) -> list[str]:
-    """Validate admin settings updates via the single-source settings registry."""
-    return await settings_registry.validate_settings_updates(
-        settings_updates,
-        allow_missing_facet_tags=allow_missing_facet_tags,
-        hooks=_settings_hooks(),
-    )
-
-
 _TAG_FACET_AUDIT_ACTIONS: dict[str, str] = {
     "create": "tag_facet.create",
     "update": "tag_facet.update",
@@ -24199,6 +24172,17 @@ async def _record_tag_facet_audit_rows(
         )
 
 
+def _tag_facet_audit_hook(
+    *, actor: str, request: Request
+) -> settings_registry.TagFacetAuditCallback:
+    """Emit per-facet audit rows inside ``TAG_FACETS_WRITE_LOCK`` in DB write order."""
+
+    async def _emit(changes: Sequence[dict[str, Any]]) -> None:
+        await _record_tag_facet_audit_rows(changes, actor=actor, request=request)
+
+    return _emit
+
+
 @app.put("/api/admin/settings", operation_id="updateAdminSettings")
 async def update_admin_settings(request: Request) -> JSONResponse:
     """Update one or more server settings. Body: {"settings": {"key": "value", ...}}"""
@@ -24208,7 +24192,10 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     username = request.state.username or "admin"
 
     result = await settings_registry.update_settings(
-        settings_updates, username, hooks=_settings_hooks()
+        settings_updates,
+        username,
+        hooks=_settings_hooks(),
+        on_tag_facet_changes=_tag_facet_audit_hook(actor=username, request=request),
     )
     logger.info(
         "Admin settings updated: keys=%s, by=%s",
@@ -24227,9 +24214,6 @@ async def update_admin_settings(request: Request) -> JSONResponse:
             "keys": result.changed_keys,
         },
         request=request,
-    )
-    await _record_tag_facet_audit_rows(
-        result.tag_facet_changes, actor=username, request=request
     )
 
     content: dict[str, Any] = {"updated": result.changed_keys}
@@ -24285,7 +24269,10 @@ async def import_server_settings(request: Request) -> JSONResponse:
         )
     username = request.state.username or "admin"
     result = await settings_registry.import_settings(
-        body, username, hooks=_settings_hooks()
+        body,
+        username,
+        hooks=_settings_hooks(),
+        on_tag_facet_changes=_tag_facet_audit_hook(actor=username, request=request),
     )
     if result.dry_run:
         return JSONResponse(content=result.content)
@@ -24312,9 +24299,6 @@ async def import_server_settings(request: Request) -> JSONResponse:
         },
         request=request,
     )
-    await _record_tag_facet_audit_rows(
-        result.tag_facet_changes, actor=username, request=request
-    )
     return JSONResponse(content=result.content)
 
 
@@ -24324,7 +24308,10 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
     _require_admin(request)
     username = request.state.username or "admin"
     result = await settings_registry.persist_setting(
-        key, username, hooks=_settings_hooks()
+        key,
+        username,
+        hooks=_settings_hooks(),
+        on_tag_facet_changes=_tag_facet_audit_hook(actor=username, request=request),
     )
     await record_audit(
         action="admin.setting_persist",
@@ -24334,9 +24321,6 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         target_id=key,
         details=_audit_setting_details(key),
         request=request,
-    )
-    await _record_tag_facet_audit_rows(
-        result.tag_facet_changes, actor=username, request=request
     )
     return JSONResponse(content={"key": result.key, "source": "db"})
 
@@ -24362,7 +24346,10 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     _require_admin(request)
     username = request.state.username or "admin"
     result = await settings_registry.reset_setting(
-        key, username, hooks=_settings_hooks()
+        key,
+        username,
+        hooks=_settings_hooks(),
+        on_tag_facet_changes=_tag_facet_audit_hook(actor=username, request=request),
     )
     logger.info("Admin setting reset: key=%s, by=%s", key, request.state.username)
     await record_audit(
@@ -24373,9 +24360,6 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
         target_id=key,
         details=_audit_setting_details(key),
         request=request,
-    )
-    await _record_tag_facet_audit_rows(
-        result.tag_facet_changes, actor=username, request=request
     )
     return JSONResponse(content=result.content)
 
