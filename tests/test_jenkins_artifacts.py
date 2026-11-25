@@ -760,11 +760,13 @@ class TestCumulativeExtractionBudgetAndSizeCap:
             get_settings,
             update_db_settings_cache,
         )
-        from rootcoz.main import _validate_settings_updates
         from rootcoz.models import (
             AnalyzeRequest,
             ReAnalyzeRequest,
             UnifiedAnalyzeRequest,
+        )
+        from rootcoz.settings_registry import (
+            validate_settings_updates as _validate_settings_updates,
         )
 
         over_cap = JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX + 1

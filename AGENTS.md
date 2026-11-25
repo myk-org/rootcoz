@@ -154,6 +154,9 @@ src/rootcoz/
                             # apply_analysis_to_xml, build_enriched_xml
   models.py                 # Pydantic request/response models (BaseTestEntry, FailedTest, etc.)
   config.py                 # Settings (env vars)
+  settings_registry.py      # Single-source Server Settings registry: SettingSpec descriptors,
+                            # SSO provider setting derivation, validation, masking, export/import,
+                            # and write/persist/reset/runtime-hook lifecycle
   storage.py                # SQLite persistence (includes test_entries table)
   agents/                    # Built-in pi agents (e.g. test-analyzer) copied to workspace .pi/agents/
   ai_client.py              # AI provider constants and usage recording setup
@@ -205,12 +208,11 @@ src/rootcoz/
 
 ### Server Settings Page
 
-**Provider settings are declared, not listed.** An SSO provider names the `Settings` fields it reads (`settings_fields`) and which hold a secret (`sensitive_settings`) — `_SETTINGS_CATEGORIES["Auth & Security"]`, `_SENSITIVE_SETTINGS`, `_RESTART_REQUIRED_SETTINGS`, and `_FIELD_TO_SSO_PROVIDER` are derived from the registry (`tests/test_sso_settings_metadata.py` is the contract), so a provider's settings rows and its secret are registered through those declarations rather than listed manually; adding a provider is one module, an entry in `PROVIDER_CLASSES`, and its name in `storage.SSO_PROVIDERS`.
+**Provider settings are declared, not listed.** An SSO provider names the `Settings` fields it reads (`settings_fields`) and which hold a secret (`sensitive_settings`) — `settings_registry.py` derives `SETTINGS_CATEGORIES["Auth & Security"]`, `SENSITIVE_SETTINGS`, `RESTART_REQUIRED_SETTINGS`, `FIELD_TO_SSO_PROVIDER`, SSO field whitespace stripping, and issuer/API URL validation directly from `auth.sso.PROVIDER_CLASSES` (`tests/test_sso_settings_metadata.py` and `tests/test_settings_registry.py` enforce the contract). Adding a provider requires one module under `auth/sso/`, an entry in `PROVIDER_CLASSES`, and its name in `sso_providers.SSO_PROVIDERS` — zero edits to `settings_registry.py`, `config.py` validators, or `main.py`.
 
-Every **other** new environment variable added to `Settings` in `config.py` — i.e. anything not declared on an SSO provider, including deployment-wide SSO settings such as `SSO_ALLOWED_DOMAINS` and state/device TTLs — **MUST** be registered in the server settings metadata in `main.py`:
-1. Add the field to the appropriate category in `_SETTINGS_CATEGORIES`
-2. Add to `_SENSITIVE_SETTINGS` if it contains passwords/tokens/keys
-3. Add to `_RESTART_REQUIRED_SETTINGS` if it requires server restart to take effect
+Every **other** new environment variable added to `Settings` in `config.py` — i.e. anything not declared on an SSO provider, including deployment-wide SSO settings such as `SSO_ALLOWED_DOMAINS` and state/device TTLs — **MUST** be registered once as a `SettingSpec` in `src/rootcoz/settings_registry.py` (under `_RAW_CATEGORY_LAYOUT`):
+1. Place its `SettingSpec` under the appropriate category tab (tab order is emitted to the frontend via `category_order`, so `ServerSettingsPage.tsx` needs no mirrored list)
+2. Set `sensitive=True` if it contains passwords/tokens/keys, `restart_required=True` if it requires a restart, `defaults_hidden=True` if it should not appear in `/api/default-server-settings`, and any UI metadata (`options`/`options_source`, `visible_when`, `group`, `hint`, `value_traps`) or post-write hook flags (`log_file_hook`, `sidecar_bridge`, `jira_verified_invalidating`) on that same `SettingSpec`
 
 ### Documentation Site (`docs/`)
 

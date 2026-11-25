@@ -14,10 +14,14 @@ import pytest
 from rootcoz.auth.sso import PROVIDER_CLASSES
 from rootcoz.auth.sso.base import SSOProvider
 from rootcoz.config import Settings
-from rootcoz.main import (
-    _RESTART_REQUIRED_SETTINGS,
-    _SENSITIVE_SETTINGS,
-    _SETTINGS_CATEGORIES,
+from rootcoz.settings_registry import (
+    RESTART_REQUIRED_SETTINGS as _RESTART_REQUIRED_SETTINGS,
+)
+from rootcoz.settings_registry import (
+    SENSITIVE_SETTINGS as _SENSITIVE_SETTINGS,
+)
+from rootcoz.settings_registry import (
+    SETTINGS_CATEGORIES as _SETTINGS_CATEGORIES,
 )
 
 

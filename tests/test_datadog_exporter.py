@@ -1928,11 +1928,17 @@ class TestSettings:
         assert settings.datadog_enabled is False
 
     def test_settings_category_and_sensitive_registration(self):
-        from rootcoz.main import (
-            _DEFAULTS_HIDDEN_SETTINGS,
-            _FIELD_TO_CATEGORY,
-            _RESTART_REQUIRED_SETTINGS,
-            _SENSITIVE_SETTINGS,
+        from rootcoz.settings_registry import (
+            DEFAULTS_HIDDEN_SETTINGS as _DEFAULTS_HIDDEN_SETTINGS,
+        )
+        from rootcoz.settings_registry import (
+            FIELD_TO_CATEGORY as _FIELD_TO_CATEGORY,
+        )
+        from rootcoz.settings_registry import (
+            RESTART_REQUIRED_SETTINGS as _RESTART_REQUIRED_SETTINGS,
+        )
+        from rootcoz.settings_registry import (
+            SENSITIVE_SETTINGS as _SENSITIVE_SETTINGS,
         )
 
         assert "Datadog" == _FIELD_TO_CATEGORY["datadog_api_key"]

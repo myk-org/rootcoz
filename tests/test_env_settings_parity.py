@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from rootcoz import main, monitoring, storage, transcripts
+from rootcoz import main, monitoring, settings_registry, storage, transcripts
 from rootcoz.config import (
     JIRA_AUTH_MODES,
     RESULTS_RETENTION_DAYS_MAX,
@@ -227,7 +227,7 @@ def test_sidecar_settings_metadata_category_and_restart(client):
     response = client.get("/api/admin/settings", headers=_admin_headers())
     assert response.status_code == 200
     by_key = {item["key"]: item for item in response.json()}
-    for key in main._SIDECAR_BRIDGE_SETTINGS:
+    for key in settings_registry.SIDECAR_BRIDGE_SETTINGS:
         assert by_key[key]["restart_required"] is True, key
     # The bridge keys split by purpose (#585): what the sidecar process binds
     # and runs, its own log level, and where its transcripts land.
@@ -254,7 +254,7 @@ def test_sidecar_settings_metadata_category_and_restart(client):
 def test_every_setting_has_a_human_label():
     """Every Settings field gets a label that is not the machine key (#379)."""
     for name in Settings.model_fields:
-        label = main._setting_label(name)
+        label = settings_registry.setting_label(name)
         assert label, name
         assert label not in {name, name.upper()}, name
         assert not label.isupper(), name
@@ -262,7 +262,7 @@ def test_every_setting_has_a_human_label():
 
 def test_setting_label_overrides_target_real_fields():
     """An override for a field that no longer exists is dead metadata."""
-    assert set(main._SETTING_LABEL_OVERRIDES) <= set(Settings.model_fields)
+    assert set(settings_registry.SETTING_LABEL_OVERRIDES) <= set(Settings.model_fields)
 
 
 @pytest.mark.parametrize(
@@ -279,12 +279,18 @@ def test_setting_label_overrides_target_real_fields():
     ],
 )
 def test_humanize_setting_key(key, label):
-    assert main._humanize_setting_key(key) == label
+    assert settings_registry.humanize_setting_key(key) == label
 
 
 def test_setting_label_override_wins_over_the_humaniser():
-    assert main._humanize_setting_key("session_ttl_hours") == "Session TTL (hours)"
-    assert main._setting_label("session_ttl_hours") == "Session lifetime (hours)"
+    assert (
+        settings_registry.humanize_setting_key("session_ttl_hours")
+        == "Session TTL (hours)"
+    )
+    assert (
+        settings_registry.setting_label("session_ttl_hours")
+        == "Session lifetime (hours)"
+    )
 
 
 def test_settings_endpoint_labels_every_entry(client):
@@ -316,7 +322,9 @@ def test_sso_settings_carry_the_provider_that_owns_them(client):
     by_key = {item["key"]: item for item in response.json()}
 
     # Declared per provider class: collapsible sub-sections.
-    for provider in main.auth_sso.PROVIDER_CLASSES:
+    from rootcoz.auth import sso as auth_sso
+
+    for provider in auth_sso.PROVIDER_CLASSES:
         for field in provider.settings_fields:
             assert by_key[field]["section"] == provider.name, field
             assert by_key[field]["section_label"] == provider.display_name, field
@@ -942,13 +950,13 @@ HEALTH_MONITOR_SETTINGS = (
 def test_health_monitor_settings_are_registered_runtime_applied(client):
     """Six rows in Notifications, hidden from the defaults payload, no restart."""
     for key in HEALTH_MONITOR_SETTINGS:
-        assert key in main._SETTINGS_CATEGORIES["Notifications"], key
-        assert key in main._DEFAULTS_HIDDEN_SETTINGS, key
+        assert key in settings_registry.SETTINGS_CATEGORIES["Notifications"], key
+        assert key in settings_registry.DEFAULTS_HIDDEN_SETTINGS, key
         # Applied by the monitor's own settings poll: a restart is not required.
-        assert key not in main._RESTART_REQUIRED_SETTINGS, key
-        assert key not in main._SENSITIVE_SETTINGS, key
-        assert key in main._FIELD_TO_CATEGORY, key
-        label = main._setting_label(key)
+        assert key not in settings_registry.RESTART_REQUIRED_SETTINGS, key
+        assert key not in settings_registry.SENSITIVE_SETTINGS, key
+        assert key in settings_registry.FIELD_TO_CATEGORY, key
+        label = settings_registry.setting_label(key)
         assert label and label != key, key
 
     response = client.get("/api/admin/settings", headers=_admin_headers())
@@ -1108,7 +1116,9 @@ def test_max_concurrent_analyses_metadata(client):
     assert item["env_var"] == "MAX_CONCURRENT_ANALYSES"
     assert item["label"] == "Max concurrent analyses"
     # Beside the concurrency limits it belongs with, not on a page of its own.
-    assert "max_concurrent_analyses" in main._SETTINGS_CATEGORIES["Analysis"]
+    assert (
+        "max_concurrent_analyses" in settings_registry.SETTINGS_CATEGORIES["Analysis"]
+    )
 
 
 def test_max_concurrent_analyses_rejects_zero_and_applies_a_db_override(client):
@@ -1170,7 +1180,8 @@ def test_queue_is_an_advertised_sparse_field(client):
 def test_repo_clone_timeout_is_a_repos_setting(client):
     """Registered, default 900, env-supplied, and 0 (no deadline at all) is refused."""
     assert (
-        "repo_clone_timeout_seconds" in main._SETTINGS_CATEGORIES["Repos & workspace"]
+        "repo_clone_timeout_seconds"
+        in settings_registry.SETTINGS_CATEGORIES["Repos & workspace"]
     )
     by_key = {
         item["key"]: item
@@ -1202,7 +1213,9 @@ def test_repo_clone_timeout_is_a_repos_setting(client):
 
 def test_chat_clone_depth_is_a_repos_setting(client, monkeypatch):
     """Registered, default 1, env-supplied default, DB override wins, ≥ 1 enforced."""
-    assert "chat_clone_depth" in main._SETTINGS_CATEGORIES["Repos & workspace"]
+    assert (
+        "chat_clone_depth" in settings_registry.SETTINGS_CATEGORIES["Repos & workspace"]
+    )
     by_key = {
         item["key"]: item
         for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
@@ -1291,7 +1304,7 @@ def test_feedback_repo_url_is_a_github_setting_with_blank_coercion_and_userinfo_
     client, monkeypatch
 ):
     """Registered under GitHub issues, defaults to upstream repo, blank coerces, userinfo stripped."""
-    assert "feedback_repo_url" in main._SETTINGS_CATEGORIES["GitHub issues"]
+    assert "feedback_repo_url" in settings_registry.SETTINGS_CATEGORIES["GitHub issues"]
     by_key = {
         item["key"]: item
         for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
@@ -1376,7 +1389,7 @@ def test_sidecar_transcript_retention_metadata_and_defaults_exclusion(client):
         # The env var lives in the label tooltip, never in permanent row text.
         assert env_var not in item["description"], key
         assert item["env_var"] == env_var, key
-        assert item["label"] == main._humanize_setting_key(key), key
+        assert item["label"] == settings_registry.humanize_setting_key(key), key
 
     defaults = client.get("/api/default-server-settings", headers=_admin_headers())
     assert defaults.status_code == 200
@@ -1699,17 +1712,20 @@ _JIRA_ALWAYS_VISIBLE = {
 
 def test_settings_categories_match_the_agreed_tabs():
     """Every one of the 135 settings sits in its agreed tab (#585, #622)."""
-    actual = {cat: set(fields) for cat, fields in main._SETTINGS_CATEGORIES.items()}
+    actual = {
+        cat: set(fields)
+        for cat, fields in settings_registry.SETTINGS_CATEGORIES.items()
+    }
     assert actual == _EXPECTED_CATEGORIES
     # Tab order is the page order — pinned so a reorder is a visible change.
-    assert list(main._SETTINGS_CATEGORIES) == list(_EXPECTED_CATEGORIES)
-    assert "Sources" not in main._SETTINGS_CATEGORIES
-    assert "General" not in main._SETTINGS_CATEGORIES
-    assert set(main._SETTINGS_CATEGORIES["Server"]) == {
+    assert list(settings_registry.SETTINGS_CATEGORIES) == list(_EXPECTED_CATEGORIES)
+    assert "Sources" not in settings_registry.SETTINGS_CATEGORIES
+    assert "General" not in settings_registry.SETTINGS_CATEGORIES
+    assert set(settings_registry.SETTINGS_CATEGORIES["Server"]) == {
         "public_base_url",
         "auto_push_exporters",
     }
-    assert "get_job_artifacts" in main._SETTINGS_CATEGORIES["Analysis"]
+    assert "get_job_artifacts" in settings_registry.SETTINGS_CATEGORIES["Analysis"]
     placed = [key for fields in _EXPECTED_CATEGORIES.values() for key in fields]
     assert len(placed) == len(set(placed)), "a setting sits in two tabs"
     assert set(placed) == set(Settings.model_fields)
@@ -1718,23 +1734,23 @@ def test_settings_categories_match_the_agreed_tabs():
 
 def test_every_setting_has_a_description():
     """A setting may not ship bare (#585 decision 5)."""
-    for category, fields in main._SETTINGS_CATEGORIES.items():
+    for category, fields in settings_registry.SETTINGS_CATEGORIES.items():
         for key in fields:
             description = (Settings.model_fields[key].description or "").strip()
             assert description, f"{category}/{key} has no description"
-            assert description != main._setting_label(key), key
+            assert description != settings_registry.setting_label(key), key
 
 
 def test_jira_visible_when_shape():
     """The rule sits beside the setting, keyed on jira_auth_mode (#585)."""
     for key, modes in _JIRA_VISIBLE_WHEN.items():
-        assert main._SETTING_VISIBLE_WHEN[key] == {
+        assert settings_registry.SETTING_VISIBLE_WHEN[key] == {
             "key": "jira_auth_mode",
             "in": modes,
         }, key
-    jira_fields = set(main._SETTINGS_CATEGORIES["Jira"])
+    jira_fields = set(settings_registry.SETTINGS_CATEGORIES["Jira"])
     assert jira_fields - _JIRA_ALWAYS_VISIBLE == set(_JIRA_VISIBLE_WHEN)
-    assert not _JIRA_ALWAYS_VISIBLE & set(main._SETTING_VISIBLE_WHEN)
+    assert not _JIRA_ALWAYS_VISIBLE & set(settings_registry.SETTING_VISIBLE_WHEN)
 
 
 def test_jira_visible_when_is_emitted_only_where_declared(client):
@@ -1754,14 +1770,16 @@ def test_jira_visible_when_is_emitted_only_where_declared(client):
 
 def test_every_conditional_jira_field_declares_a_mode():
     """A hidden-forever field is unusable."""
-    for key, rule in main._SETTING_VISIBLE_WHEN.items():
+    for key, rule in settings_registry.SETTING_VISIBLE_WHEN.items():
         assert rule["in"], key
 
 
 def test_every_jira_mode_surfaces_at_least_one_field():
     """Every selectable mode shows something (#585)."""
     surfaced = {
-        mode for rule in main._SETTING_VISIBLE_WHEN.values() for mode in rule["in"]
+        mode
+        for rule in settings_registry.SETTING_VISIBLE_WHEN.values()
+        for mode in rule["in"]
     }
     assert surfaced == set(JIRA_AUTH_MODES)
 

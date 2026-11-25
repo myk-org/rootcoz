@@ -430,7 +430,12 @@ class TestTranscriptEndpoints:
         assert "Invalid session id" in resp.json()["detail"]
 
     def test_setting_registered_live_toggle(self):
-        from rootcoz.main import _RESTART_REQUIRED_SETTINGS, _SETTINGS_CATEGORIES
+        from rootcoz.settings_registry import (
+            RESTART_REQUIRED_SETTINGS as _RESTART_REQUIRED_SETTINGS,
+        )
+        from rootcoz.settings_registry import (
+            SETTINGS_CATEGORIES as _SETTINGS_CATEGORIES,
+        )
 
         # Since the pi-sidecar >= 4.14.0 runtime toggle, flipping the setting
         # applies to the running sidecar — no restart.

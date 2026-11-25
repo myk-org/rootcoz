@@ -25,6 +25,7 @@ RESULT_FIELD_PATHS: frozenset[str] = frozenset(
         "graft_estimated_tokens_saved",
         "capabilities",
         "tracked_in",
+        "metadata",
         "base_url",
         "result_url",
         "reanalyzed_from_job_id",
@@ -56,6 +57,7 @@ RESULT_FIELD_PATHS: frozenset[str] = frozenset(
         "result.tracker_search",
         "result.request_params",
         "result.display_name",
+        "result.tags",
         # Per-failure projections (applied to each item in result.failures)
         "result.failures.id",
         "result.failures.test_name",

@@ -1,6 +1,6 @@
 """Guards for the shared host environment allowlist used by tests (#300)."""
 
-from rootcoz.main import _SENSITIVE_SETTINGS
+from rootcoz.settings_registry import SENSITIVE_SETTINGS as _SENSITIVE_SETTINGS
 from tests.conftest import HOST_ENV_ALLOWLIST, host_env
 
 

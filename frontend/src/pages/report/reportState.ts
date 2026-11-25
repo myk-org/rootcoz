@@ -3,10 +3,11 @@ import { reviewKey } from '@/lib/reviewKey'
 import { collectProviderIds, extractOriginalProviderIds, useProviderLabels } from '@/lib/providerCatalog'
 import type { SelectedGroup } from './failureUpdates'
 import { reconcileSelection, scopeKey } from './failureUpdates'
-import type { AnalysisResult, Capabilities, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel, TrackedInEntry, PreviousAnalysis } from '@/types'
+import type { AnalysisResult, Capabilities, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel, TrackedInEntry, PreviousAnalysis, JobMetadata } from '@/types'
 
 export interface ReportState {
   result: AnalysisResult | null
+  metadata: JobMetadata | null
   graftEstimatedTokensSaved: number
   createdAt: string
   completedAt: string
@@ -50,7 +51,7 @@ export interface ReportState {
 }
 
 export type ReportAction =
-  | { type: 'SET_RESULT'; payload: { result: AnalysisResult; createdAt: string; completedAt: string; analysisStartedAt: string; graftEstimatedTokensSaved?: number; reanalyzedFromJobId?: string; originJobName?: string; reanalyzedToJobIds?: string[] } }
+  | { type: 'SET_RESULT'; payload: { result: AnalysisResult; metadata?: JobMetadata | null; createdAt: string; completedAt: string; analysisStartedAt: string; graftEstimatedTokensSaved?: number; reanalyzedFromJobId?: string; originJobName?: string; reanalyzedToJobIds?: string[] } }
   | { type: 'SET_COMMENTS_AND_REVIEWS'; payload: CommentsAndReviews }
   | { type: 'ADD_COMMENT'; payload: Comment }
   | { type: 'REMOVE_COMMENT'; payload: number }
@@ -100,6 +101,7 @@ export type ReportAction =
 
 export const initialState: ReportState = {
   result: null,
+  metadata: null,
   graftEstimatedTokensSaved: 0,
   createdAt: '',
   completedAt: '',
@@ -167,7 +169,7 @@ export function reportReducer(state: ReportState, action: ReportAction): ReportS
       // The selection survives background SSE refreshes (progress, usage, abort),
       // reconciled against the refreshed result so removed or regrouped failures
       // cannot linger in the bulk bar or feed dead test names to a mutation.
-      return { ...state, result: action.payload.result, selection: reconcileSelection(action.payload.result, state.selection), graftEstimatedTokensSaved: action.payload.graftEstimatedTokensSaved ?? 0, createdAt: action.payload.createdAt, completedAt: action.payload.completedAt, analysisStartedAt: action.payload.analysisStartedAt, reanalyzedFromJobId: action.payload.reanalyzedFromJobId ?? '', originJobName: action.payload.originJobName ?? '', reanalyzedToJobId: action.payload.reanalyzedToJobIds?.at(-1) ?? '', loading: false, error: '' }
+      return { ...state, result: action.payload.result, metadata: action.payload.metadata ?? null, selection: reconcileSelection(action.payload.result, state.selection), graftEstimatedTokensSaved: action.payload.graftEstimatedTokensSaved ?? 0, createdAt: action.payload.createdAt, completedAt: action.payload.completedAt, analysisStartedAt: action.payload.analysisStartedAt, reanalyzedFromJobId: action.payload.reanalyzedFromJobId ?? '', originJobName: action.payload.originJobName ?? '', reanalyzedToJobId: action.payload.reanalyzedToJobIds?.at(-1) ?? '', loading: false, error: '' }
     case 'SET_COMMENTS_AND_REVIEWS':
       return { ...state, comments: action.payload.comments, reviews: action.payload.reviews }
     case 'ADD_COMMENT':

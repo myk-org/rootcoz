@@ -381,7 +381,12 @@ class TestPrepareFeedbackAndSettings:
     ) -> None:
         client, _ = integration_env
         assert get_settings().feedback_repo_url == "https://github.com/myk-org/rootcoz"
-        assert "feedback_repo_url" in main._SETTINGS_CATEGORIES["GitHub issues"]
+        from rootcoz import settings_registry
+
+        assert (
+            "feedback_repo_url"
+            in settings_registry.SETTINGS_CATEGORIES["GitHub issues"]
+        )
 
         monkeypatch.setenv("FEEDBACK_REPO_URL", "   ")
         clear_settings_cache()
