@@ -516,21 +516,23 @@ describe('UsersPage locked badge', () => {
 })
 
 describe('UsersPage Sign-in column', () => {
-  it('shows Local badge for a local-only user (has_api_key: true, no identities)', async () => {
+  it('shows API key only for a user with has_api_key: true and no SSO identities', async () => {
     mockUsers([user('alice', { has_api_key: true, identities: [] })])
     renderPage()
 
     const row = (await screen.findByText('alice')).closest('tr')!
-    expect(within(row).getByText('Local')).toBeInTheDocument()
+    expect(within(row).getByText('API key only')).toBeInTheDocument()
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
     expect(within(row).queryByRole('button', { name: /Unlink/ })).not.toBeInTheDocument()
   })
 
-  it('shows Local badge when identities field is omitted (older server)', async () => {
+  it('shows API key only when identities and has_api_key fields are omitted (older server)', async () => {
     mockUsers([user('alice')])
     renderPage()
 
     const row = (await screen.findByText('alice')).closest('tr')!
-    expect(within(row).getByText('Local')).toBeInTheDocument()
+    expect(within(row).getByText('API key only')).toBeInTheDocument()
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
   })
 
   it('shows SSO badge only for a keyless SSO-only user, no unlink button', async () => {
@@ -546,10 +548,11 @@ describe('UsersPage Sign-in column', () => {
     const row = (await screen.findByText('devuser')).closest('tr')!
     expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
     expect(within(row).queryByText('Local')).not.toBeInTheDocument()
+    expect(within(row).queryByLabelText(/Show \d+ more/)).not.toBeInTheDocument()
     expect(within(row).queryByRole('button', { name: /Unlink/ })).not.toBeInTheDocument()
   })
 
-  it('shows Local + SSO badge with unlink button for local + 1 SSO user', async () => {
+  it('shows only SSO badge with unlink button for has_api_key + 1 SSO user; unlinking leaves API key only', async () => {
     mockUsers([
       user('devuser', {
         has_api_key: true,
@@ -562,21 +565,23 @@ describe('UsersPage Sign-in column', () => {
     renderPage()
 
     const row = (await screen.findByText('devuser')).closest('tr')!
-    expect(within(row).getByText('Local')).toBeInTheDocument()
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
+    expect(within(row).queryByLabelText(/Show \d+ more/)).not.toBeInTheDocument()
     expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
     expect(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from devuser' })).toBeInTheDocument()
 
-    // Unlink: remaining Local badge stays
+    // Unlink: falls back to API key only
     await user1.click(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from devuser' }))
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText(/Remove Red Hat SSO sign-in from "devuser"/)).toBeInTheDocument()
     await user1.click(within(dialog).getByRole('button', { name: 'Unlink' }))
 
     await waitFor(() => expect(within(row).queryByText('Red Hat SSO')).not.toBeInTheDocument())
-    expect(within(row).getByText('Local')).toBeInTheDocument()
+    expect(within(row).getByText('API key only')).toBeInTheDocument()
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
   })
 
-  it('shows Local + 2 SSO badges, both unlinkable; unlinking one leaves remaining still unlinkable', async () => {
+  it('shows 1st SSO + +1 for has_api_key + 2 SSOs, both unlinkable; unlinking one leaves remaining still unlinkable', async () => {
     mockUsers([
       user('multi', {
         has_api_key: true,
@@ -592,7 +597,7 @@ describe('UsersPage Sign-in column', () => {
     renderPage()
 
     const row = (await screen.findByText('multi')).closest('tr')!
-    expect(within(row).getByText('Local')).toBeInTheDocument()
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
     // Collapsed: first SSO visible, second hidden behind +1 pill
     expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
     expect(within(row).queryByText('GitHub')).not.toBeInTheDocument()
@@ -600,6 +605,7 @@ describe('UsersPage Sign-in column', () => {
 
     // Expand to see all SSO badges
     await user1.click(within(row).getByLabelText('Show 1 more SSO provider for multi'))
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
     expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
     expect(within(row).getByText('GitHub')).toBeInTheDocument()
     expect(within(row).getByRole('button', { name: 'Unlink Red Hat SSO from multi' })).toBeInTheDocument()
@@ -615,6 +621,7 @@ describe('UsersPage Sign-in column', () => {
     await waitFor(() => expect(within(row).queryByText('Red Hat SSO')).not.toBeInTheDocument())
     expect(within(row).getByText('GitHub')).toBeInTheDocument()
     expect(within(row).getByRole('button', { name: 'Unlink GitHub from multi' })).toBeInTheDocument()
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
   })
 
   it('keyless + 2 SSOs: unlinking one removes unlink button from remaining', async () => {
@@ -660,6 +667,7 @@ describe('UsersPage Sign-in column', () => {
 
     const row = (await screen.findByText('proxy')).closest('tr')!
     expect(within(row).getByText('None')).toBeInTheDocument()
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
   })
 
   it('renders a server-supplied display_name for an unknown provider with zero frontend changes', async () => {
@@ -673,6 +681,7 @@ describe('UsersPage Sign-in column', () => {
 
     const row = (await screen.findByText('kc-user')).closest('tr')!
     expect(within(row).getByText('Keycloak')).toBeInTheDocument()
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
   })
 
   it('falls back to provider id when display_name is absent', async () => {
@@ -686,6 +695,7 @@ describe('UsersPage Sign-in column', () => {
 
     const row = (await screen.findByText('raw')).closest('tr')!
     expect(within(row).getByText('saml-corp')).toBeInTheDocument()
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
   })
 
   it('surfaces unlink error (409) in the alert without dropping the badge', async () => {
@@ -718,7 +728,7 @@ describe('UsersPage Sign-in column', () => {
     expect(within(row).getByLabelText('Show 1 more SSO provider for clash')).toBeInTheDocument()
   })
 
-  it('with Local + 2 SSOs, initially shows Local, first SSO, and +1 pill with tooltip', async () => {
+  it('with 2 SSOs, initially shows first SSO and +1 pill whose tooltip lists all linked providers (no Local badge)', async () => {
     mockUsers([
       user('duo', {
         has_api_key: true,
@@ -732,14 +742,14 @@ describe('UsersPage Sign-in column', () => {
     renderPage()
 
     const row = (await screen.findByText('duo')).closest('tr')!
-    expect(within(row).getByText('Local')).toBeInTheDocument()
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
     expect(within(row).getByText('GitHub')).toBeInTheDocument()
     expect(within(row).queryByText('Red Hat SSO')).not.toBeInTheDocument()
 
     const pill = within(row).getByLabelText('Show 1 more SSO provider for duo')
     expect(pill).toBeInTheDocument()
     expect(pill).toHaveTextContent('+1')
-    expect(pill).toHaveAttribute('title', 'Red Hat SSO \u00b7 duo@rh.com')
+    expect(pill).toHaveAttribute('title', 'GitHub · duo@gh.com\nRed Hat SSO · duo@rh.com')
     expect(pill).toHaveAttribute('aria-expanded', 'false')
   })
 
@@ -762,6 +772,7 @@ describe('UsersPage Sign-in column', () => {
     await user1.click(within(row).getByLabelText('Show 1 more SSO provider for duo'))
 
     // Both SSO badges visible with unlink buttons
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
     expect(within(row).getByText('GitHub')).toBeInTheDocument()
     expect(within(row).getByText('Red Hat SSO')).toBeInTheDocument()
     expect(within(row).getByLabelText('Unlink GitHub from duo')).toBeInTheDocument()
@@ -773,9 +784,9 @@ describe('UsersPage Sign-in column', () => {
     await user1.click(within(dialog).getByRole('button', { name: 'Unlink' }))
     await waitFor(() => expect(del).toHaveBeenCalledWith('/api/admin/users/duo/identities/redhat'))
 
-    // Now Local + GitHub only, no +N pill
+    // Now GitHub only, no Local badge, no +N pill
     await waitFor(() => expect(within(row).queryByText('Red Hat SSO')).not.toBeInTheDocument())
-    expect(within(row).getByText('Local')).toBeInTheDocument()
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
     expect(within(row).getByText('GitHub')).toBeInTheDocument()
     expect(within(row).queryByLabelText(/Show \d+ more/)).not.toBeInTheDocument()
   })
@@ -805,7 +816,7 @@ describe('UsersPage Sign-in column', () => {
     expect(within(row).getByLabelText('Show 1 more SSO provider for duo')).toBeInTheDocument()
   })
 
-  it('with 3 SSOs, renders first SSO + +2 pill whose tooltip lists both hidden providers', async () => {
+  it('with 3 SSOs, renders first SSO + +2 pill whose tooltip lists all 3 linked providers', async () => {
     mockUsers([
       user('triple', {
         has_api_key: false,
@@ -820,13 +831,14 @@ describe('UsersPage Sign-in column', () => {
     renderPage()
 
     const row = (await screen.findByText('triple')).closest('tr')!
+    expect(within(row).queryByText('Local')).not.toBeInTheDocument()
     expect(within(row).getByText('GitHub')).toBeInTheDocument()
     expect(within(row).queryByText('Red Hat SSO')).not.toBeInTheDocument()
     expect(within(row).queryByText('Google')).not.toBeInTheDocument()
 
     const pill = within(row).getByLabelText('Show 2 more SSO providers for triple')
     expect(pill).toHaveTextContent('+2')
-    expect(pill).toHaveAttribute('title', 'Red Hat SSO \u00b7 tri@rh.com\nGoogle \u00b7 tri@goog.com')
+    expect(pill).toHaveAttribute('title', 'GitHub · tri@gh.com\nRed Hat SSO · tri@rh.com\nGoogle · tri@goog.com')
   })
 
   it('warns admin that unlinking the only SSO provider leaves API-key-only sign-in', async () => {

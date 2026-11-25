@@ -149,8 +149,7 @@ function SignInCell({
   onUnlink: (target: { username: string; provider: string; displayName: string; isLastSso: boolean }) => void
 }) {
   const identities = user.identities ?? []
-  const hasApiKey = user.has_api_key ?? (identities.length === 0)
-  const unlinkable = user.identities_unlinkable ?? (identities.length > 1 || Boolean(hasApiKey))
+  const unlinkable = user.identities_unlinkable ?? (identities.length > 1 || Boolean(user.has_api_key))
   const isLastSso = identities.length === 1
   const wrappedOnUnlink = useCallback(
     (target: { username: string; provider: string; displayName: string; isLastSso: boolean }) =>
@@ -159,43 +158,30 @@ function SignInCell({
   )
   const [expanded, setExpanded] = useState(false)
 
-  if (!hasApiKey && identities.length === 0) {
-    return <span className="text-xs text-text-tertiary">None</span>
+  if (identities.length === 0) {
+    if (user.has_api_key === false) {
+      return <span className="text-xs text-text-tertiary">None</span>
+    }
+    return <span className="text-xs text-text-tertiary">API key only</span>
   }
 
-  const localBadge = hasApiKey && (
-    <span
-      className={`inline-flex items-center rounded-full border border-border-muted bg-surface-elevated px-2 py-0.5 text-xs font-medium ${
-        muted ? 'text-text-tertiary' : 'text-text-secondary'
-      }`}
-      title="Local username + API key sign-in"
-    >
-      Local
-    </span>
-  )
-
-  // Single or no SSO — render flat (unchanged behaviour)
-  if (identities.length <= 1) {
+  if (identities.length === 1) {
     return (
       <div className="flex flex-wrap items-center gap-1">
-        {localBadge}
-        {identities.map((id) => (
-          <SsoBadge key={id.provider} id={id} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={wrappedOnUnlink} />
-        ))}
+        <SsoBadge id={identities[0]} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={wrappedOnUnlink} />
       </div>
     )
   }
 
   // 2+ SSO providers
   const overflow = identities.slice(1)
-  const overflowTooltip = overflow
-    .map((id) => `${id.display_name || id.provider}${id.email ? ` \u00b7 ${id.email}` : ''}`)
+  const allMethodsTooltip = identities
+    .map((id) => `${id.display_name || id.provider}${id.email ? ` · ${id.email}` : ''}`)
     .join('\n')
 
   if (!expanded) {
     return (
       <div className="flex flex-wrap items-center gap-1">
-        {localBadge}
         <SsoBadge id={identities[0]} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={wrappedOnUnlink} />
         <TooltipProvider delayDuration={200}>
           <Tooltip>
@@ -205,7 +191,7 @@ function SignInCell({
                 className={`inline-flex items-center rounded-md border border-border-muted bg-surface-elevated px-1.5 py-0.5 text-xs font-medium transition-colors ${
                   muted ? 'text-text-tertiary' : 'text-text-secondary hover:text-text-primary'
                 }`}
-                title={overflowTooltip}
+                title={allMethodsTooltip}
                 aria-label={`Show ${overflow.length} more SSO provider${overflow.length > 1 ? 's' : ''} for ${user.username}`}
                 aria-expanded={false}
                 onClick={() => setExpanded(true)}
@@ -213,7 +199,7 @@ function SignInCell({
                 +{overflow.length}
               </button>
             </TooltipTrigger>
-            <TooltipContent className="whitespace-pre-line">{overflowTooltip}</TooltipContent>
+            <TooltipContent className="whitespace-pre-line">{allMethodsTooltip}</TooltipContent>
           </Tooltip>
         </TooltipProvider>
       </div>
@@ -222,7 +208,6 @@ function SignInCell({
 
   return (
     <div className="flex flex-wrap items-center gap-1">
-      {localBadge}
       {identities.map((id) => (
         <SsoBadge key={id.provider} id={id} muted={muted} unlinkable={unlinkable} username={user.username} onUnlink={wrappedOnUnlink} />
       ))}
