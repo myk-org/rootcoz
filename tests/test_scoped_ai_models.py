@@ -243,11 +243,7 @@ async def test_manual_only_provider_visible_in_endpoint(monkeypatch):
         AsyncMock(return_value={"models": [], "modelListingSupported": False}),
     )
     monkeypatch.setattr(main, "_require_authenticated", lambda request: None)
-    request = type(
-        "Request",
-        (),
-        {"state": type("State", (), {"username": "alice", "is_admin": False})()},
-    )()
+    request = _fake_request("alice")
     data = await main.list_ai_models(request, provider="custom-provider")
     assert data["models"] == []
     assert data["modelListingSupported"] is False
@@ -293,11 +289,7 @@ async def test_missing_upstream_does_not_guess_user_models(monkeypatch):
         with pytest.raises(ValueError, match="Server provider access"):
             await ai_client.resolve_catalog_pair("openai", "shared")
         monkeypatch.setattr(main, "_require_authenticated", lambda request: None)
-        request = type(
-            "Request",
-            (),
-            {"state": type("State", (), {"username": "alice", "is_admin": False})()},
-        )()
+        request = _fake_request("alice")
         data = await main.list_ai_models(request, provider="openai")
         assert data["modelListingSupported"] is True
         assert data["unavailable"] is True
@@ -538,10 +530,12 @@ def _capture_server_listing(monkeypatch, rows):
 
 
 def _fake_request(username: str = "alice"):
+    from tests.conftest import principal_state
+
     return type(
         "Request",
         (),
-        {"state": type("State", (), {"username": username, "is_admin": False})()},
+        {"state": principal_state(username=username, is_admin=False)},
     )()
 
 

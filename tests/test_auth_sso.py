@@ -26,6 +26,9 @@ import pytest
 
 from rootcoz import storage
 from rootcoz.auth import identity as auth_identity
+from rootcoz.auth.approval import (
+    default_eligibility_check as _default_eligibility_check,
+)
 from rootcoz.auth.sso import AuthError, ClaimSet, configured_providers, get_provider
 from rootcoz.auth.sso import state as sso_state
 from rootcoz.auth.sso.google import GoogleProvider
@@ -584,7 +587,9 @@ async def test_a_tabbed_destination_never_reaches_a_sink(temp_db_path: Path) -> 
         # A returning identity, so the callback signs in and redirects straight
         # to the destination instead of minting a first-login ticket.
         await storage.create_user("ruthn")
-        await storage.add_user_identity("ruthn", "google", "sub-1")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
 
         with patch.object(
             GoogleProvider,
@@ -1456,7 +1461,9 @@ async def test_revoking_a_domain_cuts_off_an_already_linked_account(
     """The list applies on every login, not only at creation."""
     for _client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("alice")
-        await storage.add_user_identity("alice", "google", "sub-1")
+        await storage.add_user_identity(
+            "alice", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
 
         # Allowed now.
         resolved = await auth_identity.resolve("google", _claims(), get_settings())
@@ -1534,7 +1541,9 @@ async def test_a_linked_account_skips_the_choice(temp_db_path: Path) -> None:
     """The link — never the name — is what resolves a login automatically."""
     for _client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("ruthn")
-        await storage.add_user_identity("ruthn", "google", "sub-1")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
 
         resolved = await auth_identity.resolve(
             "google", _claims(username_hint="alice"), get_settings()
@@ -1550,7 +1559,9 @@ async def test_an_orphaned_link_is_healed_on_the_next_login(
     """A link whose account is gone must not lock that person out forever."""
     for _client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("alice")
-        await storage.add_user_identity("alice", "google", "sub-1")
+        await storage.add_user_identity(
+            "alice", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
         async with storage._connect_db() as db:
             await db.execute("DELETE FROM users WHERE username = 'alice'")
             await db.commit()
@@ -1566,7 +1577,9 @@ async def test_a_disabled_linked_account_is_refused(temp_db_path: Path) -> None:
     """A live link to a disabled account does not authenticate."""
     for _client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("ruthn")
-        await storage.add_user_identity("ruthn", "google", "sub-1")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
         with sqlite3.connect(storage.DB_PATH) as conn:
             conn.execute("UPDATE users SET disabled = 1 WHERE username = 'ruthn'")
 
@@ -2112,7 +2125,9 @@ async def test_linking_twice_reports_a_conflict_at_the_endpoint(
     """A subject already owned by another account is a 409, not a silent relink."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("alice")
-        await storage.add_user_identity("alice", "google", "sub-1")
+        await storage.add_user_identity(
+            "alice", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
 
         await storage.create_user("bob")
         bob_key = await storage.rotate_own_key("bob")
@@ -2135,7 +2150,9 @@ async def test_a_second_identity_for_the_same_provider_is_still_refused(
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("ruthn")
         raw_key = await storage.rotate_own_key("ruthn")
-        await storage.add_user_identity("ruthn", "google", "sub-1")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
         ticket = await _ticket(client, subject="sub-2")
 
         response = client.post(
@@ -3287,7 +3304,11 @@ async def test_link_mode_refuses_an_identity_that_belongs_to_someone_else(
         await storage.create_user("alice")
         await storage.create_user("ruthn")
         await storage.add_user_identity(
-            "alice", "google", "sub-1", email="alice@example.com"
+            "alice",
+            "google",
+            "sub-1",
+            email="alice@example.com",
+            eligibility_check=_default_eligibility_check,
         )
         session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
         client.cookies.set("rootcoz_session", session)
@@ -3770,7 +3791,9 @@ async def test_an_expired_session_cannot_start_or_finish_a_link(
     """A dead credential names its owner — it must not prove they are there."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("alice")
-        await storage.add_user_identity("alice", "github", "gh-a")
+        await storage.add_user_identity(
+            "alice", "github", "gh-a", eligibility_check=_default_eligibility_check
+        )
         session = await storage.create_session("alice", is_admin=False, role="reviewer")
         async with storage._connect_db() as db:
             await db.execute(
@@ -3955,7 +3978,11 @@ async def test_linking_the_same_identity_twice_is_a_no_op(temp_db_path: Path) ->
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("ruthn")
         await storage.add_user_identity(
-            "ruthn", "google", "sub-1", email="ruthn@example.com"
+            "ruthn",
+            "google",
+            "sub-1",
+            email="ruthn@example.com",
+            eligibility_check=_default_eligibility_check,
         )
         session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
         client.cookies.set("rootcoz_session", session)
@@ -3984,10 +4011,18 @@ async def test_listing_and_removing_linked_identities(temp_db_path: Path) -> Non
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("ruthn")
         await storage.add_user_identity(
-            "ruthn", "google", "sub-1", email="ruthn@example.com"
+            "ruthn",
+            "google",
+            "sub-1",
+            email="ruthn@example.com",
+            eligibility_check=_default_eligibility_check,
         )
         await storage.add_user_identity(
-            "ruthn", "github", "gh-1", email="ruthn@example.com"
+            "ruthn",
+            "github",
+            "gh-1",
+            email="ruthn@example.com",
+            eligibility_check=_default_eligibility_check,
         )
         session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
         client.cookies.set("rootcoz_session", session)
@@ -4014,7 +4049,11 @@ async def test_keyed_user_can_unlink_sole_identity(temp_db_path: Path) -> None:
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("ruthn")
         await storage.add_user_identity(
-            "ruthn", "google", "sub-1", email="ruthn@example.com"
+            "ruthn",
+            "google",
+            "sub-1",
+            email="ruthn@example.com",
+            eligibility_check=_default_eligibility_check,
         )
         session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
         client.cookies.set("rootcoz_session", session)
@@ -4029,7 +4068,11 @@ async def test_the_last_sign_in_method_cannot_be_removed(temp_db_path: Path) -> 
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_keyless_user("ruthn", created_via="proxy")
         await storage.add_user_identity(
-            "ruthn", "google", "sub-1", email="ruthn@example.com"
+            "ruthn",
+            "google",
+            "sub-1",
+            email="ruthn@example.com",
+            eligibility_check=_default_eligibility_check,
         )
         session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
         client.cookies.set("rootcoz_session", session)
@@ -4048,8 +4091,12 @@ async def test_a_viewer_cannot_unlink_a_sign_in_method(temp_db_path: Path) -> No
     """Removing one is a write on the account, like removing your own AI key."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("vicky")
-        await storage.add_user_identity("vicky", "google", "sub-v")
-        await storage.add_user_identity("vicky", "github", "gh-v")
+        await storage.add_user_identity(
+            "vicky", "google", "sub-v", eligibility_check=_default_eligibility_check
+        )
+        await storage.add_user_identity(
+            "vicky", "github", "gh-v", eligibility_check=_default_eligibility_check
+        )
         session = await storage.create_session("vicky", is_admin=False, role="viewer")
         client.cookies.set("rootcoz_session", session)
 
@@ -4079,7 +4126,11 @@ async def test_unlink_identity_enforces_allow_list(
     for client in make_app_client(temp_db_path, env):
         await storage.create_user(username, role=role)
         await storage.add_user_identity(
-            username, "google", "sub-1", email=f"{username}@example.com"
+            username,
+            "google",
+            "sub-1",
+            email=f"{username}@example.com",
+            eligibility_check=_default_eligibility_check,
         )
         session = await storage.create_session(username, is_admin=is_admin, role=role)
         client.cookies.set("rootcoz_session", session)
@@ -4095,7 +4146,9 @@ async def test_removing_an_unconnected_provider_is_a_404(temp_db_path: Path) -> 
     """A provider the account never linked is not silently "removed"."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("ruthn")
-        await storage.add_user_identity("ruthn", "google", "sub-1")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
         session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
         client.cookies.set("rootcoz_session", session)
 
@@ -4108,8 +4161,12 @@ async def test_an_unknown_provider_name_is_a_client_error(
     """A name outside SSO_PROVIDERS is "not connected", never a 500."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("ruthn")
-        await storage.add_user_identity("ruthn", "google", "sub-x")
-        await storage.add_user_identity("ruthn", "github", "gh-x")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-x", eligibility_check=_default_eligibility_check
+        )
+        await storage.add_user_identity(
+            "ruthn", "github", "gh-x", eligibility_check=_default_eligibility_check
+        )
         session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
         client.cookies.set("rootcoz_session", session)
 
@@ -4136,7 +4193,9 @@ async def test_a_refused_removal_is_audited(temp_db_path: Path) -> None:
     """
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_keyless_user("ruthn", created_via="proxy")
-        await storage.add_user_identity("ruthn", "google", "sub-1")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
         session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
         client.cookies.set("rootcoz_session", session)
 
@@ -4169,8 +4228,12 @@ async def test_an_admin_can_inspect_and_unlink_any_account(temp_db_path: Path) -
     """Admins get the same shape, scoped by username, with an audit row each."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_user("alice")
-        await storage.add_user_identity("alice", "google", "sub-9")
-        await storage.add_user_identity("alice", "github", "gh-9")
+        await storage.add_user_identity(
+            "alice", "google", "sub-9", eligibility_check=_default_eligibility_check
+        )
+        await storage.add_user_identity(
+            "alice", "github", "gh-9", eligibility_check=_default_eligibility_check
+        )
         login = client.post(
             "/api/auth/login",
             json={
@@ -4203,7 +4266,9 @@ async def test_an_admin_cannot_remove_the_last_sign_in_method_either(
     """A keyless account's sole identity cannot be removed even by an admin."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
         await storage.create_keyless_user("alice", created_via="proxy")
-        await storage.add_user_identity("alice", "google", "sub-9")
+        await storage.add_user_identity(
+            "alice", "google", "sub-9", eligibility_check=_default_eligibility_check
+        )
         login = client.post(
             "/api/auth/login",
             json={
@@ -4525,7 +4590,11 @@ async def test_a_revoked_domain_does_not_mint_a_device_session(
     for client in make_app_client(temp_db_path, env):
         await storage.create_user("alice", status="active")
         await storage.add_user_identity(
-            "alice", "google", "sub-1", email="alice@elsewhere.example"
+            "alice",
+            "google",
+            "sub-1",
+            email="alice@elsewhere.example",
+            eligibility_check=_default_eligibility_check,
         )
         session = await storage.create_session("alice", auth_provider="google")
         started = _start_device(client)
@@ -4559,7 +4628,11 @@ async def test_an_allowed_domain_still_mints_the_device_session(
     for client in make_app_client(temp_db_path, env):
         await storage.create_user("alice", status="active")
         await storage.add_user_identity(
-            "alice", "google", "sub-1", email="alice@redhat.com"
+            "alice",
+            "google",
+            "sub-1",
+            email="alice@redhat.com",
+            eligibility_check=_default_eligibility_check,
         )
         session = await storage.create_session("alice", auth_provider="google")
         started = _start_device(client)
@@ -5702,7 +5775,11 @@ async def test_a_repeat_link_is_a_no_op_and_still_spends_its_ticket(
         await storage.create_user("ruthn")
         raw_key = await storage.rotate_own_key("ruthn")
         await storage.add_user_identity(
-            "ruthn", "google", "sub-1", email="ruthn@example.com"
+            "ruthn",
+            "google",
+            "sub-1",
+            email="ruthn@example.com",
+            eligibility_check=_default_eligibility_check,
         )
         ticket = await _ticket(client, email="ruthn@example.com")
 
@@ -5875,7 +5952,9 @@ async def test_above_require_approval_a_pending_account_is_held_with_its_reason(
         # only order that produces it — the link write itself refuses a blocked
         # account now.
         await storage.create_user("ruthn")
-        await storage.add_user_identity("ruthn", "google", "sub-1")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
         async with storage._connect_db() as db:
             await db.execute(
                 "UPDATE users SET status = 'pending' WHERE username = ?", ("ruthn",)
@@ -6193,18 +6272,34 @@ async def test_admin_users_list_includes_identities(temp_db_path: Path) -> None:
         await storage.create_user("nolinks")
         await storage.create_user("onelink")
         await storage.add_user_identity(
-            "onelink", "google", "sub-ol", email="onelink@g.com"
+            "onelink",
+            "google",
+            "sub-ol",
+            email="onelink@g.com",
+            eligibility_check=_default_eligibility_check,
         )
         await storage.create_keyless_user("keyless-one", created_via="proxy")
         await storage.add_user_identity(
-            "keyless-one", "google", "sub-kl", email="keyless@g.com"
+            "keyless-one",
+            "google",
+            "sub-kl",
+            email="keyless@g.com",
+            eligibility_check=_default_eligibility_check,
         )
         await storage.create_user("twolinks")
         await storage.add_user_identity(
-            "twolinks", "google", "sub-tl-g", email="twolinks@g.com"
+            "twolinks",
+            "google",
+            "sub-tl-g",
+            email="twolinks@g.com",
+            eligibility_check=_default_eligibility_check,
         )
         await storage.add_user_identity(
-            "twolinks", "github", "sub-tl-gh", email="twolinks@gh.com"
+            "twolinks",
+            "github",
+            "sub-tl-gh",
+            email="twolinks@gh.com",
+            eligibility_check=_default_eligibility_check,
         )
 
         cookies = admin_login(client)
@@ -6331,6 +6426,7 @@ async def test_a_domain_revocation_between_the_poll_and_the_exchange_refuses_red
             provider="google",
             subject="sub-dom",
             email="domuser@example.com",
+            eligibility_check=_default_eligibility_check,
         )
         session = await storage.create_session(
             "domuser", is_admin=False, role="reviewer", auth_provider="google"

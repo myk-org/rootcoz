@@ -11,7 +11,6 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -23,6 +22,7 @@ from rootcoz.ai_client import AIResult, AITokenUsage
 
 # Bound at import time: conftest replaces the module attribute with a denier.
 from rootcoz.ai_client import call_ai as call_ai_under_test
+from tests.conftest import principal_state
 
 # ---------------------------------------------------------------------------
 # Fakes: the three sidecar surfaces one turn touches
@@ -810,7 +810,7 @@ class FakeRequest:
         is_admin: bool = True,
         disconnected: bool = False,
     ) -> None:
-        self.state = SimpleNamespace(username=username, role=role, is_admin=is_admin)
+        self.state = principal_state(username=username, role=role, is_admin=is_admin)
         self._disconnected = disconnected
 
     async def is_disconnected(self) -> bool:

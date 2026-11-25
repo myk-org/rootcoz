@@ -19,7 +19,7 @@ from rootcoz.ai_client import _call_ai as real_internal_call_ai
 from rootcoz.ai_client import call_ai as real_call_ai
 from rootcoz.ai_client import call_ai_once as real_call_ai_once
 from rootcoz.engine import chat
-from tests.conftest import capture_main_logs
+from tests.conftest import capture_main_logs, principal_state
 
 # Every module a credential travels through on these paths: a leak in any of them
 # is exactly what the ``not in caplog.text`` assertions look for, and none of them
@@ -202,7 +202,7 @@ async def test_verify_replacement_only_saves_accepted(tmp_path, monkeypatch, out
 
     verify = AsyncMock(return_value=outcome)
     monkeypatch.setattr(ai_client, "verify_ai_key", verify)
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
     response = await main.set_user_ai_credential(
         "openai",
         main.AiCredentialInput(
@@ -234,7 +234,7 @@ async def test_credential_strips_model_before_verification(tmp_path, monkeypatch
     )
     verify = AsyncMock(return_value="accepted")
     monkeypatch.setattr(ai_client, "verify_ai_key", verify)
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
     await main.set_user_ai_credential(
         "openai",
         main.AiCredentialInput(
@@ -386,7 +386,7 @@ async def test_model_restriction_preserves_stored_key_and_hides_provider_error(
             "get_sidecar_client",
             lambda: SimpleNamespace(_client=http, delete_session=AsyncMock()),
         )
-        request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+        request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
         with capture_main_logs(caplog, logging.WARNING, logger=_CREDENTIAL_LOGGERS):
             response = await main.set_user_ai_credential(
                 "openai",
@@ -416,7 +416,7 @@ async def test_api_status_redacts_and_rejects_unsupported(tmp_path, monkeypatch)
     monkeypatch.setattr(
         main, "supported_key_providers", AsyncMock(return_value=["custom"])
     )
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
     monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
     body = main.AiCredentialInput(api_key="private-value", model="m")
     response = await main.set_user_ai_credential("custom", body, request)
@@ -449,7 +449,7 @@ async def test_openai_key_without_server_auth_or_catalog_models(tmp_path, monkey
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "list_models", AsyncMock(return_value=[]))
     monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
     assert (await main.get_user_ai_credentials(request)).body == (
         b'{"providers":[{"provider":"openai","configured":false,"supports_user_keys":true}]}'
     )
@@ -1426,7 +1426,7 @@ async def test_credential_mutations_require_reviewer(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "supported_key_providers", AsyncMock(return_value=["p"]))
     monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
     for role in ("viewer", "reviewer", "operator", "admin"):
-        request = SimpleNamespace(state=SimpleNamespace(username="alice", role=role))
+        request = SimpleNamespace(state=principal_state(username="alice", role=role))
         await main.get_user_ai_credentials(request)
         for mutation in (
             lambda request=request: main.set_user_ai_credential(
@@ -1489,7 +1489,7 @@ async def test_set_user_credential_canonicalizes_provider_id(tmp_path, monkeypat
         return "accepted"
 
     monkeypatch.setattr(ai_client, "verify_ai_key", verify)
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="reviewer"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="reviewer"))
     new_key = "user-canonical-key"  # pragma: allowlist secret
     response = await main.set_user_ai_credential(
         "enmaas", main.AiCredentialInput(api_key=new_key, model="m"), request
@@ -1521,7 +1521,7 @@ async def test_rotating_credential_deletes_sidecar_session(tmp_path, monkeypatch
     sidecar = AsyncMock()
     monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
     monkeypatch.setattr("pi_sidecar_client.get_sidecar_client", lambda: sidecar)
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
     new_key = "new-value"  # pragma: allowlist secret
     await main.set_user_ai_credential(
         "p", main.AiCredentialInput(api_key=new_key, model="m"), request
@@ -1703,7 +1703,7 @@ async def test_bootstrap_admin_gets_explicit_unavailable(monkeypatch):
     monkeypatch.setattr(storage, "get_user_by_username", AsyncMock(return_value=None))
     with pytest.raises(HTTPException) as exc:
         await main.get_user_ai_credentials(
-            SimpleNamespace(state=SimpleNamespace(username="bootstrap"))
+            SimpleNamespace(state=principal_state(username="bootstrap"))
         )
     assert exc.value.status_code == 403
     assert "database" in exc.value.detail.lower()
@@ -1745,7 +1745,7 @@ async def test_preview_binds_user_for_content_and_resets(
         jira_pat=None,
     )
     body = main.PreviewIssueRequest(test_name="failure")
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="reviewer"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="reviewer"))
     token = ai_client.ai_username.set("prior")
     try:
         result = await getattr(main, endpoint)("job", body, request, settings=settings)
@@ -1788,7 +1788,7 @@ async def test_unreadable_credential_map_refuses_list_set_delete_and_preserves_d
             await db.commit()
     monkeypatch.setattr(main, "supported_key_providers", AsyncMock(return_value=["p"]))
     monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
     new_key = "new-value"  # pragma: allowlist secret
     with capture_main_logs(caplog, logging.WARNING, logger=_CREDENTIAL_LOGGERS):
         for operation in (
@@ -1840,7 +1840,7 @@ async def test_feedback_preview_uses_requester_context_and_resets(monkeypatch):
     token = ai_client.ai_username.set("prior")
     try:
         await main.preview_feedback(
-            SimpleNamespace(state=SimpleNamespace(username="alice")),
+            SimpleNamespace(state=principal_state(username="alice")),
             SimpleNamespace(ai_provider=None, ai_model=None),
         )
         assert ai_client.ai_username.get() == "prior"
@@ -1859,7 +1859,7 @@ async def test_js_blank_key_rejected_before_storage(monkeypatch):
             await main.set_user_ai_credential(
                 "p",
                 main.AiCredentialInput(api_key=blank, model="m"),
-                SimpleNamespace(state=SimpleNamespace(username="alice", role="admin")),
+                SimpleNamespace(state=principal_state(username="alice", role="admin")),
             )
         assert exc.value.status_code == 400
     update.assert_not_awaited()
@@ -1867,7 +1867,7 @@ async def test_js_blank_key_rejected_before_storage(monkeypatch):
     await main.set_user_ai_credential(
         "p",
         main.AiCredentialInput(api_key="\u200b\ufefflong-enough", model="m"),
-        SimpleNamespace(state=SimpleNamespace(username="alice", role="admin")),
+        SimpleNamespace(state=principal_state(username="alice", role="admin")),
     )
     update.assert_awaited_once()
 
@@ -1985,7 +1985,7 @@ class TestAmbientAuthProviderExclusion:
 
         verify = AsyncMock(return_value="accepted")
         monkeypatch.setattr(ai_client, "verify_ai_key", verify)
-        request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+        request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
 
         with pytest.raises(HTTPException) as exc_info:
             await main.set_user_ai_credential(
@@ -2022,7 +2022,7 @@ class TestAmbientAuthProviderExclusion:
         monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
         _override_ambient_providers(monkeypatch, "google-vertex-claude")
 
-        request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+        request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
 
         # GET unions supported | configured so the stored key stays visible,
         # flagged as no longer accepting user keys
@@ -2166,7 +2166,7 @@ async def test_user_credential_listing_folds_case_variants(tmp_path, monkeypatch
     await storage.update_user_ai_credential(
         "alice", "enmaas", "legacy-key", registered_providers=["EnMaaS"]
     )
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
     response = await main.get_user_ai_credentials(request)
     assert (
         response.body
@@ -2191,7 +2191,7 @@ async def test_set_user_credential_exact_match_wins_over_case_fallback(
     )
     verify = AsyncMock(return_value="accepted")
     monkeypatch.setattr(ai_client, "verify_ai_key", verify)
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
     body = main.AiCredentialInput(api_key="private-value", model="m")
     await main.set_user_ai_credential("foo", body, request)
     assert verify.await_args.args[0] == "foo"
@@ -2218,7 +2218,7 @@ async def test_user_credential_listing_keeps_case_distinct_configured_flags(
     await storage.update_user_ai_credential(
         "alice", "foo", "foo-key", registered_providers={"Foo", "foo"}
     )
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
     response = await main.get_user_ai_credentials(request)
     assert (
         response.body == b'{"providers":['
@@ -2251,7 +2251,7 @@ async def test_delete_credential_keeps_case_variant_key_when_registry_unknown(
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     assert await ai_client.registered_provider_ids() is None
 
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
     response = await main.delete_user_ai_credential("mygateway", request)
 
     assert response.status_code == 200

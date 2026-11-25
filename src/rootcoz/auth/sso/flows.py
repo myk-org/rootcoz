@@ -1199,11 +1199,6 @@ async def _redeem_claimed_device_code_flow(
             )
             return JSONResponse(content={"status": "denied"})
 
-    def _eligibility_check(row_user: dict[str, Any], row_is_admin: bool) -> str:
-        return auth_approval.account_eligibility_refusal(
-            row_user, is_admin=row_is_admin, settings=get_settings()
-        )
-
     def _domain_check(email: str | None) -> str | None:
         return auth_identity.stored_identity_domain_refusal(email, get_settings())
 
@@ -1211,7 +1206,7 @@ async def _redeem_claimed_device_code_flow(
         device_code,
         username=username,
         approved_provider=provider,
-        eligibility_check=_eligibility_check,
+        eligibility_check=auth_approval.default_eligibility_check,
         domain_check=_domain_check,
     )
     if minted is not None and minted.refused is not None:

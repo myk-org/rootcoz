@@ -18,14 +18,14 @@ from fastapi import HTTPException
 
 from rootcoz import ai_client, main, storage
 from rootcoz.models import ChatInitRequest
-from tests.conftest import capture_main_logs, record_chat_pushes
+from tests.conftest import capture_main_logs, principal_state, record_chat_pushes
 
 KEY = "job:alice"
 
 
 def _request(username="alice", role="reviewer", admin=False):
     return SimpleNamespace(
-        state=SimpleNamespace(username=username, is_admin=admin, role=role)
+        state=principal_state(username=username, is_admin=admin, role=role)
     )
 
 
@@ -997,7 +997,7 @@ async def test_malformed_stored_repo_urls_do_not_break_a_sent_message(
     assert (default, repos) == ("", frozenset())
     assert main._resolve_additional_repos_validated is not None
     # The chat-issue path keeps its 422 for a malformed inherited setting (#402).
-    _ = SimpleNamespace(state=SimpleNamespace(username="alice", role="reviewer"))
+    _ = SimpleNamespace(state=principal_state(username="alice", role="reviewer"))
     assert ChatMessageRequest(message="hi").message == "hi"
 
 

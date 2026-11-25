@@ -979,3 +979,40 @@ def install_turn_rig(monkeypatch, tmp_path):
         return root
 
     return _install
+
+
+def principal_state(
+    *,
+    username: str = "",
+    role: str = "reviewer",
+    is_admin: bool | None = None,
+    is_ai_session: bool = False,
+    can_view_reports: bool | None = None,
+    can_use_server_providers: bool = False,
+    can_use_free_providers: bool = False,
+    auth_session_token: str = "",
+    auth_strategy: str = "",
+    auth_provider: str | None = None,
+    **extra: Any,
+) -> SimpleNamespace:
+    """Build a stub ``request.state`` carrying a typed :class:`Principal`."""
+    from rootcoz.auth.principal import Principal
+
+    resolved_admin = bool(is_admin) if is_admin is not None else False
+    resolved_reports = (
+        bool(can_view_reports) if can_view_reports is not None else resolved_admin
+    )
+    principal = Principal(
+        username=username,
+        role=role,
+        is_admin=resolved_admin,
+        is_ai_session=is_ai_session,
+        can_view_reports=resolved_reports,
+        can_use_server_providers=can_use_server_providers,
+        can_use_free_providers=can_use_free_providers,
+        authenticated=bool(username),
+        auth_session_token=auth_session_token,
+        auth_strategy=auth_strategy,
+        auth_provider=auth_provider,
+    )
+    return SimpleNamespace(principal=principal, **extra)

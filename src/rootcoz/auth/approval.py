@@ -23,7 +23,7 @@ from typing import Any
 
 from fastapi.responses import JSONResponse
 
-from rootcoz.config import Settings
+from rootcoz.config import Settings, get_settings
 
 #: Body of the generic refusal. A refused account and a bad credential must be
 #: byte-identical, so the caller never learns which condition applied.
@@ -139,6 +139,11 @@ def account_eligibility_refusal(
     ):
         return status
     return ""
+
+
+def default_eligibility_check(user: dict[str, Any], is_admin: bool) -> str:
+    """Default ``EligibilityCheck`` callback reading live settings at commit time."""
+    return account_eligibility_refusal(user, is_admin=is_admin, settings=get_settings())
 
 
 def maybe_add_custom_approval_msg(content: dict[str, Any], settings: Settings) -> None:

@@ -3,8 +3,10 @@
 This module is the single deep entry point for request identity in rootcoz:
 
 * :class:`Principal` collapses the 9 untyped ``request.state.*`` auth attributes
-  into one typed immutable object (with :func:`attach_principal` maintaining the
-  backward-compatibility ``request.state.*`` mirrors in one place).
+  into one typed immutable object stored solely under :data:`PRINCIPAL_STATE_ATTR`.
+  :func:`get_principal` fails closed to :data:`ANONYMOUS_PRINCIPAL` whenever no
+  typed principal is attached — never falling back to untyped ``request.state``
+  side channels.
 * :data:`PUBLIC_EXACT_PATHS` / :data:`PUBLIC_ROUTE_PATTERNS` / :func:`is_public_path`
   own the explicit anonymous-route contract (no positional path splitting).
 * :func:`authenticate_request` runs the 4-path credential resolution chain
@@ -34,7 +36,6 @@ from rootcoz.auth import approval as auth_approval
 from rootcoz.auth import registry as auth_registry
 from rootcoz.auth.base import (
     RESERVED_ADMIN_USERNAME,
-    SESSION_COOKIE,
     USERNAME_COOKIE,
     AuthSideEffects,
     effective_can_view_reports,
@@ -144,64 +145,36 @@ ANONYMOUS_PRINCIPAL = Principal()
 
 
 def attach_principal(request: Request, principal: Principal) -> None:
-    """Attach *principal* to ``request.state`` and sync legacy attribute mirrors.
+    """Attach *principal* to ``request.state`` under :data:`PRINCIPAL_STATE_ATTR`.
 
-    Keeping all compatibility mirrors in this single helper ensures untouched
-    route handlers reading ``request.state.*`` see the exact typed principal
-    values without scattering 9 untyped assignments across middleware.
+    Auth identity and grants flow exclusively through this typed object; no
+    untyped ``request.state.*`` auth mirrors are written.
     """
-    state = request.state
-    setattr(state, PRINCIPAL_STATE_ATTR, principal)
-    state.username = principal.username
-    state.role = principal.role
-    state.is_admin = principal.is_admin
-    state.is_ai_session = principal.is_ai_session
-    state.can_view_reports = principal.can_view_reports
-    state.can_use_server_providers = principal.can_use_server_providers
-    state.can_use_free_providers = principal.can_use_free_providers
-    state.auth_session_token = principal.auth_session_token
-    state.auth_strategy = principal.auth_strategy
-    state.auth_provider = principal.auth_provider
+    setattr(request.state, PRINCIPAL_STATE_ATTR, principal)
+
+
+def has_principal(request: Request) -> bool:
+    """True when a typed :class:`Principal` is attached to *request*."""
+    state = getattr(request, "state", None)
+    return (
+        isinstance(getattr(state, PRINCIPAL_STATE_ATTR, None), Principal)
+        if state is not None
+        else False
+    )
 
 
 def get_principal(request: Request) -> Principal:
     """Return the typed :class:`Principal` attached to *request*.
 
-    Falls back to reading legacy ``request.state.*`` attributes only when a
-    unit test constructs a bare ``Request``/stub without running
-    ``AuthMiddleware``.
+    Fails closed to :data:`ANONYMOUS_PRINCIPAL` when no typed principal is
+    attached — never reconstructing authorization state from untyped
+    ``request.state`` side channels.
     """
     state = getattr(request, "state", None)
     existing = getattr(state, PRINCIPAL_STATE_ATTR, None) if state is not None else None
     if isinstance(existing, Principal):
         return existing
-    if state is None:
-        return ANONYMOUS_PRINCIPAL
-    username = getattr(state, "username", "")
-    username_str = username if isinstance(username, str) else ""
-    role = getattr(state, "role", "reviewer")
-    role_str = role if isinstance(role, str) else "reviewer"
-    raw_token = getattr(state, "auth_session_token", "")
-    token_str = raw_token if isinstance(raw_token, str) else ""
-    raw_strategy = getattr(state, "auth_strategy", "")
-    strategy_str = raw_strategy if isinstance(raw_strategy, str) else ""
-    raw_provider = getattr(state, "auth_provider", None)
-    provider_str = raw_provider if isinstance(raw_provider, str) else None
-    return Principal(
-        username=username_str,
-        role=role_str,
-        is_admin=bool(getattr(state, "is_admin", False)),
-        is_ai_session=bool(getattr(state, "is_ai_session", False)),
-        can_view_reports=bool(getattr(state, "can_view_reports", False)),
-        can_use_server_providers=bool(
-            getattr(state, "can_use_server_providers", False)
-        ),
-        can_use_free_providers=bool(getattr(state, "can_use_free_providers", False)),
-        authenticated=bool(username_str),
-        auth_session_token=token_str,
-        auth_strategy=strategy_str,
-        auth_provider=provider_str,
-    )
+    return ANONYMOUS_PRINCIPAL
 
 
 @dataclass(frozen=True)
@@ -445,24 +418,10 @@ async def is_admin_sse_authorized(
         return False
 
     try:
-        # Honor auth_session_token="" set by AuthMiddleware when a Bearer admin
-        # overrides an unrelated or expired session cookie.
-        state = getattr(request, "state", None)
-        has_principal = isinstance(
-            getattr(state, PRINCIPAL_STATE_ATTR, None), Principal
-        )
-        raw_state_token = (
-            principal.auth_session_token
-            if has_principal
-            else getattr(state, "auth_session_token", None)
-        )
-        if isinstance(raw_state_token, str):
-            session_token = raw_state_token
-        elif isinstance(getattr(request, "cookies", None), Mapping):
-            raw_cookie = read_cookie(request, SESSION_COOKIE)
-            session_token = raw_cookie if isinstance(raw_cookie, str) else ""
-        else:
-            session_token = ""
+        # Read strictly from the typed Principal attached by AuthMiddleware
+        # (which sets auth_session_token="" when a Bearer admin overrides an
+        # unrelated or expired session cookie).
+        session_token = principal.auth_session_token
 
         if session_token:
             session = await storage.get_session(session_token)

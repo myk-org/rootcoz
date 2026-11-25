@@ -22,6 +22,9 @@ from rootcoz import sso_store, storage
 from rootcoz.auth import identity as auth_identity
 from rootcoz.auth import lifecycle as auth_lifecycle
 from rootcoz.auth import principal as auth_principal
+from rootcoz.auth.approval import (
+    default_eligibility_check as _default_eligibility_check,
+)
 from rootcoz.auth.base import (
     ProxyProvisionedEvent,
     ProxyProvisionRefusedEvent,
@@ -166,7 +169,50 @@ def test_explicit_public_path_contract(path: str, expected: bool) -> None:
     assert auth_principal.is_public_path(path) is expected
 
 
-def test_attach_and_get_principal_roundtrip() -> None:
+def test_no_production_code_uses_legacy_request_state_auth_attrs() -> None:
+    """No production module under src/rootcoz/ may read/write untyped auth request.state.* attrs."""
+    legacy_attrs = {
+        "username",
+        "role",
+        "is_admin",
+        "is_ai_session",
+        "can_view_reports",
+        "can_use_server_providers",
+        "can_use_free_providers",
+        "auth_session_token",
+        "auth_strategy",
+        "auth_provider",
+    }
+    offending: list[str] = []
+    for py_file in sorted((REPO_ROOT / "src" / "rootcoz").rglob("*.py")):
+        tree = ast.parse(py_file.read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr in legacy_attrs
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "state"
+            ):
+                offending.append(
+                    f"{py_file.relative_to(REPO_ROOT)}:{node.lineno} (.state.{node.attr})"
+                )
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in ("getattr", "setattr", "hasattr")
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Attribute)
+                and node.args[0].attr == "state"
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in legacy_attrs
+            ):
+                offending.append(
+                    f"{py_file.relative_to(REPO_ROOT)}:{node.lineno} ({node.func.id}(*.state, {node.args[1].value!r}))"
+                )
+    assert not offending, f"Legacy untyped request.state auth access found: {offending}"
+
+
+def test_attach_and_get_principal_roundtrip_and_fail_closed() -> None:
     req = _make_request()
     principal = auth_principal.Principal(
         username="alice",
@@ -183,18 +229,35 @@ def test_attach_and_get_principal_roundtrip() -> None:
     )
     auth_principal.attach_principal(req, principal)
 
+    assert auth_principal.has_principal(req) is True
     assert auth_principal.get_principal(req) == principal
-    # Compatibility mirrors stay synchronized in one place.
-    assert req.state.username == "alice"
-    assert req.state.role == "operator"
-    assert req.state.is_admin is False
-    assert req.state.is_ai_session is True
-    assert req.state.can_view_reports is True
-    assert req.state.can_use_server_providers is True
-    assert req.state.can_use_free_providers is True
-    assert req.state.auth_session_token == "tok-123"
-    assert req.state.auth_strategy == "session"
-    assert req.state.auth_provider == "redhat"
+    # No legacy untyped request.state auth mirrors are written.
+    for legacy in (
+        "username",
+        "role",
+        "is_admin",
+        "is_ai_session",
+        "can_view_reports",
+        "can_use_server_providers",
+        "can_use_free_providers",
+        "auth_session_token",
+        "auth_strategy",
+        "auth_provider",
+    ):
+        assert not hasattr(req.state, legacy), (
+            f"legacy mirror state.{legacy} should not exist"
+        )
+
+    # Fail closed: untyped request.state.* values without a Principal never grant access.
+    untrusted = _make_request()
+    untrusted.state.username = "admin"
+    untrusted.state.is_admin = True
+    untrusted.state.role = "admin"
+    assert auth_principal.has_principal(untrusted) is False
+    assert auth_principal.get_principal(untrusted) == auth_principal.ANONYMOUS_PRINCIPAL
+    with pytest.raises(HTTPException) as exc:
+        auth_principal.require_admin(untrusted)
+    assert exc.value.status_code == 403
 
 
 def test_grant_guards_enforce_roles_and_allow_list() -> None:
@@ -354,7 +417,9 @@ async def test_delete_user_atomic_ordering_and_cleanup(setup_test_db: Path) -> N
 
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
-        await storage.add_user_identity("alice", "redhat", "sub-alice")
+        await storage.add_user_identity(
+            "alice", "redhat", "sub-alice", eligibility_check=_default_eligibility_check
+        )
         row = await storage.get_user_by_username("alice")
         assert row is not None
         owner_id = int(row["id"])
@@ -437,16 +502,30 @@ async def test_typed_storage_errors_and_identity_translation(
         await storage.create_user("alice")
 
         with pytest.raises(sso_store.BootstrapAdminLinkError) as exc:
-            await storage.add_user_identity("admin", "google", "sub-admin")
+            await storage.add_user_identity(
+                "admin",
+                "google",
+                "sub-admin",
+                eligibility_check=_default_eligibility_check,
+            )
         assert exc.value.reason == "bootstrap_admin_cannot_link"
 
         with pytest.raises(sso_store.AccountNotFoundError) as exc:
-            await storage.add_user_identity("ghost", "google", "sub-ghost")
+            await storage.add_user_identity(
+                "ghost",
+                "google",
+                "sub-ghost",
+                eligibility_check=_default_eligibility_check,
+            )
         assert exc.value.reason == "account_missing"
 
         with pytest.raises(sso_store.TicketExpiredError) as exc:
             await storage.add_user_identity(
-                "alice", "google", "sub-1", ticket="no-such-ticket"
+                "alice",
+                "google",
+                "sub-1",
+                ticket="no-such-ticket",
+                eligibility_check=_default_eligibility_check,
             )
         assert exc.value.reason == "ticket_expired"
 
@@ -467,6 +546,33 @@ async def test_typed_storage_errors_and_identity_translation(
                 settings=Settings(),
             )
         assert auth_exc2.value.reason == "invalid_username"
+
+        # Expired ticket during create_new keeps exact invalid_username audit parity
+        with pytest.raises(AuthError) as auth_exc3:
+            await auth_identity.create_new(
+                provider="google",
+                subject="sub-new",
+                email="new@example.com",
+                username="freshuser",
+                settings=Settings(),
+                ticket="expired-ticket-token",
+            )
+        assert auth_exc3.value.reason == "invalid_username"
+
+        # Plain ValueError (empty subject / invalid provider) still maps to AuthError (never 500)
+        with pytest.raises(AuthError) as auth_exc4:
+            await auth_identity.link_existing(
+                username="alice", provider="google", subject="   ", email=None
+            )
+        assert auth_exc4.value.reason == "identity_conflict"
+
+        # eligibility_check is required (cannot silently fail open)
+        with pytest.raises(TypeError):
+            await storage.add_user_identity("alice", "google", "sub-no-check")  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            await storage.exchange_device_code_for_session(  # type: ignore[call-arg]
+                "dc", username="alice"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +603,9 @@ async def test_sso_flows_identities_payload_and_unlink_guards(
         await storage.create_keyless_user(
             "keyless", status="active", created_via="redhat"
         )
-        await storage.add_user_identity("keyless", "redhat", "sub-k")
+        await storage.add_user_identity(
+            "keyless", "redhat", "sub-k", eligibility_check=_default_eligibility_check
+        )
 
         req = _make_request(method="DELETE", path="/api/user/identities/redhat")
         auth_principal.attach_principal(

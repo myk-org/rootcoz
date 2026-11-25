@@ -112,4 +112,20 @@ describe('RegisterPage token persistence', () => {
       expect(apiMock.put).toHaveBeenCalledWith('/api/user/tokens', expect.objectContaining({ github_token: 'typed_token' })),
     )
   })
+
+  it('preserves typed login apiKey and registration tokens across mode switches', async () => {
+    renderRegister()
+    const apiKeyInput = await screen.findByLabelText(/api key/i)
+    await userEvent.type(apiKeyInput, 'my-typed-key')
+
+    // Switch Login -> Register -> type GitHub token -> switch back to Login
+    await userEvent.click(screen.getByRole('button', { name: /^register$/i }))
+    const githubInput = await screen.findByLabelText(/github token/i)
+    await userEvent.type(githubInput, 'ghp_preserved')
+    await userEvent.click(screen.getByRole('button', { name: /^log in$/i }))
+
+    expect((await screen.findByLabelText(/api key/i) as HTMLInputElement).value).toBe('my-typed-key')
+    await userEvent.click(screen.getByRole('button', { name: /^register$/i }))
+    expect((await screen.findByLabelText(/github token/i) as HTMLInputElement).value).toBe('ghp_preserved')
+  })
 })

@@ -13,12 +13,13 @@ from fastapi import BackgroundTasks, HTTPException
 
 from rootcoz import main, storage
 from rootcoz.models import ChatMessageRequest
+from tests.conftest import principal_state
 
 KEY = "job:alice"
 
 
 def _request(username="alice", role="reviewer"):
-    return SimpleNamespace(state=SimpleNamespace(username=username, role=role))
+    return SimpleNamespace(state=principal_state(username=username, role=role))
 
 
 async def _job(monkeypatch, tmp_path, job_id="job"):

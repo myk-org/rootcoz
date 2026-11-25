@@ -9,14 +9,14 @@ import pytest
 
 from rootcoz import main, storage
 from rootcoz.engine import chat
-from tests.conftest import capture_main_logs
+from tests.conftest import capture_main_logs, principal_state
 
 
 def _request(
     *, username: str = "alice", is_admin: bool = False, role: str = "reviewer"
 ):
     return SimpleNamespace(
-        state=SimpleNamespace(username=username, is_admin=is_admin, role=role)
+        state=principal_state(username=username, is_admin=is_admin, role=role)
     )
 
 

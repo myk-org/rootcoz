@@ -32,7 +32,7 @@ from rootcoz import get_child_logger, storage
 from rootcoz.auth import approval as auth_approval
 from rootcoz.auth.base import RESERVED_ADMIN_USERNAME
 from rootcoz.auth.sso.base import AuthError, ClaimSet
-from rootcoz.config import Settings, canonical_domain, get_settings
+from rootcoz.config import Settings, canonical_domain
 
 logger = get_child_logger(__name__)
 
@@ -381,11 +381,6 @@ async def link_existing(
             subject=username,
         )
 
-    def _eligibility_check(user: dict[str, object], is_admin: bool) -> str:
-        return auth_approval.account_eligibility_refusal(
-            user, is_admin=is_admin, settings=get_settings()
-        )
-
     try:
         await storage.add_user_identity(
             username,
@@ -393,10 +388,12 @@ async def link_existing(
             subject,
             email=email,
             ticket=ticket,
-            eligibility_check=_eligibility_check,
+            eligibility_check=auth_approval.default_eligibility_check,
         )
     except storage.IdentityStorageError as exc:
         raise AuthError(exc.reason, str(exc), subject=username) from exc
+    except ValueError as exc:
+        raise AuthError("identity_conflict", str(exc), subject=username) from exc
     return IdentityResolution(
         username=username, created=False, status=await status_of(username)
     )
@@ -473,9 +470,11 @@ async def create_new(
             created_via=provider,
             ticket=ticket,
         )
-    except storage.IdentityStorageError as exc:
+    except storage.IdentityConflictError as exc:
         raise AuthError(exc.reason, str(exc), subject=candidate) from exc
-    except ValueError as exc:
+    except (storage.IdentityStorageError, ValueError) as exc:
+        # Preserve exact refusal reason parity for username/ticket failures on
+        # first-login account creation (``invalid_username``).
         raise AuthError("invalid_username", str(exc), subject=candidate) from exc
     return IdentityResolution(
         username=candidate, created=True, status=status, api_key=api_key

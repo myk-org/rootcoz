@@ -11,6 +11,14 @@ import { SsoProviderButtons, WarningBanner } from './AuthFormPrimitives'
 export function RegistrationForm({
   username,
   onUsernameChange,
+  githubToken,
+  onGithubTokenChange,
+  jiraEmail,
+  onJiraEmailChange,
+  jiraToken,
+  onJiraTokenChange,
+  jiraSaToken,
+  onJiraSaTokenChange,
   error,
   onErrorChange,
   ssoProviders,
@@ -21,6 +29,14 @@ export function RegistrationForm({
 }: {
   username: string
   onUsernameChange: (value: string) => void
+  githubToken: string
+  onGithubTokenChange: (value: string) => void
+  jiraEmail: string
+  onJiraEmailChange: (value: string) => void
+  jiraToken: string
+  onJiraTokenChange: (value: string) => void
+  jiraSaToken: string
+  onJiraSaTokenChange: (value: string) => void
   error: string
   onErrorChange: (value: string) => void
   ssoProviders: SsoProvider[]
@@ -30,10 +46,6 @@ export function RegistrationForm({
   onSwitchToLogin: () => void
 }) {
   const [loading, setLoading] = useState(false)
-  const [githubToken, setGithubTokenValue] = useState('')
-  const [jiraEmail, setJiraEmailValue] = useState('')
-  const [jiraToken, setJiraTokenValue] = useState('')
-  const [jiraSaToken, setJiraSaTokenValue] = useState('')
 
   async function handleRegister(e: FormEvent) {
     e.preventDefault()
@@ -88,13 +100,13 @@ export function RegistrationForm({
 
         <TrackerTokensFields
           githubToken={githubToken}
-          onGithubTokenChange={setGithubTokenValue}
+          onGithubTokenChange={onGithubTokenChange}
           jiraEmail={jiraEmail}
-          onJiraEmailChange={setJiraEmailValue}
+          onJiraEmailChange={onJiraEmailChange}
           jiraToken={jiraToken}
-          onJiraTokenChange={setJiraTokenValue}
+          onJiraTokenChange={onJiraTokenChange}
           jiraSaToken={jiraSaToken}
-          onJiraSaTokenChange={setJiraSaTokenValue}
+          onJiraSaTokenChange={onJiraSaTokenChange}
           idPrefix="reg"
         />
 

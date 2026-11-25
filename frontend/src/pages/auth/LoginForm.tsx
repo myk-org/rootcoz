@@ -11,6 +11,10 @@ import { SsoProviderButtons, WarningBanner } from './AuthFormPrimitives'
 export function LoginForm({
   username,
   onUsernameChange,
+  apiKey,
+  onApiKeyChange,
+  showApiKey,
+  onToggleShowApiKey,
   error,
   onErrorChange,
   ssoErrorSentence,
@@ -21,6 +25,10 @@ export function LoginForm({
 }: {
   username: string
   onUsernameChange: (value: string) => void
+  apiKey: string
+  onApiKeyChange: (value: string) => void
+  showApiKey: boolean
+  onToggleShowApiKey: () => void
   error: string
   onErrorChange: (value: string) => void
   ssoErrorSentence: string
@@ -30,8 +38,6 @@ export function LoginForm({
   onSwitchToRegister: () => void
 }) {
   const { login } = useAuth()
-  const [apiKey, setApiKey] = useState('')
-  const [showApiKey, setShowApiKey] = useState(false)
   const [loading, setLoading] = useState(false)
   const [loginCustomMessage, setLoginCustomMessage] = useState('')
 
@@ -87,9 +93,9 @@ export function LoginForm({
             id="login-apikey"
             label="API Key"
             value={apiKey}
-            onChange={(v) => { setApiKey(v); onErrorChange('') }}
+            onChange={(v) => { onApiKeyChange(v); onErrorChange('') }}
             show={showApiKey}
-            onToggleShow={() => setShowApiKey(!showApiKey)}
+            onToggleShow={onToggleShowApiKey}
             placeholder="Enter your API key..."
             optionalLabel={false}
             autoFocus={!!username}

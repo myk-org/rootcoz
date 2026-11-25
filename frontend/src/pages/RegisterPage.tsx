@@ -46,6 +46,12 @@ export function RegisterPage() {
 
   const [mode, setMode] = useState<Mode>('login')
   const [username, setUsername] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [showApiKey, setShowApiKey] = useState(false)
+  const [githubToken, setGithubTokenValue] = useState('')
+  const [jiraEmail, setJiraEmailValue] = useState('')
+  const [jiraToken, setJiraTokenValue] = useState('')
+  const [jiraSaToken, setJiraSaTokenValue] = useState('')
   const [newApiKey, setNewApiKey] = useState('')
   /** Set when this page created an account through SSO: the key is shown once. */
   const [ssoCreated, setSsoCreated] = useState<{ next: string } | null>(null)
@@ -303,12 +309,20 @@ export function RegisterPage() {
                 <RegistrationForm
                   username={username}
                   onUsernameChange={setUsername}
+                  githubToken={githubToken}
+                  onGithubTokenChange={setGithubTokenValue}
+                  jiraEmail={jiraEmail}
+                  onJiraEmailChange={setJiraEmailValue}
+                  jiraToken={jiraToken}
+                  onJiraTokenChange={setJiraTokenValue}
+                  jiraSaToken={jiraSaToken}
+                  onJiraSaTokenChange={setJiraSaTokenValue}
                   error={error}
                   onErrorChange={setError}
                   ssoProviders={ssoProviders}
                   returnTo={returnTo}
-                  onRegistered={(apiKey, isPending) => {
-                    setNewApiKey(apiKey)
+                  onRegistered={(createdKey, isPending) => {
+                    setNewApiKey(createdKey)
                     setRegistrationStatus(isPending ? 'pending' : 'active')
                     if (isPending) fetchPendingCustomMessage()
                     setMode('key-reveal')
@@ -323,6 +337,10 @@ export function RegisterPage() {
                 <LoginForm
                   username={username}
                   onUsernameChange={setUsername}
+                  apiKey={apiKey}
+                  onApiKeyChange={setApiKey}
+                  showApiKey={showApiKey}
+                  onToggleShowApiKey={() => setShowApiKey((prev) => !prev)}
                   error={error}
                   onErrorChange={setError}
                   ssoErrorSentence={ssoErrorSentence}

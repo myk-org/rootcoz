@@ -294,10 +294,10 @@ async def add_user_identity(
     provider: str,
     subject: str,
     *,
+    eligibility_check: EligibilityCheck,
     email: str | None = None,
     raw_claims_json: str | None = None,
     ticket: str | None = None,
-    eligibility_check: EligibilityCheck | None = None,
 ) -> dict[str, Any]:
     """Link an external identity to a local account.
 
@@ -339,12 +339,11 @@ async def add_user_identity(
                 if row is None:
                     raise AccountNotFoundError(f"User '{username}' not found")
                 user = _storage._user_row_to_dict(row)
-                if eligibility_check is not None:
-                    refusal = eligibility_check(
-                        user, str(user.get("role") or "") == "admin"
-                    )
-                    if refusal:
-                        raise AccountIneligibleError(refusal)
+                refusal = eligibility_check(
+                    user, str(user.get("role") or "") == "admin"
+                )
+                if refusal:
+                    raise AccountIneligibleError(refusal)
                 linked = await _select_identities(
                     db, "i.provider = ? AND i.subject = ?", (provider, subject)
                 )
@@ -860,9 +859,9 @@ async def exchange_device_code_for_session(
     device_code: str,
     *,
     username: str,
+    eligibility_check: EligibilityCheck,
     approved_provider: str | None = None,
     ttl_hours: int | None = None,
-    eligibility_check: EligibilityCheck | None = None,
     domain_check: Callable[[str | None], str | None] | None = None,
 ) -> DeviceCodeExchangeResult | None:
     """Spend a claimed device code and mint its session in one transaction.
@@ -910,13 +909,10 @@ async def exchange_device_code_for_session(
                 else:
                     role = str(row["role"] or "reviewer")
                     is_admin = role == "admin"
-                    if eligibility_check is not None:
-                        refusal = eligibility_check(user, is_admin)
-                        if refusal:
-                            await db.rollback()
-                            return DeviceCodeExchangeResult(
-                                refused=f"account_{refusal}"
-                            )
+                    refusal = eligibility_check(user, is_admin)
+                    if refusal:
+                        await db.rollback()
+                        return DeviceCodeExchangeResult(refused=f"account_{refusal}")
                 if approved_provider is not None and domain_check is not None:
                     cursor = await db.execute(
                         "SELECT email FROM user_identities"

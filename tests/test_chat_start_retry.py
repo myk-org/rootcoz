@@ -12,6 +12,7 @@ from rootcoz import ai_client, main, storage
 from rootcoz.cli.config import ServerConfig
 from rootcoz.cli.main import app
 from rootcoz.models import ChatInitRequest
+from tests.conftest import principal_state
 
 
 @pytest.mark.asyncio
@@ -63,7 +64,7 @@ async def test_repeated_start_reuses_session_without_duplicate_welcome(
         chat, "init_admin_chat_session" if admin else "init_chat_session", new_session
     )
     request = SimpleNamespace(
-        state=SimpleNamespace(username="alice", is_admin=True, role="admin")
+        state=principal_state(username="alice", is_admin=True, role="admin")
     )
     body = ChatInitRequest(ai_provider="openai", ai_model="m")
 

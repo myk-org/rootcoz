@@ -2405,6 +2405,7 @@ class TestAiSessionScoping:
         """AuthMiddleware exposes is_ai_session=True only on AI-scoped sessions."""
         from fastapi import FastAPI, Request
 
+        from rootcoz.auth import principal as auth_principal
         from rootcoz.main import AuthMiddleware
 
         probe_app = FastAPI()
@@ -2412,9 +2413,10 @@ class TestAiSessionScoping:
 
         @probe_app.get("/_probe_ai_session")
         async def _probe(request: Request):
+            principal = auth_principal.get_principal(request)
             return {
-                "username": request.state.username,
-                "is_ai_session": request.state.is_ai_session,
+                "username": principal.username,
+                "is_ai_session": principal.is_ai_session,
             }
 
         # Create a regular user + API key via the existing client fixture.

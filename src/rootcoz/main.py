@@ -2133,10 +2133,11 @@ async def record_audit(
     resolved_role = actor_role
     resolved_admin = is_admin
     if request is not None:
-        resolved_role = resolved_role or getattr(request.state, "role", None)
-        resolved_admin = resolved_admin or bool(
-            getattr(request.state, "is_admin", False)
+        principal = auth_principal.get_principal(request)
+        resolved_role = resolved_role or (
+            principal.role if auth_principal.has_principal(request) else None
         )
+        resolved_admin = resolved_admin or principal.is_admin
     try:
         event = await storage.insert_audit_event(
             action=action,
@@ -2221,7 +2222,7 @@ async def _record_refused_attempt(
         outcome = "denied"
     await record_audit(
         action=action,
-        actor=getattr(request.state, "username", ""),
+        actor=auth_principal.get_principal(request).username,
         message=f"{message} ({outcome}: {reason})",
         target_type=target_type,
         target_id=target_id or None,
@@ -2262,7 +2263,7 @@ async def _record_failed_attempt(
     """
     await record_audit(
         action=action,
-        actor=getattr(request.state, "username", ""),
+        actor=auth_principal.get_principal(request).username,
         message=f"{message} (failure: {reason})",
         target_type=target_type,
         target_id=target_id or None,
@@ -4883,7 +4884,7 @@ async def _audit_envelope_refusal(
     request: Request, normalized_path: str, status_code: int
 ) -> None:
     """Record one actor-attributed refusal row when envelope middleware rejects early."""
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     exc = HTTPException(status_code=status_code, detail="Envelope rejected")
     if normalized_path == "/api/feedback/create":
         await _record_refused_attempt(
@@ -5170,7 +5171,7 @@ async def _validation_error_handler(
     # every other 422 in the product is unchanged.
     await _audit_refused_issue_call(
         request,
-        getattr(request.state, "username", ""),
+        auth_principal.get_principal(request).username,
         "invalid_request",
         {"fields": _invalid_field_names(exc)},
     )
@@ -8374,7 +8375,7 @@ async def analyze(
         # AI/peer config error or a settings-merge failure is an attempt too.
         _require_operator(request)
         _check_allow_list(request)
-        token = ai_username.set(request.state.username)
+        token = ai_username.set(auth_principal.get_principal(request).username)
         try:
             provider, model = await _resolve_ai_config_allow_defer(
                 body, settings, request
@@ -8395,9 +8396,9 @@ async def analyze(
                 display_name=display_name,
                 analysis_type=body.type,
                 base_url=base_url,
-                username=request.state.username,
+                username=auth_principal.get_principal(request).username,
                 message_prefix="Analysis",
-                is_admin=bool(request.state.is_admin),
+                is_admin=bool(auth_principal.get_principal(request).is_admin),
                 is_generic_fallback=is_generic_fallback,
             )
 
@@ -8440,9 +8441,9 @@ async def submit(
                 display_name=display_name,
                 analysis_type=body.type,
                 base_url=base_url,
-                username=request.state.username,
+                username=auth_principal.get_principal(request).username,
                 message_prefix="Submit",
-                is_admin=bool(request.state.is_admin),
+                is_admin=bool(auth_principal.get_principal(request).is_admin),
                 ingest_only=True,
                 is_generic_fallback=is_generic_fallback,
             )
@@ -8507,9 +8508,9 @@ async def _audit_analysis_rerun(
             details["previous_classification"] = previous_classification
     await record_audit(
         action="analysis.rerun",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=(
-            f"User '{request.state.username}' re-ran the analysis of {subject}"
+            f"User '{auth_principal.get_principal(request).username}' re-ran the analysis of {subject}"
             f" with {provider or '<deferred>'}/{model or '<deferred>'}"
             f" ({trigger}, {outcome})"
         ),
@@ -8591,9 +8592,9 @@ async def _enqueue_audited_analysis(
         model = details.get("model") or "<deferred>"
         await record_audit(
             action="analysis.submit",
-            actor=request.state.username,
+            actor=auth_principal.get_principal(request).username,
             message=(
-                f"User '{request.state.username}' submitted {what}"
+                f"User '{auth_principal.get_principal(request).username}' submitted {what}"
                 f"{' ' + job_id if job_id else ''} with"
                 f" {provider}/{model} ({outcome})"
             ),
@@ -8717,10 +8718,10 @@ async def analyze_submitted_job(
             display_name=display_name,
             analysis_type=analysis_type,
             base_url=_extract_base_url(),
-            username=request.state.username,
+            username=auth_principal.get_principal(request).username,
             tags=list(result_data.get("tags") or []),
             message_prefix="Analysis",
-            is_admin=bool(request.state.is_admin),
+            is_admin=bool(auth_principal.get_principal(request).is_admin),
             existing_job_id=job_id,
             is_generic_fallback=is_generic_fallback,
         )
@@ -8882,12 +8883,12 @@ async def re_analyze(
             display_name=display_name,
             analysis_type=analysis_type,
             base_url=base_url,
-            username=request.state.username,
+            username=auth_principal.get_principal(request).username,
             tags=unified_body.tags,
             message_prefix="Re-analysis",
             reanalyzed_from_job_id=job_id,
             reanalyzed_from_job_name=origin_job_display_name,
-            is_admin=bool(request.state.is_admin),
+            is_admin=bool(auth_principal.get_principal(request).is_admin),
             is_generic_fallback=is_generic_fallback,
         )
     except Exception:
@@ -10042,7 +10043,7 @@ async def re_analyze_failure(
         # Defer AI validation when a tests repo can supply .rootcoz/settings.json
         # (same as submit-time deferred AI). Background applies settings.json after clone.
         settings = get_settings()
-        token = ai_username.set(request.state.username)
+        token = ai_username.set(auth_principal.get_principal(request).username)
         try:
             ai_provider, ai_model = await _resolve_ai_config_allow_defer(
                 BaseAnalysisRequest.model_validate(
@@ -10142,7 +10143,7 @@ async def re_analyze_failure(
                 action="analysis.rerun",
                 request=request,
                 message=(
-                    f"User '{request.state.username}' re-ran the analysis of"
+                    f"User '{auth_principal.get_principal(request).username}' re-ran the analysis of"
                     f" failure {failure_uuid}"
                 ),
                 target_type="job",
@@ -10180,7 +10181,7 @@ async def re_analyze_failure(
                 tests_repo_ref=tests_repo_ref,
                 tests_repo_token=tests_repo_token,
                 additional_repos_list=additional_repos_list,
-                username=request.state.username,
+                username=auth_principal.get_principal(request).username,
                 max_concurrent_ai_calls=max_concurrent_ai_calls,
                 analysis_type=decrypted_params.get("analysis_type", "jenkins"),
                 source_params={
@@ -10189,7 +10190,7 @@ async def re_analyze_failure(
                 settings=get_settings(),
                 child_job_name=match.get("child_job_name", ""),
                 child_build_number=match.get("child_build_number", 0),
-                is_admin=bool(request.state.is_admin),
+                is_admin=bool(auth_principal.get_principal(request).is_admin),
             )
         )
         _background_tasks.add(task)
@@ -10563,7 +10564,7 @@ async def add_comment(
     """Add a comment to a test failure."""
     logger.debug(f"POST /results/{job_id}/comments: test_name={body.test_name}")
 
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     message = f"User '{username}' commented on '{body.test_name}' in job {job_id}"
     try:
         # Authorization is part of the attempt: a denied call still leaves one
@@ -10652,12 +10653,12 @@ async def delete_comment_endpoint(
     _check_allow_list(request)
     _require_reviewer(request)
     logger.debug(f"DELETE /results/{job_id}/comments/{comment_id}")
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     if not username:
         raise HTTPException(status_code=401, detail="Username required")
 
     # Admins can delete any comment; regular users only their own
-    delete_username = "" if request.state.is_admin else username
+    delete_username = "" if auth_principal.get_principal(request).is_admin else username
 
     # Fetch comment text before deletion to notify mentioned users
     comment_text = ""
@@ -10676,7 +10677,7 @@ async def delete_comment_endpoint(
 
     deleted = await storage.delete_comment(comment_id, delete_username, job_id=job_id)
     if deleted:
-        notify_mentions_changed(request.state.username)
+        notify_mentions_changed(auth_principal.get_principal(request).username)
         notify_comments_changed(job_id)
         if comment_text:
             for mentioned_user in detect_mentions(comment_text):
@@ -10684,7 +10685,7 @@ async def delete_comment_endpoint(
     if not deleted:
         detail = (
             "Comment not found"
-            if request.state.is_admin
+            if auth_principal.get_principal(request).is_admin
             else "Comment not found or not owned by you"
         )
         raise HTTPException(status_code=404, detail=detail)
@@ -10715,13 +10716,17 @@ async def set_reviewed(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Toggle the reviewed state for a test failure."""
-    safe_username = _sanitize_control_chars(request.state.username or "")
+    safe_username = _sanitize_control_chars(
+        auth_principal.get_principal(request).username or ""
+    )
     safe_job_id = _sanitize_control_chars(job_id)
     safe_test_name = _sanitize_control_chars(body.test_name)
     safe_child_job_name = _sanitize_control_chars(body.child_job_name)
     # The rendered copy: brackets and control characters stripped, credential
     # shapes scrubbed, so a forged name cannot mint a tag or an [AUDIT] line.
-    echo_username = _echo_safe_text(request.state.username or "")
+    echo_username = _echo_safe_text(
+        auth_principal.get_principal(request).username or ""
+    )
     action = "review.marked" if body.reviewed else "review.delete"
     details = {
         "test_name": safe_test_name,
@@ -11071,7 +11076,7 @@ async def enrich_comments(
     and failure rows stay: probing a job you may not see is a security event.
     """
     logger.debug(f"GET /results/{job_id}/enrich-comments")
-    message = f"User '{request.state.username}' enriched comments in job {job_id}"
+    message = f"User '{auth_principal.get_principal(request).username}' enriched comments in job {job_id}"
     try:
         _check_allow_list(request)
         enrichments = await _collect_comment_enrichments(job_id, settings)
@@ -11376,7 +11381,7 @@ async def preview_github_issue(
     )
 
     issue_prompt = (body.issue_prompt or "").strip()
-    token = ai_username.set(request.state.username)
+    token = ai_username.set(auth_principal.get_principal(request).username)
     try:
         content = await generate_github_issue_content(
             failure=failure,
@@ -11395,7 +11400,9 @@ async def preview_github_issue(
     # Uses the caller's stored token — no body token, no server token.
     # If no stored token, skip duplicate detection (preview still works).
     tests_repo_url = _resolve_github_repo_url(settings)
-    user_tokens = await _read_user_tokens_for_preview(request.state.username, job_id)
+    user_tokens = await _read_user_tokens_for_preview(
+        auth_principal.get_principal(request).username, job_id
+    )
     github_token = (user_tokens.get("github_token", "") or "").strip()
     _debug_credential_source("github", bool(github_token))
     similar: list[dict[str, Any]] = []
@@ -11436,7 +11443,9 @@ async def preview_jira_bug(
         raise _tracker_refusal("jira", "server_disabled")
     # A legacy (non-ATOA) service-account secret must be rejected, not
     # silently dropped (which would fall back to the server credentials).
-    user_tokens = await _read_user_tokens_for_preview(request.state.username, job_id)
+    user_tokens = await _read_user_tokens_for_preview(
+        auth_principal.get_principal(request).username, job_id
+    )
     user_jira_token = (user_tokens.get("jira_token", "") or "").strip()
     user_jira_sa_token = (user_tokens.get("jira_sa_token", "") or "").strip()
     _debug_credential_source("jira", bool(user_jira_token or user_jira_sa_token))
@@ -11455,7 +11464,9 @@ async def preview_jira_bug(
         settings,
         effective_jira_settings,
         caller_has_credential=bool(user_jira_token or user_jira_sa_token),
-        has_profile=await _account_has_profile(request.state.username),
+        has_profile=await _account_has_profile(
+            auth_principal.get_principal(request).username
+        ),
     )
     # The deployment's answer precedes any verdict on this caller's credential:
     # the legacy service-account sentence points at Profile Settings, which
@@ -11481,7 +11492,7 @@ async def preview_jira_bug(
     )
 
     issue_prompt = (body.issue_prompt or "").strip()
-    token = ai_username.set(request.state.username)
+    token = ai_username.set(auth_principal.get_principal(request).username)
     try:
         content = await generate_jira_bug_content(
             failure=failure,
@@ -11525,7 +11536,9 @@ async def preview_jira_bug(
             )
             if candidates and ai_provider and ai_model:
                 try:
-                    token = ai_username.set(request.state.username)
+                    token = ai_username.set(
+                        auth_principal.get_principal(request).username
+                    )
                     try:
                         matches = await filter_matches_with_ai(
                             bug_title=content["title"],
@@ -12605,8 +12618,8 @@ async def _chat_issue_repo_slugs(job_id: str) -> tuple[str, frozenset[str]]:
 
 def _chat_issue_is_admin(request: Request) -> bool:
     """True for an admin caller — the bootstrap ``admin`` included."""
-    return bool(getattr(request.state, "is_admin", False)) or (
-        getattr(request.state, "role", "") == "admin"
+    return bool(auth_principal.get_principal(request).is_admin) or (
+        auth_principal.get_principal(request).role == "admin"
     )
 
 
@@ -13840,7 +13853,7 @@ async def create_github_issue_endpoint(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Create a GitHub issue from a failure analysis."""
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     safe_job = job_id if _is_audit_safe_job_id(job_id) else ""
     refusal_msg = (
         f"User '{username}' was refused a GitHub issue for job {safe_job}"
@@ -13938,7 +13951,7 @@ async def create_jira_bug_endpoint(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Create a Jira bug from a failure analysis."""
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     safe_job = job_id if _is_audit_safe_job_id(job_id) else ""
     refusal_msg = (
         f"User '{username}' was refused a Jira issue for job {safe_job}"
@@ -14229,7 +14242,7 @@ async def propose_chat_issue(
     code — so an injected instruction cannot file an issue the user never saw,
     nor redirect an approved one.
     """
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     tracker = body.target
     message = f"User '{username}' proposed a {tracker} issue from chat"
     try:
@@ -14340,7 +14353,7 @@ async def create_chat_issue(
     credential, and there is no bootstrap-``admin`` exception: a missing token is
     a followable 400 that the model relays to the user.
     """
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     tracker = body.target
     message = f"User '{username}' created a {tracker} issue from chat"
     try:
@@ -14510,9 +14523,9 @@ async def download_issue_attachment(
     if row is None or row.get("state") != "stored":
         raise HTTPException(status_code=404, detail="Attachment not found")
 
-    username = getattr(request.state, "username", "")
-    is_admin = bool(getattr(request.state, "is_admin", False))
-    role = getattr(request.state, "role", "")
+    username = auth_principal.get_principal(request).username
+    is_admin = bool(auth_principal.get_principal(request).is_admin)
+    role = auth_principal.get_principal(request).role
     caller_row = await storage.get_user_by_username(username) if username else None
     caller_key: int | str = (
         int(caller_row["id"]) if caller_row is not None else f"bootstrap:{username}"
@@ -14609,7 +14622,7 @@ async def delete_issue_attachment(
     request: Request,
 ) -> dict[str, Any]:
     """Delete an issue attachment (uploader or admin) to free quota immediately."""
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     safe_id = attachment_id if _canonical_uuid(attachment_id) else ""
     try:
         _check_allow_list(request)
@@ -14641,8 +14654,8 @@ async def delete_issue_attachment(
     if row is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
 
-    is_admin = bool(getattr(request.state, "is_admin", False))
-    role = getattr(request.state, "role", "")
+    is_admin = bool(auth_principal.get_principal(request).is_admin)
+    role = auth_principal.get_principal(request).role
     caller_row = await storage.get_user_by_username(username) if username else None
 
     job_id = str(row.get("job_id") or "")
@@ -14758,9 +14771,7 @@ async def set_tracked_in_endpoint(
     _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(f"PUT /results/{job_id}/tracked-in: test_name={body.test_name}")
-    message = (
-        f"User '{request.state.username}' linked '{body.test_name}' in job {job_id}"
-    )
+    message = f"User '{auth_principal.get_principal(request).username}' linked '{body.test_name}' in job {job_id}"
     try:
         result = await get_result(job_id)
         if not result:
@@ -14796,7 +14807,7 @@ async def set_tracked_in_endpoint(
             tracked_type,
             child_job_name=body.child_job_name,
             child_build_number=body.child_build_number,
-            tracked_by=request.state.username,
+            tracked_by=auth_principal.get_principal(request).username,
         )
     except HTTPException as exc:
         await _record_refused_attempt(
@@ -14812,7 +14823,7 @@ async def set_tracked_in_endpoint(
 
     await record_audit(
         action="tracked_in.set",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=message,
         target_type="job",
         target_id=job_id,
@@ -14830,7 +14841,7 @@ async def set_tracked_in_endpoint(
         "test_name": body.test_name,
         "tracked_in_url": body.url,
         "tracked_in_type": tracked_type,
-        "tracked_in_by": request.state.username,
+        "tracked_in_by": auth_principal.get_principal(request).username,
     }
 
 
@@ -14864,14 +14875,17 @@ async def delete_tracked_in_endpoint(
     """
     _require_reviewer(request)
     _check_allow_list(request)
-    message = f"User '{request.state.username}' removed a link in job {job_id}"
+    message = f"User '{auth_principal.get_principal(request).username}' removed a link in job {job_id}"
     link = await storage.get_tracked_in_link(link_id)
     try:
         if not link:
             raise HTTPException(status_code=404, detail="Link not found")
         if link.get("job_id") != job_id:
             raise HTTPException(status_code=404, detail="Link not found")
-        if not request.state.is_admin and link["created_by"] != request.state.username:
+        if (
+            not auth_principal.get_principal(request).is_admin
+            and link["created_by"] != auth_principal.get_principal(request).username
+        ):
             raise HTTPException(
                 status_code=403,
                 detail="You can only delete your own tracked links",
@@ -14891,7 +14905,7 @@ async def delete_tracked_in_endpoint(
 
     await record_audit(
         action="tracked_in.delete",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=message,
         target_type="job",
         target_id=job_id,
@@ -15055,7 +15069,7 @@ async def push_to_reportportal(
     """
     _require_operator(request)
     _check_allow_list(request)
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     # Sanitize control characters to prevent log forging (trusted-proxy
     # mode populates username from X-Forwarded-User with minimal validation)
     safe_username = _sanitize_control_chars(username)
@@ -15162,7 +15176,7 @@ async def push_to_exporter(
     """
     _require_operator(request)
     _check_allow_list(request)
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     safe_username = _sanitize_control_chars(username)
     try:
         logger.info(
@@ -15890,7 +15904,7 @@ async def update_tags(
     """Update tags on an existing result. System tags (re-analyze, submitter username) cannot be removed."""
     _require_reviewer(request)
     _check_allow_list(request)
-    message = f"User '{request.state.username}' set the tags of job {job_id}"
+    message = f"User '{auth_principal.get_principal(request).username}' set the tags of job {job_id}"
     try:
         # Malformed JSON is an attempt too: read inside the refusal scope so
         # the 400 leaves one row instead of nothing.
@@ -15944,7 +15958,7 @@ async def update_tags(
     notify_dashboard_changed()
     await record_audit(
         action="job.tags_set",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=message,
         target_type="job",
         target_id=job_id,
@@ -15979,7 +15993,7 @@ async def override_classification_endpoint(
     await _validate_test_name_in_result(
         job_id, body.test_name, body.child_job_name, body.child_build_number
     )
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
 
     # Look up parent_job_name for the test_classifications entry
     parent_job_name = await storage.get_parent_job_name_for_test(
@@ -16055,7 +16069,7 @@ async def override_pattern_endpoint(
         f"PUT /results/{job_id}/override-pattern: test_name={body.test_name}, "
         f"pattern={body.pattern}"
     )
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     message = (
         f"User '{username}' overrode the pattern of '{body.test_name}'"
         f" in job {job_id} to '{body.pattern}'"
@@ -16174,8 +16188,8 @@ async def bulk_delete_jobs_endpoint(
     # Operators can only delete their own jobs; filter unauthorized ones
     job_ids = body.job_ids
     unauthorized_ids: list[str] = []
-    if not request.state.is_admin:
-        username = request.state.username
+    if not auth_principal.get_principal(request).is_admin:
+        username = auth_principal.get_principal(request).username
         submitters = await storage.get_job_submitters(job_ids)
         job_ids = [jid for jid in job_ids if submitters.get(jid) == username]
         unauthorized_ids = [jid for jid in body.job_ids if jid not in job_ids]
@@ -16187,8 +16201,12 @@ async def bulk_delete_jobs_endpoint(
     result["unauthorized"] = unauthorized_ids
 
     # Audit log each deletion individually
-    actor = request.state.username
-    job_action = "admin.job_delete" if request.state.is_admin else "user.job_delete"
+    actor = auth_principal.get_principal(request).username
+    job_action = (
+        "admin.job_delete"
+        if auth_principal.get_principal(request).is_admin
+        else "user.job_delete"
+    )
     for job_id in result["deleted"]:
         await record_audit(
             action=job_action,
@@ -16219,8 +16237,8 @@ async def delete_job_endpoint(
 
     # Operators can only delete their own jobs
     if (
-        not request.state.is_admin
-        and _get_job_submitter(result) != request.state.username
+        not auth_principal.get_principal(request).is_admin
+        and _get_job_submitter(result) != auth_principal.get_principal(request).username
     ):
         raise HTTPException(
             status_code=403,
@@ -16232,9 +16250,11 @@ async def delete_job_endpoint(
         deleted_ids = [job_id] if await storage.delete_job(job_id) else []
         await _finish_job_deletion([job_id], deleted_ids, origins)
     await record_audit(
-        action="admin.job_delete" if request.state.is_admin else "user.job_delete",
-        actor=request.state.username,
-        message=f"User '{request.state.username}' deleted job {job_id}",
+        action="admin.job_delete"
+        if auth_principal.get_principal(request).is_admin
+        else "user.job_delete",
+        actor=auth_principal.get_principal(request).username,
+        message=f"User '{auth_principal.get_principal(request).username}' deleted job {job_id}",
         target_type="job",
         target_id=job_id,
         request=request,
@@ -16257,8 +16277,8 @@ async def abort_analysis(
         raise HTTPException(status_code=404, detail="Job not found")
 
     # Enforce ownership: only submitter or admin can abort
-    username = request.state.username
-    is_admin_user = getattr(request.state, "is_admin", False)
+    username = auth_principal.get_principal(request).username
+    is_admin_user = auth_principal.get_principal(request).is_admin
     submitter = _get_job_submitter(result)
 
     if not is_admin_user and (not username or username != submitter):
@@ -16368,8 +16388,8 @@ async def abort_analysis(
 
     await record_audit(
         action="user.abort_job",
-        actor=request.state.username,
-        message=f"User '{request.state.username}' aborted job {job_id}",
+        actor=auth_principal.get_principal(request).username,
+        message=f"User '{auth_principal.get_principal(request).username}' aborted job {job_id}",
         target_type="job",
         target_id=job_id,
         request=request,
@@ -16396,8 +16416,8 @@ async def get_active_analysis_count() -> dict[str, Any]:
 async def stream_navbar_counts(request: Request) -> StreamingResponse:
     """SSE stream that pushes active analysis count, unread mention count and
     (admins only) the pending user approval count."""
-    username = request.state.username
-    is_admin = getattr(request.state, "is_admin", False)
+    username = auth_principal.get_principal(request).username
+    is_admin = auth_principal.get_principal(request).is_admin
     _check_allow_list(request)
 
     async def event_generator() -> AsyncIterator[str]:
@@ -16603,10 +16623,10 @@ async def stream_multiplexed(
     - ``settings`` — server settings changes (admin only)
     """
     _check_allow_list(request)
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     if not username:
         raise HTTPException(status_code=401, detail="Authentication required")
-    is_admin = getattr(request.state, "is_admin", False)
+    is_admin = auth_principal.get_principal(request).is_admin
 
     topic_list = list(dict.fromkeys(t.strip() for t in topics.split(",") if t.strip()))
     if not topic_list:
@@ -17063,7 +17083,9 @@ async def list_jira_projects(
     Uses the caller's stored Jira credential to list projects they can see.
     Always includes the server's configured project key.
     """
-    user_tokens = await storage.get_user_tokens(request.state.username)
+    user_tokens = await storage.get_user_tokens(
+        auth_principal.get_principal(request).username
+    )
     result = _jira_client_from_body(
         settings,
         user_tokens.get("jira_token", ""),
@@ -17117,7 +17139,9 @@ async def list_jira_security_levels(
     if not body.project_key:
         return []
 
-    user_tokens = await storage.get_user_tokens(request.state.username)
+    user_tokens = await storage.get_user_tokens(
+        auth_principal.get_principal(request).username
+    )
     result = _jira_client_from_body(
         settings,
         user_tokens.get("jira_token", ""),
@@ -17407,7 +17431,7 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict[str
     _require_reviewer(request)
     logger.debug(
         f"POST /history/classify: test_name={body.test_name!r}, classification={body.classification!r}, "
-        f"is_ai_session={bool(getattr(request.state, 'is_ai_session', False))}"
+        f"is_ai_session={bool(auth_principal.get_principal(request).is_ai_session)}"
     )
     test_name = body.test_name.strip()
     classification = body.classification
@@ -17417,7 +17441,7 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict[str
     references = _sanitize_sidecar_placeholder(body.references)
     classify_job_id = body.job_id
     message = (
-        f"User '{request.state.username}' classified '{test_name}' as"
+        f"User '{auth_principal.get_principal(request).username}' classified '{test_name}' as"
         f" '{classification}' in job {classify_job_id}"
     )
 
@@ -17436,13 +17460,14 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict[str
         # AI_SYSTEM_USERNAME is a reserved system identity (blocked from registration)
         # used consistently for all AI-originated actions (auto-review, classification).
         is_ai_caller = (
-            bool(getattr(request.state, "is_ai_session", False)) and body.source == "ai"
+            bool(auth_principal.get_principal(request).is_ai_session)
+            and body.source == "ai"
         )
         if body.source == "ai" and not is_ai_caller:
             logger.warning(
                 "POST /history/classify: ignoring source='ai' from non-AI session "
                 "(user=%s, job_id=%r, test_name=%r)",
-                request.state.username,
+                auth_principal.get_principal(request).username,
                 classify_job_id,
                 test_name,
             )
@@ -17451,11 +17476,15 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict[str
         # regardless of the authenticated session username.
         # Human callers must have an authenticated username — reject if missing
         # to prevent misattribution as AI_SYSTEM_USERNAME.
-        if not is_ai_caller and not request.state.username:
+        if not is_ai_caller and not auth_principal.get_principal(request).username:
             raise HTTPException(
                 status_code=401, detail="Authentication required to classify tests"
             )
-        created_by = AI_SYSTEM_USERNAME if is_ai_caller else request.state.username
+        created_by = (
+            AI_SYSTEM_USERNAME
+            if is_ai_caller
+            else auth_principal.get_principal(request).username
+        )
 
         # Human classifications are visible immediately.
         # AI classifications become visible after analysis completes
@@ -17565,7 +17594,9 @@ async def scoped_models_for_request(
     request: Request,
 ) -> ai_catalog.ScopedCatalog:
     """Discover models using the authenticated caller's credential scope."""
-    return await ai_catalog.load_scoped_catalog(request.state.username)
+    return await ai_catalog.load_scoped_catalog(
+        auth_principal.get_principal(request).username
+    )
 
 
 @app.get("/api/ai-models", operation_id="listAiModels")
@@ -17646,9 +17677,9 @@ async def refresh_ai_models(request: Request) -> dict[str, Any]:
         # ``refresh_server_provider_models``). Never the model list itself.
         await record_audit(
             action="provider.models_refresh",
-            actor=request.state.username,
+            actor=auth_principal.get_principal(request).username,
             message=(
-                f"Admin '{request.state.username}' refreshed every provider's"
+                f"Admin '{auth_principal.get_principal(request).username}' refreshed every provider's"
                 f" models ({len(catalog)} providers)"
             ),
             details={"scope": "all", "provider_count": len(catalog)},
@@ -17664,7 +17695,7 @@ async def refresh_ai_models(request: Request) -> dict[str, Any]:
             action="provider.models_refresh",
             request=request,
             message=(
-                f"Admin '{request.state.username}' refreshed every provider's models"
+                f"Admin '{auth_principal.get_principal(request).username}' refreshed every provider's models"
             ),
             exc=refusal,
             details={"scope": "all"},
@@ -18574,7 +18605,7 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
     The old key and all sessions are invalidated immediately.
     """
     _check_allow_list(request)
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     if not username:
         raise HTTPException(status_code=401, detail="Authentication required")
     if username == "admin":
@@ -18589,8 +18620,8 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     # Create a new session for the user so they stay logged in
-    is_admin = request.state.is_admin
-    current_role = request.state.role
+    is_admin = auth_principal.get_principal(request).is_admin
+    current_role = auth_principal.get_principal(request).role
     session_token = await storage.create_session(
         username, is_admin=is_admin, role=current_role
     )
@@ -18850,7 +18881,7 @@ async def pending_status(request: Request) -> JSONResponse:
 
 async def _credential_user(request: Request) -> str:
     _require_authenticated(request)
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     if not await storage.get_user_by_username(username):
         raise HTTPException(
             status_code=403,
@@ -19053,7 +19084,7 @@ async def set_user_ai_credential(
     provider: str, body: AiCredentialInput, request: Request
 ) -> JSONResponse:
     """Encrypt and save a key for a sidecar-confirmed provider."""
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     message = f"User '{username}' set their {provider} AI credential"
     # The model is known before verification, so a failed row names the key's
     # provider and the model it was checked against (#379) — never the key.
@@ -19240,7 +19271,9 @@ async def list_filter_presets(
             status_code=422,
             detail="page must be one of: " + ", ".join(job_filters.FILTER_PRESET_PAGES),
         )
-    presets = await storage.list_filter_presets(request.state.username, page)
+    presets = await storage.list_filter_presets(
+        auth_principal.get_principal(request).username, page
+    )
     response.headers["Cache-Control"] = "no-store"
     return [FilterPresetResponse(**preset) for preset in presets]
 
@@ -19265,7 +19298,11 @@ async def create_filter_preset(
     _validate_filter_preset_filters(body.page, body.filters)
     try:
         preset = await storage.create_filter_preset(
-            request.state.username, body.page, body.scope, name, body.filters
+            auth_principal.get_principal(request).username,
+            body.page,
+            body.scope,
+            name,
+            body.filters,
         )
     except storage.FilterPresetLimitExceeded as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -19289,7 +19326,7 @@ async def update_filter_preset_endpoint(
     # Ownership-scoped fetch: another user's personal preset is
     # indistinguishable from a missing one, before any body validation.
     existing = await storage.get_manageable_filter_preset(
-        preset_id, request.state.username
+        preset_id, auth_principal.get_principal(request).username
     )
     if existing is None:
         raise HTTPException(status_code=404, detail="Preset not found")
@@ -19302,7 +19339,10 @@ async def update_filter_preset_endpoint(
         _validate_filter_preset_filters(existing["page"], body.filters)
     try:
         preset = await storage.update_filter_preset(
-            preset_id, request.state.username, name, body.filters
+            preset_id,
+            auth_principal.get_principal(request).username,
+            name,
+            body.filters,
         )
     except storage.FilterPresetNotFound as exc:
         raise HTTPException(status_code=404, detail="Preset not found") from exc
@@ -19322,14 +19362,16 @@ async def delete_filter_preset_endpoint(preset_id: int, request: Request) -> Non
     _check_allow_list(request)
     _validate_preset_id(preset_id)
     existing = await storage.get_manageable_filter_preset(
-        preset_id, request.state.username
+        preset_id, auth_principal.get_principal(request).username
     )
     if existing is None:
         raise HTTPException(status_code=404, detail="Preset not found")
     if existing["scope"] == "server":
         _require_operator(request)
     try:
-        await storage.delete_filter_preset(preset_id, request.state.username)
+        await storage.delete_filter_preset(
+            preset_id, auth_principal.get_principal(request).username
+        )
     except storage.FilterPresetNotFound as exc:
         raise HTTPException(status_code=404, detail="Preset not found") from exc
 
@@ -19350,7 +19392,7 @@ _TRACKER_TOKEN_FIELDS: tuple[str, ...] = (
 @app.get("/api/user/tokens", operation_id="getUserTokensEndpoint")
 async def get_user_tokens_endpoint(request: Request) -> JSONResponse:
     """Get the current user's saved tokens."""
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     if not username:
         raise HTTPException(status_code=401, detail="Username required")
     # Verify user exists in DB (prevents reading tokens for unregistered usernames)
@@ -19380,7 +19422,7 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
     empty string or ``null`` clears that one field, and a string sets it.
     Clearing one field never touches the others.
     """
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     message = f"User '{username}' saved tracker tokens"
     submitted: list[str] = []
     kwargs: dict[str, str] = {}
@@ -19651,7 +19693,7 @@ async def stream_logs(
     )
     # Recorded once per connection, not per streamed line: the stream is
     # long-lived, and the initial tail is the same request.
-    username = request.state.username or "anonymous"
+    username = auth_principal.get_principal(request).username or "anonymous"
     await record_audit(
         action="logs.stream",
         actor=username,
@@ -19957,7 +19999,7 @@ async def export_audit_events_endpoint(
     _require_admin(request)
     logger.info(
         "Admin '%s' exported the audit trail as %s",
-        request.state.username,
+        auth_principal.get_principal(request).username,
         format,
     )
 
@@ -19976,9 +20018,9 @@ async def export_audit_events_endpoint(
             # response wrote — including a stream the client cut short.
             await record_audit(
                 action="audit.export",
-                actor=request.state.username,
+                actor=auth_principal.get_principal(request).username,
                 message=(
-                    f"Admin '{request.state.username}' exported the audit trail as"
+                    f"Admin '{auth_principal.get_principal(request).username}' exported the audit trail as"
                     f" {format} ({exported} events)"
                 ),
                 target_type="audit",
@@ -20177,9 +20219,9 @@ async def list_session_transcripts(
     live_recording = await sidecar_transcripts.live_recording_enabled()
     await record_audit(
         action="transcript.list",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=(
-            f"Admin '{request.state.username}' listed {len(items)} transcript(s)"
+            f"Admin '{auth_principal.get_principal(request).username}' listed {len(items)} transcript(s)"
             + (f" for job {job_id}" if job_id else "")
         ),
         target_type="transcript",
@@ -20228,9 +20270,9 @@ async def download_session_transcript(
     if path is None:
         await record_audit(
             action="transcript.download",
-            actor=request.state.username,
+            actor=auth_principal.get_principal(request).username,
             message=(
-                f"Admin '{request.state.username}' requested an invalid transcript id"
+                f"Admin '{auth_principal.get_principal(request).username}' requested an invalid transcript id"
             ),
             target_type="transcript",
             target_id=session_id,
@@ -20245,9 +20287,9 @@ async def download_session_transcript(
     if not path.is_file():
         await record_audit(
             action="transcript.download",
-            actor=request.state.username,
+            actor=auth_principal.get_principal(request).username,
             message=(
-                f"Admin '{request.state.username}' downloaded missing transcript"
+                f"Admin '{auth_principal.get_principal(request).username}' downloaded missing transcript"
                 f" {session_id}"
             ),
             target_type="transcript",
@@ -20267,8 +20309,8 @@ async def download_session_transcript(
 
     await record_audit(
         action="transcript.download",
-        actor=request.state.username,
-        message=f"Admin '{request.state.username}' downloaded transcript {session_id}",
+        actor=auth_principal.get_principal(request).username,
+        message=f"Admin '{auth_principal.get_principal(request).username}' downloaded transcript {session_id}",
         target_type="transcript",
         target_id=session_id,
         details=details,
@@ -20347,9 +20389,9 @@ async def admin_create_user_endpoint(
 
     await record_audit(
         action="admin.user_create",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=(
-            f"Admin '{request.state.username}' created {role} user '{username}'"
+            f"Admin '{auth_principal.get_principal(request).username}' created {role} user '{username}'"
             f" (can_view_reports={stored_can_view_reports}, "
             f"can_use_server_providers={server_grant})"
         ),
@@ -20420,7 +20462,7 @@ async def change_user_role_endpoint(request: Request, username: str) -> JSONResp
     For other role changes, the existing API key is preserved.
     """
     _require_admin(request)
-    if username == request.state.username:
+    if username == auth_principal.get_principal(request).username:
         raise HTTPException(status_code=400, detail="Cannot change your own role")
 
     body = await _read_json_object(request)
@@ -20441,9 +20483,9 @@ async def change_user_role_endpoint(request: Request, username: str) -> JSONResp
 
     await record_audit(
         action="admin.user_role_change",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=(
-            f"Admin '{request.state.username}' changed role of '{username}'"
+            f"Admin '{auth_principal.get_principal(request).username}' changed role of '{username}'"
             f" to '{new_role}'"
         ),
         target_type="user",
@@ -20481,9 +20523,9 @@ async def set_user_can_view_reports_endpoint(
 
     await record_audit(
         action="admin.user_can_view_reports",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=(
-            f"Admin '{request.state.username}' set can_view_reports={value}"
+            f"Admin '{auth_principal.get_principal(request).username}' set can_view_reports={value}"
             f" for user '{username}'"
         ),
         target_type="user",
@@ -20515,9 +20557,9 @@ async def set_user_can_use_server_providers(
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
     await record_audit(
         action="admin.user_can_use_server_providers",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=(
-            f"Admin '{request.state.username}' set can_use_server_providers="
+            f"Admin '{auth_principal.get_principal(request).username}' set can_use_server_providers="
             f"{body.can_use_server_providers} for user '{username}'"
         ),
         target_type="user",
@@ -20600,7 +20642,7 @@ async def set_free_ai_models_endpoint(
     try:
         stored = await storage.set_free_ai_models(
             [(entry.provider, entry.model) for entry in body.models],
-            request.state.username,
+            auth_principal.get_principal(request).username,
             expected_version=body.expected_version,
         )
     except storage.FreeModelsConflict as exc:
@@ -20618,9 +20660,9 @@ async def set_free_ai_models_endpoint(
     free_pairs = [(entry.provider, entry.model) for entry in body.models]
     await record_audit(
         action="free_models.set",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=(
-            f"Admin '{request.state.username}' set free AI models:"
+            f"Admin '{auth_principal.get_principal(request).username}' set free AI models:"
             f" {len(stored)} pair(s)"
         ),
         details={"count": len(stored)},
@@ -20632,14 +20674,14 @@ async def set_free_ai_models_endpoint(
     # the server-providers PUT applies.
     auto_included = await storage.auto_include_free_pairs(
         free_pairs,
-        request.state.username or "admin",
+        auth_principal.get_principal(request).username or "admin",
     )
     if auto_included:
         await record_audit(
             action="provider.free_selection_auto_include",
-            actor=request.state.username,
+            actor=auth_principal.get_principal(request).username,
             message=(
-                f"Admin '{request.state.username}' auto-included"
+                f"Admin '{auth_principal.get_principal(request).username}' auto-included"
                 f" {len(auto_included)} free pair(s) into managed provider selections"
             ),
             details={"count": len(auto_included)},
@@ -21409,9 +21451,9 @@ async def _verify_and_store_server_provider_key(
             # attempt is the trail entry (the success row is written below).
             await record_audit(
                 action="provider.key.promote",
-                actor=request.state.username,
+                actor=auth_principal.get_principal(request).username,
                 message=(
-                    f"Admin '{request.state.username}' promoted the deployment"
+                    f"Admin '{auth_principal.get_principal(request).username}' promoted the deployment"
                     f" credential for '{provider}' (failure: verification_{outcome})"
                 ),
                 target_type="provider",
@@ -21494,7 +21536,7 @@ async def _verify_and_store_server_provider_key(
             generation = await storage.set_server_ai_credential(
                 provider,
                 key,
-                request.state.username or "admin",
+                auth_principal.get_principal(request).username or "admin",
                 expected_generation=expected_generation,
                 expect_absent=not replacing,
             )
@@ -21529,15 +21571,15 @@ async def _verify_and_store_server_provider_key(
             # seed cannot refuse — its catalog answer was resolved above.
             await _seed_server_provider_selection(
                 provider,
-                request.state.username or "admin",
+                auth_principal.get_principal(request).username or "admin",
                 request=request,
                 catalog_models=seed_catalog_models,
             )
         await record_audit(
             action=action,
-            actor=request.state.username,
+            actor=auth_principal.get_principal(request).username,
             message=(
-                f"Admin '{request.state.username}' "
+                f"Admin '{auth_principal.get_principal(request).username}' "
                 + (
                     "promoted the deployment credential"
                     if promoted
@@ -21564,7 +21606,7 @@ async def _verify_and_store_server_provider_key(
                 action=action,
                 request=request,
                 message=(
-                    f"Admin '{request.state.username}' stored server provider"
+                    f"Admin '{auth_principal.get_principal(request).username}' stored server provider"
                     f" key for '{provider}'"
                 ),
                 target_type="provider",
@@ -21583,7 +21625,7 @@ async def _verify_and_store_server_provider_key(
             action=action,
             request=request,
             message=(
-                f"Admin '{request.state.username}' stored server provider key"
+                f"Admin '{auth_principal.get_principal(request).username}' stored server provider key"
                 f" for '{provider}'"
             ),
             target_type="provider",
@@ -21990,7 +22032,7 @@ async def store_deployment_provider_key(
             request=request,
             message=(
                 f"Promotion of the deployment credential for '{provider}'"
-                f" by '{getattr(request.state, 'username', '')}'"
+                f" by '{auth_principal.get_principal(request).username}'"
             ),
             target_type="provider",
             target_id=provider,
@@ -22084,9 +22126,9 @@ async def refresh_server_provider_models(
             )
         await record_audit(
             action="provider.deployment_refresh",
-            actor=request.state.username,
+            actor=auth_principal.get_principal(request).username,
             message=(
-                f"Admin '{request.state.username}' refreshed deployment"
+                f"Admin '{auth_principal.get_principal(request).username}' refreshed deployment"
                 f" key-scoped models for '{provider}' ({status},"
                 f" {len(models)} models)"
             ),
@@ -22122,9 +22164,9 @@ async def refresh_server_provider_models(
     )
     await record_audit(
         action="provider.models_refresh",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=(
-            f"Admin '{request.state.username}' refreshed key-scoped models"
+            f"Admin '{auth_principal.get_principal(request).username}' refreshed key-scoped models"
             f" for '{provider}' ({status}, {len(models)} models)"
         ),
         target_type="provider",
@@ -22213,13 +22255,13 @@ async def set_server_provider_models_endpoint(
             },
         )
     await storage.set_server_provider_models(
-        provider, entries, request.state.username or "admin"
+        provider, entries, auth_principal.get_principal(request).username or "admin"
     )
     await record_audit(
         action="provider.models_set",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=(
-            f"Admin '{request.state.username}' set server provider models"
+            f"Admin '{auth_principal.get_principal(request).username}' set server provider models"
             f" for '{provider}': {sum(1 for e in entries if e['included'])} included,"
             f" {sum(1 for e in entries if e['free'])} free"
         ),
@@ -22270,9 +22312,9 @@ async def delete_server_provider_endpoint(
     affected = await storage.delete_server_ai_provider(provider)
     await record_audit(
         action="provider.remove",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=(
-            f"Admin '{request.state.username}' deleted server provider '{provider}'"
+            f"Admin '{auth_principal.get_principal(request).username}' deleted server provider '{provider}'"
             f" (selected={len(affected['selected_models'])}"
             f", free={len(affected['free_models'])})"
         ),
@@ -22355,9 +22397,9 @@ async def approve_user(
     notify_pending_count_changed()
     await record_audit(
         action="admin.user_approve",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=(
-            f"Admin '{request.state.username}' approved user '{username}'"
+            f"Admin '{auth_principal.get_principal(request).username}' approved user '{username}'"
             f" (can_use_server_providers={effective_grant})"
         ),
         target_type="user",
@@ -22390,8 +22432,8 @@ async def reject_user(username: str, request: Request) -> dict[str, Any]:
     notify_pending_count_changed()
     await record_audit(
         action="admin.user_reject",
-        actor=request.state.username,
-        message=f"Admin '{request.state.username}' rejected user '{username}'",
+        actor=auth_principal.get_principal(request).username,
+        message=f"Admin '{auth_principal.get_principal(request).username}' rejected user '{username}'",
         target_type="user",
         target_id=username,
         # What the rejected account was asking for.
@@ -22444,8 +22486,8 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
 
     await record_audit(
         action="admin.user_key_rotate",
-        actor=request.state.username,
-        message=f"Admin '{request.state.username}' rotated key for '{username}'",
+        actor=auth_principal.get_principal(request).username,
+        message=f"Admin '{auth_principal.get_principal(request).username}' rotated key for '{username}'",
         target_type="user",
         target_id=username,
         # Rotation is not a silent session kill: both stores delete every
@@ -22468,15 +22510,15 @@ async def unlock_user_endpoint(username: str, request: Request) -> dict[str, Any
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
     logger.info(
         "Admin '%s' unlocked user '%s' (was_locked_at=%s failed_attempts=%d)",
-        request.state.username,
+        auth_principal.get_principal(request).username,
         username,
         prior["locked_at"],
         prior["failed_login_count"],
     )
     await record_audit(
         action="admin.user_unlock",
-        actor=request.state.username,
-        message=f"Admin '{request.state.username}' unlocked user '{username}'",
+        actor=auth_principal.get_principal(request).username,
+        message=f"Admin '{auth_principal.get_principal(request).username}' unlocked user '{username}'",
         target_type="user",
         target_id=username,
         details={
@@ -22562,7 +22604,7 @@ async def set_user_disabled_endpoint(
     always allowed.
     """
     _require_admin(request)
-    actor = request.state.username
+    actor = auth_principal.get_principal(request).username
     prior = await storage.set_user_disabled(username, body.disabled, requester=actor)
     if prior is None:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
@@ -23448,7 +23490,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     if not settings_updates:
         raise HTTPException(status_code=400, detail="No settings provided")
 
-    username = request.state.username or "admin"
+    username = auth_principal.get_principal(request).username or "admin"
     async with _audit_tag_facets_change(
         "tag_facets" in settings_updates, actor=username, request=request
     ):
@@ -23666,16 +23708,16 @@ async def export_server_settings(
         "Admin settings exported: keys=%d, include_sensitive=%s, by=%s",
         len(settings),
         include_sensitive,
-        request.state.username,
+        auth_principal.get_principal(request).username,
     )
     # The count is what is left after the export's own filtering, and
     # ``include_sensitive`` is the difference between a shareable file and
     # plaintext secrets — both belong in the trail. Never the values.
     await record_audit(
         action="admin.settings_export",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=(
-            f"Admin '{request.state.username}' exported {len(settings)} server"
+            f"Admin '{auth_principal.get_principal(request).username}' exported {len(settings)} server"
             f" settings (include_sensitive={include_sensitive})"
         ),
         target_type="settings",
@@ -23749,7 +23791,7 @@ async def import_server_settings(request: Request) -> JSONResponse:
         content["dry_run"] = True
         return JSONResponse(content=content)
 
-    username = request.state.username or "admin"
+    username = auth_principal.get_principal(request).username or "admin"
     async with _audit_tag_facets_change(
         "tag_facets" in applied, actor=username, request=request
     ):
@@ -23993,7 +24035,7 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         # Canonical decimal form — the env bridge exports this verbatim.
         env_value = str(getattr(validated, key))
 
-    username = request.state.username or "admin"
+    username = auth_principal.get_principal(request).username or "admin"
     async with _audit_tag_facets_change(
         key == "tag_facets", actor=username, request=request
     ):
@@ -24047,7 +24089,7 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
             status_code=400, detail=f"Server-only setting (env var only): {key}"
         )
 
-    username = request.state.username or "admin"
+    username = auth_principal.get_principal(request).username or "admin"
     async with _audit_tag_facets_change(
         key == "tag_facets", actor=username, request=request
     ):
@@ -24080,11 +24122,15 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
 
         _broadcast_settings_change()
 
-        logger.info("Admin setting reset: key=%s, by=%s", key, request.state.username)
+        logger.info(
+            "Admin setting reset: key=%s, by=%s",
+            key,
+            auth_principal.get_principal(request).username,
+        )
         await record_audit(
             action="settings.reset",
             actor=username,
-            message=f"Admin setting reset: key={key}, by={request.state.username}",
+            message=f"Admin setting reset: key={key}, by={auth_principal.get_principal(request).username}",
             target_type="setting",
             target_id=key,
             details=_audit_setting_details(key),
@@ -24630,7 +24676,7 @@ async def test_integration_connection(
             status_code=400, detail=f"Unknown integration: {integration}"
         )
     return await _finish_integration_test(
-        key, request.state.username, tester(get_settings())
+        key, auth_principal.get_principal(request).username, tester(get_settings())
     )
 
 
@@ -24674,7 +24720,7 @@ async def test_user_token_connection(
         raise HTTPException(
             status_code=400, detail=f"Unknown integration: {integration}"
         )
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     tokens = await storage.get_user_tokens(username)
     if key == "github":
         token = (tokens.get("github_token") or "").strip()
@@ -24775,7 +24821,7 @@ async def set_job_metadata_endpoint(
     """Set or update metadata for a job."""
     _require_admin(request)
     logger.debug(f"PUT /api/jobs/{job_name}/metadata")
-    message = f"Admin '{request.state.username}' set metadata for job '{job_name}'"
+    message = f"Admin '{auth_principal.get_principal(request).username}' set metadata for job '{job_name}'"
     try:
         current = await storage.get_job_metadata(job_name) or {}
         saved = await storage.set_job_metadata(
@@ -24802,7 +24848,7 @@ async def set_job_metadata_endpoint(
         raise
     await record_audit(
         action="job.metadata_set",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=message,
         target_type="job",
         target_id=job_name,
@@ -24823,9 +24869,7 @@ async def delete_job_metadata_endpoint(
     """Delete metadata for a job."""
     _require_admin(request)
     logger.debug(f"DELETE /api/jobs/{job_name}/metadata")
-    message = (
-        f"Admin '{request.state.username}' deleted the metadata of job '{job_name}'"
-    )
+    message = f"Admin '{auth_principal.get_principal(request).username}' deleted the metadata of job '{job_name}'"
     try:
         # Read before deleting: the point of a delete row is what was lost.
         current = await storage.get_job_metadata(job_name) or {}
@@ -24851,7 +24895,7 @@ async def delete_job_metadata_endpoint(
         raise
     await record_audit(
         action="job.metadata_delete",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=message,
         target_type="job",
         target_id=job_name,
@@ -24877,7 +24921,7 @@ async def bulk_set_job_metadata(
     _require_admin(request)
     logger.debug(f"PUT /api/jobs/metadata/bulk: {len(body.items)} items")
     message = (
-        f"Admin '{request.state.username}' bulk-imported metadata for"
+        f"Admin '{auth_principal.get_principal(request).username}' bulk-imported metadata for"
         f" {len(body.items)} job(s)"
     )
     try:
@@ -24896,7 +24940,7 @@ async def bulk_set_job_metadata(
         raise refusal from None
     await record_audit(
         action="job.metadata_set",
-        actor=request.state.username,
+        actor=auth_principal.get_principal(request).username,
         message=message,
         target_type="metadata",
         details={
@@ -25222,7 +25266,7 @@ async def subscribe_notifications(
         raise HTTPException(
             status_code=404, detail="Web Push notifications not configured"
         )
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     if not username:
         raise HTTPException(status_code=401, detail="Username required")
     _check_allow_list(request)
@@ -25245,7 +25289,7 @@ async def unsubscribe_notifications(
         raise HTTPException(
             status_code=404, detail="Web Push notifications not configured"
         )
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     if not username:
         raise HTTPException(status_code=401, detail="Username required")
     _check_allow_list(request)
@@ -25258,7 +25302,7 @@ async def unsubscribe_notifications(
 @app.get("/api/users/mentions", operation_id="getUserMentions")
 async def get_user_mentions(request: Request) -> dict[str, Any]:
     """Get comments that mention the current user."""
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     if not username:
         raise HTTPException(status_code=401, detail="Username required")
     _check_allow_list(request)
@@ -25287,7 +25331,7 @@ async def get_user_mentions(request: Request) -> dict[str, Any]:
 @app.post("/api/users/mentions/read-all", operation_id="markAllMentionsReadEndpoint")
 async def mark_all_mentions_read_endpoint(request: Request) -> dict[str, Any]:
     """Mark ALL mentions as read for the current user."""
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     if not username:
         raise HTTPException(status_code=401, detail="Username required")
     _check_allow_list(request)
@@ -25299,7 +25343,7 @@ async def mark_all_mentions_read_endpoint(request: Request) -> dict[str, Any]:
 @app.post("/api/users/mentions/read", operation_id="markMentionsAsRead")
 async def mark_mentions_as_read(request: Request) -> dict[str, Any]:
     """Mark specific mentions as read."""
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     if not username:
         raise HTTPException(status_code=401, detail="Username required")
     _check_allow_list(request)
@@ -25324,7 +25368,7 @@ async def mark_mentions_as_read(request: Request) -> dict[str, Any]:
 @app.get("/api/users/mentions/unread-count", operation_id="getUnreadMentionsCount")
 async def get_unread_mentions_count(request: Request) -> dict[str, Any]:
     """Get count of unread mentions for navbar badge."""
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     if not username:
         raise HTTPException(status_code=401, detail="Username required")
     _check_allow_list(request)
@@ -25335,7 +25379,7 @@ async def get_unread_mentions_count(request: Request) -> dict[str, Any]:
 @app.get("/api/users/mentionable", operation_id="getMentionableUsers")
 async def get_mentionable_users(request: Request) -> dict[str, Any]:
     """Return list of usernames that can be mentioned in comments."""
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     if not username:
         raise HTTPException(status_code=401, detail="Username required")
     _check_allow_list(request)
@@ -25368,7 +25412,7 @@ async def analyze_comment_intent(
     ai_provider, ai_model = _resolve_ai_config_values(
         ai_provider, ai_model, request=request
     )
-    token = ai_username.set(request.state.username)
+    token = ai_username.set(auth_principal.get_principal(request).username)
     try:
         ai_provider, ai_model = await _validate_catalog_pair(ai_provider, ai_model)
     finally:
@@ -25402,7 +25446,7 @@ Respond with ONLY a JSON object:
         ai_provider,
         ai_model,
     )
-    token = ai_username.set(request.state.username)
+    token = ai_username.set(auth_principal.get_principal(request).username)
     try:
         result = await call_ai_once(
             prompt,
@@ -25470,7 +25514,7 @@ async def preview_feedback(
     ai_provider, ai_model = _resolve_ai_config_values(
         body.ai_provider, body.ai_model, request=request
     )
-    token = ai_username.set(request.state.username)
+    token = ai_username.set(auth_principal.get_principal(request).username)
     try:
         ai_provider, ai_model = await _validate_catalog_pair(ai_provider, ai_model)
         try:
@@ -25719,7 +25763,7 @@ async def create_feedback(
 ) -> FeedbackResponse:
     """Create a GitHub issue from a previewed feedback via shared orchestration."""
     settings = get_settings()
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     message = f"User '{username}' created a feedback issue"
     try:
         _check_allow_list(request)
@@ -26082,7 +26126,7 @@ async def get_chat_history(
     if not result:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     preparing = _chat_prep_phases.get(f"{job_id}:{username}")
     payload = await _chat_runtime.read_chat_history_payload(
         job_id, username, limit=limit, offset=offset
@@ -26102,7 +26146,7 @@ async def init_chat(
         raise HTTPException(
             status_code=422, detail="Select provider, model and credential source"
         )
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     return await _chat_runtime.start_job_chat_init(job_id, username, body)
 
 
@@ -26120,7 +26164,7 @@ async def abort_chat(job_id: str, request: Request) -> dict[str, Any]:
     """Abort the currently processing chat message for this user."""
     _check_allow_list(request)
     _require_reviewer(request)
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     logger.info("Chat: user %s aborted chat for job %s", username, job_id)
     return {"aborted": await _chat_runtime.abort_chat_turn(job_id, username)}
 
@@ -26130,7 +26174,9 @@ async def chat_stream(job_id: str, request: Request) -> StreamingResponse:
     """SSE stream for real-time chat message updates."""
     _check_allow_list(request)
     _require_authenticated(request)
-    return _chat_sse_response(request, request.state.username, job_id)
+    return _chat_sse_response(
+        request, auth_principal.get_principal(request).username, job_id
+    )
 
 
 @app.post("/api/chat/{job_id}", status_code=202, operation_id="sendChatMessage")
@@ -26149,8 +26195,8 @@ async def send_chat_message(
     return await _chat_runtime.enqueue_message(
         _job_chat_adapter(job_id, stored_result=stored),
         body=body,
-        username=request.state.username,
-        is_admin=bool(getattr(request.state, "is_admin", False)),
+        username=auth_principal.get_principal(request).username,
+        is_admin=bool(auth_principal.get_principal(request).is_admin),
         background_tasks=background_tasks,
     )
 
@@ -26165,7 +26211,7 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Job not found")
     return await _chat_runtime.clear_history(
         _job_chat_adapter(job_id),
-        username=request.state.username,
+        username=auth_principal.get_principal(request).username,
         if_match=lambda: request.headers.get("if-match", ""),
     )
 
@@ -26267,7 +26313,7 @@ def _sanitize_admin_db_value(value: Any) -> Any:
 @app.get("/api/admin/db/schema", operation_id="adminDbSchema")
 async def admin_db_schema(request: Request) -> dict[str, Any]:
     """Get database schema — tables, columns, types, row counts. Admin only."""
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     try:
         _require_admin(request)
     except HTTPException as exc:
@@ -26410,11 +26456,13 @@ def _admin_row_value(value: Any) -> Any:
 @app.post("/api/admin/db/query", operation_id="adminDbQuery")
 async def admin_db_query(request: Request) -> dict[str, Any]:
     """Execute a read-only SQL query. Admin only."""
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     try:
         _require_admin(request)
         body = await request.json()
-        if not await _ai_admin_role_current(request.state.username):
+        if not await _ai_admin_role_current(
+            auth_principal.get_principal(request).username
+        ):
             logger.info("Admin DB query denied after role change for %s", username)
             raise HTTPException(status_code=403, detail="Admin access required")
         sql = body.get("sql", "").strip()
@@ -26576,7 +26624,7 @@ async def get_admin_chat_history(
 ) -> dict[str, Any]:
     """Get admin chat history."""
     _require_admin(request)
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     payload = await _chat_runtime.read_chat_history_payload(
         ADMIN_CHAT_JOB_ID, username, limit=limit, offset=offset
     )
@@ -26593,7 +26641,7 @@ async def init_admin_chat(
         raise HTTPException(
             status_code=422, detail="Select provider, model and credential source"
         )
-    username = getattr(request.state, "username", "")
+    username = auth_principal.get_principal(request).username
     return await _chat_runtime.init_admin_chat(username, body)
 
 
@@ -26609,7 +26657,7 @@ async def close_admin_chat(request: Request) -> dict[str, Any]:
 async def abort_admin_chat(request: Request) -> dict[str, Any]:
     """Abort the currently processing admin chat message for this user."""
     _require_admin(request)
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     logger.info("Admin chat: user %s aborted admin chat", username)
     return {
         "aborted": await _chat_runtime.abort_chat_turn(
@@ -26625,7 +26673,7 @@ async def admin_chat_stream(request: Request) -> StreamingResponse:
     _require_authenticated(request)
     return _chat_sse_response(
         request,
-        request.state.username,
+        auth_principal.get_principal(request).username,
         ADMIN_CHAT_JOB_ID,
         auth_check=_make_admin_sse_auth_check(request),
     )
@@ -26642,7 +26690,7 @@ async def send_admin_chat_message(
     return await _chat_runtime.enqueue_message(
         _admin_chat_adapter(),
         body=body,
-        username=request.state.username,
+        username=auth_principal.get_principal(request).username,
         is_admin=True,
         background_tasks=background_tasks,
     )
@@ -27162,7 +27210,7 @@ async def save_admin_chat_artifact(
 ) -> dict[str, Any]:
     """Save an HTML report artifact from admin chat. Returns a download URL."""
     _require_admin(request)
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
     ok, owner_id = await _resolve_admin_artifacts_owner_id(username)
     if not ok:
         raise HTTPException(status_code=403, detail="Admin access required")
@@ -27228,7 +27276,7 @@ async def get_admin_chat_artifact(
 ) -> Response:
     """Download an admin chat HTML report artifact."""
     _require_admin(request)
-    username = request.state.username
+    username = auth_principal.get_principal(request).username
 
     # Validate artifact_id is a valid UUID to prevent path traversal
     try:
@@ -27273,7 +27321,7 @@ async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
     _require_admin(request)
     return await _chat_runtime.clear_history(
         _admin_chat_adapter(),
-        username=request.state.username,
+        username=auth_principal.get_principal(request).username,
         if_match=lambda: request.headers.get("if-match", ""),
     )
 
