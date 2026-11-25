@@ -7,7 +7,6 @@ from typing import Any
 
 from rootcoz import get_child_logger, storage
 from rootcoz.auth.base import (
-    RENEW_SESSION_TOKEN_ATTR,
     SESSION_COOKIE,
     AuthContext,
     AuthIdentity,
@@ -59,7 +58,7 @@ class SessionStrategy(AuthStrategy):
         renewed = await self._renew(session, token)
         if renewed:
             # The DB write already happened; the middleware re-issues the cookie.
-            setattr(ctx.request.state, RENEW_SESSION_TOKEN_ATTR, renewed)
+            ctx.side_effects.renew_session_token = renewed
         return identity
 
     async def _renew(self, session: dict[str, Any], token: str) -> str | None:

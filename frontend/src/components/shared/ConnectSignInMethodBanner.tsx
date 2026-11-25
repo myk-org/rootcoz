@@ -4,58 +4,47 @@ import { api } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { useSessionState } from '@/lib/useSessionState'
 import {
-  browserSignIn,
+  canManageSignInMethods,
+  fetchBrowserSignIn,
+  type IdentitiesResponse,
   type SsoProvider,
-  type SsoProvidersResponse,
 } from '@/lib/ssoProviders'
 import { Button } from '@/components/ui/button'
 
 /** Session-scoped, per-account dismissal: the prompt is a nudge, not a notification. */
 const DISMISS_KEY = 'rootcoz-connect-banner-dismissed'
 
-interface IdentitiesResponse {
-  identities: { provider: string }[]
-}
-
 /**
  * A one-line prompt for an account that could connect a provider but has not.
  *
  * Shown only when the deployment offers **browser** SSO **and** the signed-in
- * account has none linked, and only to someone who may act on it (a viewer
- * cannot connect one, so telling them would be noise). A server with no public
- * origin can only be reached through the CLI device flow, so there is no prompt
- * to make there. Dismissing hides it for the session — a permanent dismissal
- * would nag once and then never help anyone who changes their mind; a
- * per-session one is forgotten when the browser is.
+ * account has none linked, and only to someone who may act on it.
  */
 export function ConnectSignInMethodBanner() {
   const { username } = useAuth()
-  // Dismissing is one person's decision about their own account, so the stored
-  // flag is keyed by username and there is no flag at all until we know whose
-  // it would be — otherwise the next person on this tab inherits it.
   if (!username) return null
   return <ConnectBannerForUser key={username} username={username} />
 }
 
 function ConnectBannerForUser({ username }: { username: string }) {
   const { authenticated, role } = useAuth()
+  const canManage = canManageSignInMethods(role, username, authenticated)
   const [providers, setProviders] = useState<SsoProvider[]>([])
   const [unlinked, setUnlinked] = useState(false)
   const [dismissed, setDismissed] = useSessionState<boolean>(`${DISMISS_KEY}:${username}`, false)
 
   useEffect(() => {
-    // Nothing to offer a viewer, and nothing to load without a session.
-    if (!authenticated || role === 'viewer' || username === 'admin') return
+    if (!canManage) return
     let cancelled = false
 
     async function load() {
       try {
         const [offered, mine] = await Promise.all([
-          api.get<SsoProvidersResponse>('/api/auth/sso/providers'),
+          fetchBrowserSignIn(),
           api.get<IdentitiesResponse>('/api/user/identities'),
         ])
         if (cancelled) return
-        setProviders(browserSignIn(offered).providers)
+        setProviders(offered.providers)
         setUnlinked(mine.identities.length === 0)
       } catch {
         // A deployment without SSO, or a failed probe, is not worth a banner.
@@ -67,16 +56,12 @@ function ConnectBannerForUser({ username }: { username: string }) {
     return () => {
       cancelled = true
     }
-  }, [authenticated, role, username])
+  }, [canManage])
 
   function dismiss() {
     setDismissed(true)
   }
 
-  // The bootstrap administrator lives outside the users table, so it has no
-  // account a provider identity could attach to — offering the prompt would send
-  // it to a flow that cannot succeed.
-  const canManage = authenticated && role !== 'viewer' && username !== 'admin'
   if (!canManage || dismissed || !unlinked || providers.length === 0) return null
 
   const names = providers.map((provider) => provider.display_name).join(', ')

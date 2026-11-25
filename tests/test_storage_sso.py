@@ -213,7 +213,9 @@ async def test_a_link_reads_its_row_inside_the_link_transaction(
     for that vanishing row: it reports nothing outside a write transaction, so
     the return has to come from the transaction that made the row.
     """
-    real_select = storage._select_identities
+    from rootcoz import sso_store
+
+    real_select = sso_store._select_identities
 
     async def _vanishes_outside_a_transaction(db, where, params, *, order=""):
         if not db.in_transaction:
@@ -222,7 +224,7 @@ async def test_a_link_reads_its_row_inside_the_link_transaction(
 
     with (
         patch.object(storage, "DB_PATH", setup_test_db),
-        patch.object(storage, "_select_identities", _vanishes_outside_a_transaction),
+        patch.object(sso_store, "_select_identities", _vanishes_outside_a_transaction),
     ):
         await storage.create_user("alice")
         created = await storage.add_user_identity(
@@ -242,16 +244,20 @@ async def test_a_blocked_account_cannot_be_handed_a_link(
 ) -> None:
     """A block committed after the route's check still refuses the link write.
 
-    The route applies the same gate before it gets here; this pins the write
-    itself, which is what a caller added later would otherwise trust. Nothing is
-    stored either way.
+    The eligibility predicate is injected from ``auth.approval`` so storage
+    never imports auth; this pins the in-transaction enforcement.
     """
+    from rootcoz.auth import approval as auth_approval
     from rootcoz.config import Settings
 
-    with (
-        patch.object(storage, "DB_PATH", setup_test_db),
-        patch("rootcoz.config._cached_settings", Settings(require_approval=True)),
-    ):
+    settings = Settings(require_approval=True)
+
+    def _check(user: dict[str, object], is_admin: bool) -> str:
+        return auth_approval.account_eligibility_refusal(
+            user, is_admin=is_admin, settings=settings
+        )
+
+    with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
         if block == "disabled":
             assert await storage.set_user_disabled("alice", True) is not None
@@ -262,8 +268,13 @@ async def test_a_blocked_account_cannot_be_handed_a_link(
                 )
                 await db.commit()
 
-        with pytest.raises(ValueError, match=f"^account_{block}$"):
-            await storage.add_user_identity("alice", "google", "sub-1")
+        with pytest.raises(
+            storage.AccountIneligibleError, match=f"^account_{block}$"
+        ) as exc_info:
+            await storage.add_user_identity(
+                "alice", "google", "sub-1", eligibility_check=_check
+            )
+        assert exc_info.value.reason == f"account_{block}"
 
         assert await _raw_identity_rows() == []
 
@@ -272,12 +283,17 @@ async def test_an_admin_is_not_held_by_its_own_approval_status_when_linking(
     setup_test_db: Path,
 ) -> None:
     """An administrator is exempt by role, not by status, in the link write too."""
+    from rootcoz.auth import approval as auth_approval
     from rootcoz.config import Settings
 
-    with (
-        patch.object(storage, "DB_PATH", setup_test_db),
-        patch("rootcoz.config._cached_settings", Settings(require_approval=True)),
-    ):
+    settings = Settings(require_approval=True)
+
+    def _check(user: dict[str, object], is_admin: bool) -> str:
+        return auth_approval.account_eligibility_refusal(
+            user, is_admin=is_admin, settings=settings
+        )
+
+    with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_admin_user("boss")
         async with storage._connect_db() as db:
             await db.execute(
@@ -285,7 +301,9 @@ async def test_an_admin_is_not_held_by_its_own_approval_status_when_linking(
             )
             await db.commit()
 
-        created = await storage.add_user_identity("boss", "google", "sub-1")
+        created = await storage.add_user_identity(
+            "boss", "google", "sub-1", eligibility_check=_check
+        )
 
     assert created["username"] == "boss"
     assert created["subject"] == "sub-1"
@@ -798,10 +816,11 @@ async def test_a_device_code_is_approved_then_redeemed_exactly_once(
             code["device_code"], username="alice"
         )
         assert minted is not None
+        assert minted.ok
         # The rights come from the row, not from the caller.
-        assert minted["role"] == "reviewer"
-        assert minted["is_admin"] is False
-        assert (await storage.get_session(minted["token"]))["username"] == "alice"
+        assert minted.role == "reviewer"
+        assert minted.is_admin is False
+        assert (await storage.get_session(minted.token))["username"] == "alice"
         assert await storage.get_device_code(code["device_code"]) is None
         assert await storage.get_device_code_by_user_code(code["user_code"]) is None
         # Nothing left to exchange: a second exchange cannot mint a second token.
@@ -983,9 +1002,9 @@ async def test_a_downgraded_account_cannot_redeem_its_admin_session(
             code["device_code"], username="boss"
         )
         assert minted is not None
-        assert minted["role"] == "reviewer"
-        assert minted["is_admin"] is False
-        session = await storage.get_session(minted["token"])
+        assert minted.role == "reviewer"
+        assert minted.is_admin is False
+        session = await storage.get_session(minted.token)
         assert session is not None
         assert session["role"] == "reviewer"
         assert not session["is_admin"]
@@ -1017,9 +1036,9 @@ async def test_the_exchange_reads_the_role_at_mint_time(setup_test_db: Path) -> 
             code["device_code"], username="alice"
         )
         assert minted is not None
-        assert minted["role"] == "admin"
-        assert minted["is_admin"] is True
-        session = await storage.get_session(minted["token"])
+        assert minted.role == "admin"
+        assert minted.is_admin is True
+        session = await storage.get_session(minted.token)
         assert session is not None
         assert session["role"] == "admin"
         assert bool(session["is_admin"]) is True
@@ -1038,8 +1057,8 @@ async def test_a_row_less_bootstrap_admin_is_minted_as_an_admin(
             code["device_code"], username="admin"
         )
         assert minted is not None
-        assert minted["role"] == "admin"
-        assert minted["is_admin"] is True
+        assert minted.role == "admin"
+        assert minted.is_admin is True
 
 
 async def test_an_account_that_lost_its_row_gets_no_session(
@@ -1136,8 +1155,19 @@ async def test_a_block_committed_while_the_code_waited_refuses_the_mint(
 
     The block already dropped the account's sessions, so a token minted after it
     would outlive that invalidation. The exchange re-reads the row inside its own
-    transaction and refuses, naming the block so the poll can audit it.
+    transaction and refuses via the injected eligibility predicate, returning a
+    typed :class:`DeviceCodeExchangeResult`.
     """
+    from rootcoz.auth import approval as auth_approval
+    from rootcoz.config import Settings
+
+    settings = Settings(require_approval=True)
+
+    def _check(user: dict[str, object], is_admin: bool) -> str:
+        return auth_approval.account_eligibility_refusal(
+            user, is_admin=is_admin, settings=settings
+        )
+
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
         code = await _approve_and_claim("alice")
@@ -1155,46 +1185,49 @@ async def test_a_block_committed_while_the_code_waited_refuses_the_mint(
                 await db.commit()
 
         refused = await storage.exchange_device_code_for_session(
-            code["device_code"], username="alice"
+            code["device_code"], username="alice", eligibility_check=_check
         )
-        # Named, not silent: the poll reports it as a refusal with this reason.
-        assert refused == {"refused": f"account_{block}"}
+        assert refused == storage.DeviceCodeExchangeResult(refused=f"account_{block}")
+        assert not refused.ok
 
         async with storage._connect_db() as db:
             cursor = await db.execute(
                 "SELECT COUNT(*) AS n FROM sessions WHERE username = 'alice'"
             )
             assert (await cursor.fetchone())["n"] == 0
-        # The claim is spent, so no poll can mint while the block stands; an
-        # admin who lifts it does not hand the terminal a token it never asked
-        # for again — the person signs in afresh.
         assert await storage.get_device_code(code["device_code"]) is not None
         again = await storage.exchange_device_code_for_session(
-            code["device_code"], username="alice"
+            code["device_code"], username="alice", eligibility_check=_check
         )
-        assert again is not None and "token" not in again
+        assert again is not None and not again.ok
 
 
 async def test_below_require_approval_a_pending_row_still_mints(
     setup_test_db: Path,
 ) -> None:
     """With approval off a pending row is an ordinary account, exactly as at login."""
+    from rootcoz.auth import approval as auth_approval
     from rootcoz.config import Settings
 
-    with (
-        patch.object(storage, "DB_PATH", setup_test_db),
-        patch("rootcoz.config._cached_settings", Settings(require_approval=False)),
-    ):
+    settings = Settings(require_approval=False)
+
+    def _check(user: dict[str, object], is_admin: bool) -> str:
+        return auth_approval.account_eligibility_refusal(
+            user, is_admin=is_admin, settings=settings
+        )
+
+    with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice", status="pending")
         code = await _approve_and_claim("alice")
 
         minted = await storage.exchange_device_code_for_session(
-            code["device_code"], username="alice"
+            code["device_code"], username="alice", eligibility_check=_check
         )
 
         assert minted is not None
-        assert minted["role"] == "reviewer"
-        assert (await storage.get_session(minted["token"]))["username"] == "alice"
+        assert minted.ok
+        assert minted.role == "reviewer"
+        assert (await storage.get_session(minted.token))["username"] == "alice"
 
 
 class _MovableClock:

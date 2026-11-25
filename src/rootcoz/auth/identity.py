@@ -32,7 +32,7 @@ from rootcoz import get_child_logger, storage
 from rootcoz.auth import approval as auth_approval
 from rootcoz.auth.base import RESERVED_ADMIN_USERNAME
 from rootcoz.auth.sso.base import AuthError, ClaimSet
-from rootcoz.config import Settings, canonical_domain
+from rootcoz.config import Settings, canonical_domain, get_settings
 
 logger = get_child_logger(__name__)
 
@@ -380,6 +380,12 @@ async def link_existing(
             "The bootstrap admin has no account to link",
             subject=username,
         )
+
+    def _eligibility_check(user: dict[str, object], is_admin: bool) -> str:
+        return auth_approval.account_eligibility_refusal(
+            user, is_admin=is_admin, settings=get_settings()
+        )
+
     try:
         await storage.add_user_identity(
             username,
@@ -387,23 +393,10 @@ async def link_existing(
             subject,
             email=email,
             ticket=ticket,
+            eligibility_check=_eligibility_check,
         )
-    except ValueError as exc:
-        # The account disappeared between the credential check and this write: it
-        # is not a conflict, and the caller must not be told "already linked".
-        text = str(exc)
-        if text.startswith("account_"):
-            # Storage's eligibility verdict, already in its route-facing shape
-            # (``account_pending``): the route answers and audits it as if it had
-            # been the one to refuse.
-            reason = text.split(" ", 1)[0]
-        elif "ticket" in text:
-            reason = "ticket_expired"
-        elif "not found" in text:
-            reason = "account_missing"
-        else:
-            reason = "identity_conflict"
-        raise AuthError(reason, str(exc), subject=username) from exc
+    except storage.IdentityStorageError as exc:
+        raise AuthError(exc.reason, str(exc), subject=username) from exc
     return IdentityResolution(
         username=username, created=False, status=await status_of(username)
     )
@@ -480,11 +473,10 @@ async def create_new(
             created_via=provider,
             ticket=ticket,
         )
+    except storage.IdentityStorageError as exc:
+        raise AuthError(exc.reason, str(exc), subject=candidate) from exc
     except ValueError as exc:
-        reason = (
-            "identity_conflict" if "already linked" in str(exc) else "invalid_username"
-        )
-        raise AuthError(reason, str(exc), subject=candidate) from exc
+        raise AuthError("invalid_username", str(exc), subject=candidate) from exc
     return IdentityResolution(
         username=candidate, created=True, status=status, api_key=api_key
     )

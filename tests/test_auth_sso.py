@@ -2160,7 +2160,7 @@ async def test_a_stale_link_that_raced_a_delete_is_reported_as_missing(
 
         with patch(
             "rootcoz.storage.add_user_identity",
-            side_effect=ValueError("User 'ruthn' not found"),
+            side_effect=storage.AccountNotFoundError("User 'ruthn' not found"),
         ):
             response = client.post(
                 "/api/auth/sso/link",
@@ -2188,7 +2188,7 @@ async def test_a_block_committed_during_the_link_is_denied_with_its_reason(
 
         with patch(
             "rootcoz.storage.add_user_identity",
-            side_effect=ValueError("account_pending"),
+            side_effect=storage.AccountIneligibleError("pending"),
         ):
             response = client.post(
                 "/api/auth/sso/link",
@@ -3936,7 +3936,7 @@ async def test_an_internal_link_reason_never_reaches_the_url(
             patch.object(
                 storage,
                 "add_user_identity",
-                side_effect=ValueError("User 'ruthn' not found"),
+                side_effect=storage.AccountNotFoundError("User 'ruthn' not found"),
                 autospec=True,
             ),
         ):
@@ -4292,10 +4292,10 @@ async def test_a_client_name_cannot_forge_a_log_line(temp_db_path: Path) -> None
 
 async def test_one_caller_cannot_reserve_every_device_code(temp_db_path: Path) -> None:
     """The ceiling is per caller as well as global: anonymous means anyone."""
-    from rootcoz import main as app_module
+    from rootcoz.auth.sso import flows as sso_flows
 
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(app_module, "_MAX_LIVE_DEVICE_CODES_PER_CALLER", 2)
+    monkeypatch.setattr(sso_flows, "MAX_LIVE_DEVICE_CODES_PER_CALLER", 2)
     try:
         for client in make_app_client(temp_db_path, _SSO_ENV):
             assert client.post("/api/auth/sso/device/start", json={}).status_code == 200
@@ -4364,9 +4364,9 @@ async def test_a_flood_of_pending_codes_is_refused_before_the_insert(
     temp_db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The start route is anonymous: its table needs a cap, not just a log budget."""
-    from rootcoz import main as app_module
+    from rootcoz.auth.sso import flows as sso_flows
 
-    monkeypatch.setattr(app_module, "_MAX_LIVE_DEVICE_CODES", 2)
+    monkeypatch.setattr(sso_flows, "MAX_LIVE_DEVICE_CODES", 2)
     for client in make_app_client(temp_db_path, _SSO_ENV):
         assert client.post("/api/auth/sso/device/start", json={}).status_code == 200
         assert client.post("/api/auth/sso/device/start", json={}).status_code == 200
@@ -4623,7 +4623,7 @@ async def test_a_downgrade_between_the_polls_read_and_the_exchange_wins(
     the exchange transaction. The exchange re-reads the row, so the session and
     the audit row name the rights the account actually holds now.
     """
-    from rootcoz import main as main_module
+    from rootcoz.auth.sso import flows as sso_flows
 
     real_exchange = storage.exchange_device_code_for_session
 
@@ -4646,7 +4646,7 @@ async def test_a_downgrade_between_the_polls_read_and_the_exchange_wins(
 
         with (
             # The poll sees the old rights; a mint from this value would be the bug.
-            patch.object(main_module, "role_and_admin", return_value=("admin", True)),
+            patch.object(sso_flows, "role_and_admin", return_value=("admin", True)),
             patch.object(
                 storage,
                 "exchange_device_code_for_session",
@@ -4824,15 +4824,20 @@ def test_the_approval_takes_its_provider_from_the_request_state() -> None:
     """Structural guard: the ambient-cookie re-read must not come back.
 
     The provider is the one the *winning* credential was issued by, which the
-    middleware already resolved onto ``request.state``. Re-reading a cookie or a
-    session row here is the bug this replaced, not a shortcut around it.
+    middleware resolved onto the typed :class:`Principal`. Re-reading a cookie
+    or a session row here is the bug this replaced, not a shortcut around it.
     """
     from rootcoz import main as app_module
+    from rootcoz.auth.sso import flows as sso_flows
 
-    source = inspect.getsource(app_module.sso_device_approve)
-    assert 'getattr(request.state, "auth_provider", None)' in source
-    assert "read_cookie" not in source
-    assert "get_session_identity" not in source
+    route_source = inspect.getsource(app_module.sso_device_approve)
+    flow_source = inspect.getsource(sso_flows.sso_device_approve_flow)
+    assert "principal.auth_provider" in flow_source
+    assert "read_cookie" not in route_source and "read_cookie" not in flow_source
+    assert (
+        "get_session_identity" not in route_source
+        and "get_session_identity" not in flow_source
+    )
 
 
 async def test_an_unknown_user_code_is_not_approvable(temp_db_path: Path) -> None:

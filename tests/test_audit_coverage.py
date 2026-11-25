@@ -25,6 +25,14 @@ from pathlib import Path
 import pytest
 
 MAIN = Path(__file__).resolve().parents[1] / "src" / "rootcoz" / "main.py"
+SSO_FLOWS = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "rootcoz"
+    / "auth"
+    / "sso"
+    / "flows.py"
+)
 MUTATING = {"post", "put", "delete", "patch"}
 
 #: The empty "nothing audits unconditionally" set, shared to keep defaults immutable.
@@ -166,7 +174,12 @@ def _parse() -> tuple[list[tuple[str, str, str]], dict[str, ast.AST]]:
                 continue
             path = ast.literal_eval(dec.args[0]) if dec.args else "?"
             routes.append((dec.func.attr.upper(), path, node.name))
-    return routes, _functions(tree)
+    functions = _functions(tree)
+    # Include delegated SSO flow orchestration so route-to-flow control-flow
+    # auditing is enforced across the module boundary as well.
+    for name, fn_node in _functions(ast.parse(SSO_FLOWS.read_text())).items():
+        functions.setdefault(name, fn_node)
+    return routes, functions
 
 
 def _definite_calls(node: ast.AST) -> set[str]:
@@ -560,7 +573,8 @@ def test_exemptions_are_not_stale() -> None:
 )
 def test_contract_action_is_implemented(action: str) -> None:
     """Every action id promised in the coverage contract exists in the code."""
-    assert f'"{action}"' in MAIN.read_text(), (
+    combined = MAIN.read_text() + "\n" + SSO_FLOWS.read_text()
+    assert f'"{action}"' in combined, (
         f"{action} is promised by the #379 coverage contract but is not recorded "
-        "anywhere in main.py"
+        "anywhere in main.py or auth/sso/flows.py"
     )

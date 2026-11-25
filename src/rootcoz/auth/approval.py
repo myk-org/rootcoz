@@ -110,6 +110,37 @@ def account_block_reason(user: dict[str, Any] | None) -> str | None:
     return None
 
 
+def account_eligibility_refusal(
+    user: dict[str, Any], *, is_admin: bool, settings: Settings
+) -> str:
+    """Name why *user* may not act at all, or ``""`` when it may.
+
+    One predicate for every write that hands out access — a session minted from a
+    device code, an identity link written for a first login — each applied to the
+    row read *inside* its own transaction. Approval happens minutes before either
+    write lands, so a block an admin commits in that window must win.
+
+    Args:
+        user: The users row, read inside the writing transaction.
+        is_admin: Whether the account is an administrator, who bypasses approval.
+        settings: Application settings carrying ``REQUIRE_APPROVAL``.
+
+    Returns:
+        ``"disabled"``, ``"locked"``, ``"pending"`` or ``"rejected"`` — the
+        reason a caller prefixes with ``account_`` for the trail — or ``""`` for
+        an account that may act.
+    """
+    reason = account_block_reason(user)
+    if reason is not None:
+        return reason
+    status = str(user.get("status") or "")
+    if approval_gate_applies(is_admin=is_admin, settings=settings) and (
+        is_approval_blocked(status)
+    ):
+        return status
+    return ""
+
+
 def maybe_add_custom_approval_msg(content: dict[str, Any], settings: Settings) -> None:
     """Add the deployment's custom approval note to a response body.
 

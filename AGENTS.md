@@ -120,28 +120,31 @@ src/rootcoz/
   exporters/                # Exporter plugins (push results to external systems)
     base.py                 # Exporter ABC, ExportContext, ExporterResult
     reportportal.py         # Report Portal exporter: ReportPortalClient
-  auth/                     # Authentication strategies (request → identity)
-    base.py                 # AuthStrategy ABC, AuthContext, AuthIdentity, cookie names +
-                            # read/set/clear helpers, reserved admin username,
+  auth/                     # Authentication strategies & deep identity/SSO modules
+    base.py                 # AuthStrategy ABC, AuthContext, AuthIdentity, AuthSideEffects,
+                            # cookie names + read/set/clear helpers, reserved admin username,
                             # bootstrap-admin check, role/admin and session→identity mapping
-    registry.py             # AUTH_CHAIN, build_chain, resolve_identity, may_replace (the
-                            # only place the override policy is stated)
+    principal.py            # Typed Principal, explicit PUBLIC_EXACT_PATHS/PUBLIC_ROUTE_PATTERNS
+                            # contract, authenticate_request, grant guards (require_* /
+                            # check_allow_list), live admin SSE re-authorization & epoch polling
+    lifecycle.py            # Atomic user deletion/revocation orchestration (lock, marker,
+                            # DB purge, attachment/artifact cleanup, AI session revocation)
+    registry.py             # AUTH_CHAIN, build_chain, resolve_auth, resolve_identity, may_replace
     session.py              # rootcoz_session cookie + sliding-window renewal
     api_key.py              # Authorization: Bearer (ADMIN_KEY, user key, session token)
     proxy.py                # X-Forwarded-User under TRUST_PROXY_HEADERS + /login redirect
     password.py             # POST /api/auth/login credential verification (not in the chain)
     approval.py             # status-gate decisions: pending/rejected body, account-block
-                            # reason; the refusal itself is applied by main
+                            # reason, account_eligibility_refusal; refusal applied by main/flows
     identity.py             # SSO claims → local account: link by (provider, subject) only;
-                            # an unlinked subject yields a LoginChoice (suggested name)
-                            # that the ticket endpoints turn into a create or a
-                            # credential-verified link; never by name, never by email
-    sso/                    # SSO providers (browser login): base.py (SSOProvider ABC,
-                            # AuthError, ClaimSet), http.py (one IdP HTTP call), oidc.py
-                            # (discovery, PKCE, ID-token verification, end-session),
-                            # google.py, github.py (OAuth2 + /user/emails), openshift.py,
-                            # redhat.py, state.py (sealed state cookie), __init__.py
-                            # (PROVIDER_CLASSES registry)
+                            # translates typed IdentityStorageError into AuthError
+    sso/                    # SSO providers + deep flow orchestration: base.py (SSOProvider ABC,
+                            # AuthError, ClaimSet), http.py, oidc.py, google.py, github.py,
+                            # openshift.py, redhat.py, state.py, flows.py (browser login/link,
+                            # ticket lifecycle, unlink, device flow, IdP logout), __init__.py
+  sso_store.py              # SSO persistence (user_identities, sso_device_codes, sso_link_tickets),
+                            # typed IdentityStorageError hierarchy & DeviceCodeExchangeResult
+                            # (re-exported on storage.py; zero imports of auth/ or config/)
   prow_validation.py        # Canonical Prow validators (+ URL helper re-exports for compatibility)
   url_utils.py              # Cross-cutting URL helpers: HTTP(S) sanitization (userinfo, href)
                             # and the navigation-safety predicate shared by the SSO logout path

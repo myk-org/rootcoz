@@ -16,11 +16,12 @@ from rootcoz.auth.approval import (
 )
 from rootcoz.auth.base import (
     SESSION_COOKIE,
-    SET_PROXY_COOKIE_ATTR,
     USERNAME_COOKIE,
     AuthContext,
     AuthIdentity,
     AuthStrategy,
+    ProxyProvisionedEvent,
+    ProxyProvisionRefusedEvent,
     read_cookie,
     role_and_admin,
     set_username_cookie,
@@ -36,15 +37,6 @@ _HARD_REFUSED_USERNAMES: frozenset[str] = frozenset(
 
 #: Header naming the user the reverse proxy already authenticated.
 PROXY_USER_HEADER = "x-forwarded-user"
-
-#: ``request.state`` attribute carrying the account provisioned by this request,
-#: so the serving layer can audit it and refresh the pending badge.
-PROVISIONED_ATTR = "proxy_provisioned"
-
-#: ``request.state`` attribute carrying a refusal to provision, with its reason,
-#: so the serving layer can audit it. A name the deployment will not create an
-#: account for is not authenticated at all, which is worth a row.
-PROVISION_REFUSED_ATTR = "proxy_provision_refused"
 
 #: Module logger, through the house helper so the package keeps one level authority.
 logger = get_child_logger(__name__)
@@ -114,87 +106,47 @@ def _proxy_provision_refusal(username: str, settings: Settings) -> str | None:
     return None
 
 
-def _record_refusal(request: Request, username: str, reason: str) -> None:
-    """Announce a refused name on the request, for the serving layer's audit row.
+def _record_refusal(ctx: AuthContext, username: str, reason: str) -> None:
+    """Announce a refused name on the auth context, for the serving layer's audit row.
 
-    The auth package owns no auditing, so every refusal leaves the same record
-    here and :func:`rootcoz.main._record_proxy_provision_refused` writes it.
-
-    Args:
-        request: The request the refusal applies to.
-        username: The refused name.
-        reason: Why, as a fixed code (see :func:`_proxy_provision_refusal`).
+    The auth package owns no auditing, so every refusal leaves the same typed
+    event in ``ctx.side_effects`` and the middleware writes the audit row.
     """
-    setattr(
-        request.state,
-        PROVISION_REFUSED_ATTR,
-        {"username": username, "reason": reason},
+    ctx.side_effects.proxy_provision_refused = ProxyProvisionRefusedEvent(
+        username=username, reason=reason
     )
 
 
 async def _provision_proxy_user(
-    username: str, settings: Settings, request: Request
+    username: str, ctx: AuthContext
 ) -> dict[str, Any] | None:
     """Create the row for a proxy-vouched account on its first request.
 
     Shared by :meth:`ProxyStrategy.authenticate` (normal dispatch) and
     :func:`_login_destination` (``/login`` redirect) so the provisioning
     logic, its refusal checks and its audit signals exist exactly once.
-
-    Args:
-        username: The normalised name from the trusted header.
-        settings: Application settings (approval rule).
-        request: The request that triggered it, so the caller can audit and
-            notify with its context.
-
-    Returns:
-        The new users row, or ``None`` when provisioning refuses the name
-        (:func:`_proxy_provision_refusal`). The caller then refuses the
-        request: a row-less identity would bypass the approval gate that
-        every provisioned account now passes through.
     """
+    settings = ctx.settings
     refusal = _proxy_provision_refusal(username, settings)
     if refusal:
         logger.info("Refused proxy account '%s': %s", username, refusal)
-        # No row, no identity — and the serving layer writes the refusal to
-        # the trail.
-        _record_refusal(request, username, refusal)
+        _record_refusal(ctx, username, refusal)
         return None
     status = initial_user_status(settings)
     try:
-        # Keyless: the header is this account's credential, so provisioning
-        # must not mint a secret nobody is ever shown. The same role rule,
-        # status rule and provenance as every other creation path.
         await storage.create_keyless_user(username, status=status, created_via="proxy")
     except ValueError:
-        # Provisioning by name is idempotent, and a browser fires several
-        # requests in parallel on its first page load: the losers of that race
-        # see "already exists" — a ValueError for a name that was, in fact,
-        # just provisioned. Re-read before refusing, or the account's
-        # very first load would answer 401 to some of its own requests.
         existing = await storage.get_user_by_username(username)
         if existing is None:
-            # No row: the store refused the name, so there is no account to
-            # authenticate. That is not an identity, and the request is
-            # refused rather than given a row-less session.
             logger.warning("Refused proxy account '%s': unusable name", username)
-            _record_refusal(request, username, "unusable_name")
+            _record_refusal(ctx, username, "unusable_name")
             return None
         return existing
     user = await storage.get_user_by_username(username)
-    # Announced on the request so the serving layer can write one audit row
-    # and refresh the pending badge: the auth package never imports the app.
-    # The role travels with it because the middleware writes the row before
-    # ``request.state.role`` is assigned, and an audit row that reports the
-    # dispatch default instead of the account's real role is a wrong row.
-    setattr(
-        request.state,
-        PROVISIONED_ATTR,
-        {
-            "username": username,
-            "status": status,
-            "role": user["role"] if user else settings.default_user_role,
-        },
+    ctx.side_effects.proxy_provisioned = ProxyProvisionedEvent(
+        username=username,
+        status=status,
+        role=str(user["role"]) if user else settings.default_user_role,
     )
     return user
 
@@ -255,7 +207,7 @@ class ProxyStrategy(AuthStrategy):
             return None
         user = await storage.get_user_by_username(username)
         if user is None:
-            user = await _provision_proxy_user(username, ctx.settings, ctx.request)
+            user = await _provision_proxy_user(username, ctx)
             if user is None:
                 # A name the store refuses is not a person the deployment can
                 # account for. Authenticating anyway would return a row-less
@@ -264,7 +216,7 @@ class ProxyStrategy(AuthStrategy):
                 return None
         role, is_admin = role_and_admin(user, ctx.settings.default_user_role)
         # Refresh the display cookie on the response.
-        setattr(ctx.request.state, SET_PROXY_COOKIE_ATTR, username)
+        ctx.side_effects.set_proxy_cookie = username
         return AuthIdentity(
             username=username,
             strategy_name=self.name,
@@ -294,10 +246,10 @@ async def _login_destination(username: str, ctx: AuthContext) -> str | None:
     """
     user = await storage.get_user_by_username(username)
     if user is None:
-        user = await _provision_proxy_user(username, ctx.settings, ctx.request)
+        user = await _provision_proxy_user(username, ctx)
         if user is None:
             # Refused by _proxy_provision_refusal or unusable name — already
-            # recorded on the request for the serving layer's audit row.
+            # recorded on the auth context for the serving layer's audit row.
             return None
     if account_block_reason(user):
         return None

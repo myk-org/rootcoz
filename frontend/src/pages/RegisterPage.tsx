@@ -1,431 +1,140 @@
-import { useState, useEffect, type FormEvent } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '@/lib/auth'
 import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { SSO_LOGIN_ERROR_FALLBACK, ssoErrorMessage } from '@/lib/ssoErrors'
-import { persistTokensToServer } from '@/lib/tokens'
 import { clearUrlFragment, stripQueryParams } from '@/lib/navigation'
-import { browserSignIn, type SsoProvider, type SsoProvidersResponse } from '@/lib/ssoProviders'
+import {
+  fetchBrowserSignIn,
+  resolveProviderDisplayName,
+  type SsoProvider,
+} from '@/lib/ssoProviders'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { TokenField } from '@/components/shared/TokenField'
-import { TrackerTokensFields } from '@/components/shared/TrackerTokensFields'
-import { NotificationToggle } from '@/components/shared/NotificationToggle'
-import { CustomMessageBanner } from '@/components/shared/CustomMessageBanner'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
-import { UsernameField } from '@/components/shared/UsernameField'
+import { WarningBanner } from './auth/AuthFormPrimitives'
+import { SsoChoicePanel, type SsoTicket } from './auth/SsoChoicePanel'
+import { ApiKeyReveal } from './auth/ApiKeyReveal'
+import { LoginForm } from './auth/LoginForm'
+import { RegistrationForm } from './auth/RegistrationForm'
 
 type Mode = 'login' | 'register' | 'key-reveal'
 type RegistrationStatus = 'active' | 'pending'
 
-interface SsoTicket {
-  provider: string
-  suggested_username: string
-  email_domain: string
+interface TicketLookupState {
+  key: string
+  captured: string
+  ticket: { value: string; data: SsoTicket } | null
+  expired: boolean
+  failure: string
 }
 
-
-/** The server's own explanation when it sent one, else a local sentence. */
-function failureMessage(err: unknown, fallback: string): string {
-  return extractApiDetail(err) ?? fallback
-}
-
-/**
- * One full-page sign-in link per configured provider.
- *
- * Rendered on both the login and the register form: the provider list is the
- * deployment's, not the form's, and hiding SSO from people who happen to be
- * registering only makes them pick a weaker credential.
- */
-function SsoProviderButtons({ providers, returnTo }: { providers: SsoProvider[]; returnTo: string }) {
-  if (providers.length === 0) return null
-  return (
-    <div className="space-y-2 border-t border-border-muted pt-4">
-      {providers.map((provider) => (
-        <Button key={provider.name} asChild variant="outline" className="w-full">
-          <a href={`/api/auth/sso/${encodeURIComponent(provider.name)}/login?next=${encodeURIComponent(returnTo)}`}>
-            Sign in with {provider.display_name}
-          </a>
-        </Button>
-      ))}
-    </div>
-  )
-}
-
-function WarningBanner({ message, tone = 'amber' }: { message: string; tone?: 'amber' | 'red' }) {
-  if (!message) return null
-  return (
-    <div
-      // A refusal must be announced, not just coloured: red is an error the
-      // person has to act on, amber is a notice.
-      role={tone === 'red' ? 'alert' : undefined}
-      className={`rounded-md border p-3 ${tone === 'red' ? 'border-signal-red/30 bg-signal-red/10' : 'border-signal-amber/30 bg-signal-amber/10'}`}
-    >
-      <p className={`text-xs ${tone === 'red' ? 'text-signal-red' : 'text-signal-amber'}`}>{message}</p>
-    </div>
-  )
-}
-
-/**
- * First-login screen for an identity no account holds yet.
- *
- * The provider already proved who the person is; the ticket (one-time, bound to
- * this browser) is the only credential these two endpoints accept, so the panel
- * asks *which way* to finish and nothing else.
- */
-function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpired, onDismiss, onCreated }: {
-  ticket: SsoTicket
-  ticketValue: string
-  providerLabel: string
-  nextPath: string
-  onExpired: () => void
-  onDismiss: () => void
-  /** Called with the new account's one-time API key and where it should land. */
-  onCreated: (apiKey: string, destination: string, status: string) => void
-}) {
-  const navigate = useNavigate()
-  const { refreshAuth } = useAuth()
-  // Single-step Continue flow: step 1 = username, step 2 = existing account link.
-  const [step, setStep] = useState<'username' | 'link'>('username')
-  const [username, setUsername] = useState(ticket.suggested_username)
-  const [linkName, setLinkName] = useState('')
-  const [linkKey, setLinkKey] = useState('')
-  const [showLinkKey, setShowLinkKey] = useState(false)
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
-
-  /**
-   * Complete the login by posting `body` to `path`.
-   *
-   * A 404 means the one-time ticket is gone — expired, or already spent by a
-   * second submit — so the panel switches to its expired state instead of
-   * showing an error the person cannot act on. A `pending` account goes to
-   * `/pending` because the middleware refuses it everywhere else.
-   */
-  async function finish(path: string, body: Record<string, string>) {
-    setLoading(true)
-    setError('')
-    try {
-      const result = await api.post<{
-        username: string
-        status: string
-        next?: string
-        /** Present only when this call created the account: shown once. */
-        api_key?: string
-      }>(path, body)
-      try {
-        await refreshAuth()
-      } catch {
-        // The session cookie is already set — navigate even if /me fails.
-      }
-      if (result.api_key) {
-        onCreated(
-          result.api_key,
-          result.next || (result.status === 'active' ? nextPath : '/pending'),
-          result.status,
-        )
-        return
-      }
-      const destination = result.next || (result.status === 'active' ? nextPath : '/pending')
-      navigate(destination, { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 404) {
-        onExpired()
-        return
-      }
-      setError(failureMessage(err, 'Could not finish signing in. Please try again.'))
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  /** Step 1: check the username, then create or switch to link step. */
-  async function handleContinue() {
-    const trimmed = username.trim()
-    if (!trimmed) return
-    setLoading(true)
-    setError('')
-    try {
-      const result = await api.post<{
-        username_exists?: boolean
-        provider: string
-        suggested_username: string
-        email_domain: string
-      }>('/api/auth/sso/ticket', { ticket: ticketValue, username: trimmed })
-      if (result.username_exists) {
-        setLinkName(trimmed)
-        setLinkKey('')
-        setError('')
-        setStep('link')
-      } else {
-        // New account: create immediately.
-        await finish('/api/auth/sso/create', { ticket: ticketValue, username: trimmed })
-        return
-      }
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 404) {
-        onExpired()
-        return
-      }
-      setError(failureMessage(err, 'Could not finish signing in. Please try again.'))
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div className="space-y-4">
-      <h2 className="font-display text-base font-semibold text-text-primary">
-        This {providerLabel} account isn't connected yet
-      </h2>
-      <WarningBanner message={error} tone="red" />
-
-      {step === 'link' ? (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault()
-              const key = linkKey.trim()
-              if (linkName && key) {
-                void finish('/api/auth/sso/link', {
-                  ticket: ticketValue,
-                  username: linkName,
-                  api_key: key,
-                })
-              }
-            }}
-            className="space-y-4"
-          >
-            <fieldset disabled={loading} className="space-y-4">
-              <p className="text-xs text-text-tertiary">
-                An account named {linkName} already exists. Enter its API key to
-                connect {providerLabel} — no re-approval needed if the account is already active.
-              </p>
-
-              <TokenField
-                id="sso-link-apikey"
-                label="API Key"
-                value={linkKey}
-                onChange={(v) => { setLinkKey(v); setError('') }}
-                show={showLinkKey}
-                onToggleShow={() => setShowLinkKey(!showLinkKey)}
-                placeholder="Your existing API key..."
-                optionalLabel={false}
-                autoFocus
-              />
-
-              <Button type="submit" className="w-full" disabled={!linkKey.trim() || loading}>
-                {loading ? 'Connecting...' : 'Connect account'}
-              </Button>
-
-              <p className="text-center text-xs text-text-tertiary">
-                <button
-                  type="button"
-                  onClick={() => { setStep('username'); setError('') }}
-                  className="font-medium text-signal-blue hover:underline"
-                >
-                  Use a different username
-                </button>
-              </p>
-            </fieldset>
-          </form>
-      ) : (
-        <form
-          onSubmit={(e) => {
-            e.preventDefault()
-            void handleContinue()
-          }}
-          className="space-y-4"
-        >
-          <fieldset disabled={loading} className="space-y-4">
-            <div className="space-y-1.5">
-              <UsernameField
-                id="sso-create-username"
-                value={username}
-                onChange={(v) => { setUsername(v); setError('') }}
-                autoFocus
-              />
-              <p className="text-xs text-text-tertiary">
-                {ticket.email_domain && `Signed in with an @${ticket.email_domain} address. `}
-                {username.trim()
-                  ? `Enter your existing RootCoz username to link this sign-in, or a new user "${username.trim()}" will be created in RootCoz.`
-                  : 'Enter your existing RootCoz username to link this sign-in, or enter a new username to create an account in RootCoz.'}
-              </p>
-            </div>
-
-            <Button type="submit" className="w-full" disabled={!username.trim() || loading}>
-              {loading ? 'Checking...' : 'Continue'}
-            </Button>
-          </fieldset>
-        </form>
-      )}
-
-      <p className="text-center text-xs text-text-tertiary">
-        <button type="button" onClick={onDismiss} className="font-medium text-signal-blue hover:underline">
-          Not you? Sign in another way
-        </button>
-      </p>
-    </div>
-  )
-}
-
-function ApiKeyReveal({ apiKey, onAcknowledge }: { apiKey: string; onAcknowledge: () => void }) {
-  const [copied, setCopied] = useState(false)
-
-  return (
-    <div className="space-y-4">
-      <div className="rounded-lg border border-signal-orange/30 bg-signal-orange/10 p-4">
-        <p className="text-sm font-medium text-signal-orange">⚠️ Save this API key — you won't see it again!</p>
-        <p className="mt-1 text-xs text-text-tertiary">You'll need this key to log in. If you lose it, ask an admin to generate a new one.</p>
-      </div>
-      <div className="flex items-center gap-2 rounded-md bg-surface-elevated p-3">
-        <code className="flex-1 font-mono text-sm text-text-primary break-all select-all">{apiKey}</code>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={async () => {
-            try {
-              await navigator.clipboard.writeText(apiKey)
-              setCopied(true)
-              setTimeout(() => setCopied(false), 2000)
-            } catch { /* clipboard not available */ }
-          }}
-        >
-          {copied ? 'Copied!' : 'Copy'}
-        </Button>
-      </div>
-      <Button onClick={onAcknowledge} className="w-full">
-        I've saved my key — Continue
-      </Button>
-    </div>
-  )
+const IDLE_TICKET_LOOKUP: TicketLookupState = {
+  key: '',
+  captured: '',
+  ticket: null,
+  expired: false,
+  failure: '',
 }
 
 export function RegisterPage() {
   const navigate = useNavigate()
   const location = useLocation()
-  const { login, refreshAuth, authenticated, loading: authLoading } = useAuth()
+  const { refreshAuth, authenticated, loading: authLoading } = useAuth()
   const from = (location.state as { from?: { pathname: string; search?: string; hash?: string } } | null)?.from
   const returnTo = from ? `${from.pathname}${from.search || ''}${from.hash || ''}` : '/'
+
   const [mode, setMode] = useState<Mode>('login')
   const [username, setUsername] = useState('')
-  const [apiKey, setApiKey] = useState('')
-  const [showApiKey, setShowApiKey] = useState(false)
   const [newApiKey, setNewApiKey] = useState('')
   /** Set when this page created an account through SSO: the key is shown once. */
   const [ssoCreated, setSsoCreated] = useState<{ next: string } | null>(null)
   const [registrationStatus, setRegistrationStatus] = useState<RegistrationStatus>('active')
   const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [githubToken, setGithubTokenValue] = useState('')
-  const [jiraEmail, setJiraEmailValue] = useState('')
-  const [jiraToken, setJiraTokenValue] = useState('')
-  const [jiraSaToken, setJiraSaTokenValue] = useState('')
   const [pendingCustomMessage, setPendingCustomMessage] = useState('')
-  const [loginCustomMessage, setLoginCustomMessage] = useState('')
+
   // The callback redirects here as /login#sso_ticket=… — rootcoz, not the IdP.
-  // The fragment is never sent with a request, so the ticket stays out of access
-  // logs and Referer headers; the panel posts it back to /ticket, /create, /link.
   const ssoTicketValue = new URLSearchParams(location.hash.replace(/^#/, '')).get('sso_ticket') ?? ''
-  // The ticket the panel posts, remembered from the first render that saw one:
-  // the fragment is stripped as soon as the ticket is redeemed (or fails), so
-  // re-deriving it later would post an empty credential to /create and /link.
-  const [ssoTicketCaptured, setSsoTicketCaptured] = useState(ssoTicketValue)
-  // Read once: the code is a one-shot notice, so it must not reappear after the
-  // person dismisses the panel or switches to Register.
   const [ssoErrorCode] = useState(
     () => new URLSearchParams(location.search).get('sso_error') ?? '',
   )
   const [ssoProviders, setSsoProviders] = useState<SsoProvider[]>([])
-  // The metadata travels with the ticket it describes: a panel drawn from one
-  // ticket's metadata must never finish another ticket's sign-in.
-  const [ssoTicket, setSsoTicket] = useState<{ value: string; data: SsoTicket } | null>(null)
-  const [ssoTicketExpired, setSsoTicketExpired] = useState(false)
-  // A lookup failure that is not expiry leaves the ticket live, so it gets a
-  // retry rather than a provider round trip. Its own state, because it is the
-  // page's state — not a form error.
-  const [ssoTicketFailure, setSsoTicketFailure] = useState('')
-  // A retry request, remembering the captured ticket to re-post. An object, not
-  // the bare value, so pressing it again after a second failure is a new request.
-  const [ssoTicketRetry, setSsoTicketRetry] = useState<{ ticket: string } | null>(null)
-  // Settled once the current ticket's lookup has an answer — right or wrong —
-  // so the spinner shows for the redemption in flight, not for a page with none.
-  const [ssoTicketSettled, setSsoTicketSettled] = useState(ssoTicketValue === '')
-  // Derived, not stored: a ticket that appears without a remount (SPA push,
-  // bfcache restore) must not leave an interactive login form on screen while
-  // its redemption is in flight.
-  const ssoTicketPending = !ssoTicketSettled
+  const [ssoTicketRetry, setSsoTicketRetry] = useState<{ ticket: string; attempt: number } | null>(null)
+  const [ticketLookup, setTicketLookup] = useState<TicketLookupState>(IDLE_TICKET_LOOKUP)
+
+  const activeTicketValue = ssoTicketRetry?.ticket || ssoTicketValue
+  const activeTicketKey = ssoTicketRetry
+    ? `retry:${ssoTicketRetry.attempt}:${ssoTicketRetry.ticket}`
+    : ssoTicketValue
+      ? `hash:${ssoTicketValue}`
+      : ''
+
+  // Derived pending state: true whenever a live ticket request hasn't settled yet.
+  const ssoTicketPending = activeTicketKey !== '' && ticketLookup.key !== activeTicketKey
+  const ssoTicketPanel = !ssoTicketPending ? ticketLookup.ticket : null
+  const ssoTicketExpired = !ssoTicketPending && ticketLookup.expired
+  const ssoTicketFailure = !ssoTicketPending ? ticketLookup.failure : ''
 
   useEffect(() => {
     let active = true
-    api.get<SsoProvidersResponse>('/api/auth/sso/providers')
-      // No public origin means the callback cannot be built, so a button here
-      // would only fail after the person clicked it. The CLI still works — it
-      // joins a relative verification URL itself. Same rule as the Sign-in
-      // methods card and the dashboard prompt, in one place.
-      .then((data) => { if (active) setSsoProviders(browserSignIn(data).providers) })
-      .catch(() => { /* SSO is optional — the password forms stay usable */ })
+    void fetchBrowserSignIn().then((data) => {
+      if (active) setSsoProviders(data.providers)
+    })
     return () => { active = false }
   }, [])
 
   useEffect(() => {
-    // Same one-shot notice rule: `?sso_error=…` is stripped here, or a refresh
-    // (or a step back to that history entry) shows the old failure again.
     stripQueryParams('sso_error')
   }, [])
 
   useEffect(() => {
-    // The fragment's value normally; a retry re-posts the captured one, since
-    // the cleanup below already removed the only copy from the address bar.
-    const ticketValue = ssoTicketValue || ssoTicketRetry?.ticket || ''
-    if (!ticketValue) return
-    setSsoTicketCaptured(ticketValue)
-    setSsoTicketSettled(false)
-    // A new ticket is a new identity: the previous ticket's metadata, its expiry
-    // verdict and its failure must not be shown — or submitted — over this one.
-    setSsoTicket(null)
-    setSsoTicketExpired(false)
-    setSsoTicketFailure('')
-    // POST, never GET: the ticket is a live credential, so it must not travel in
-    // a URL — the same reason it arrives in the fragment. `active` keeps a late
-    // response from setting state after the panel was dismissed.
+    if (!activeTicketValue || !activeTicketKey) return
     let active = true
-    api.post<SsoTicket>('/api/auth/sso/ticket', { ticket: ticketValue })
+    api.post<SsoTicket>('/api/auth/sso/ticket', { ticket: activeTicketValue })
       .then((ticket) => {
         if (!active) return
-        setSsoTicket({ value: ticketValue, data: ticket })
+        setTicketLookup({
+          key: activeTicketKey,
+          captured: activeTicketValue,
+          ticket: { value: activeTicketValue, data: ticket },
+          expired: false,
+          failure: '',
+        })
       })
       .catch((err: unknown) => {
         if (!active) return
-        // 404 means the one-time ticket is gone; anything else (a 5xx, a lost
-        // binding cookie, the network) is not expiry, and saying so would send
-        // the person round the provider again for nothing.
         if (err instanceof ApiError && err.status === 404) {
-          setSsoTicketExpired(true)
+          setTicketLookup({
+            key: activeTicketKey,
+            captured: activeTicketValue,
+            ticket: null,
+            expired: true,
+            failure: '',
+          })
           return
         }
-        setSsoTicketFailure(failureMessage(err, 'Could not check this sign-in. Please try again.'))
+        setTicketLookup({
+          key: activeTicketKey,
+          captured: activeTicketValue,
+          ticket: null,
+          expired: false,
+          failure: extractApiDetail(err) ?? 'Could not check this sign-in. Please try again.',
+        })
       })
       .finally(() => {
         if (!active) return
-        setSsoTicketSettled(true)
-        // Whatever the outcome: a still-live ticket left in the address bar is
-        // visible in the history entry and re-posted on every refresh.
         clearUrlFragment()
       })
     return () => { active = false }
-  }, [ssoTicketValue, ssoTicketRetry])
+  }, [activeTicketValue, activeTicketKey])
 
   useEffect(() => {
-    // A live session must not swallow an SSO attempt: the person followed a
-    // provider link on purpose, so the ticket has to be redeemed first. The
-    // key-reveal state is excluded explicitly — a created account flips
-    // `authenticated` while its one-time key is still on screen, and the reveal
-    // must not be navigated away by the session it just earned.
     if (
       !authLoading &&
       authenticated &&
       !ssoTicketValue &&
-      !ssoTicket &&
+      !ssoTicketPending &&
+      !ssoTicketPanel &&
       !ssoTicketExpired &&
       !ssoTicketFailure &&
       !ssoCreated &&
@@ -439,104 +148,29 @@ export function RegisterPage() {
     navigate,
     returnTo,
     ssoTicketValue,
-    ssoTicket,
+    ssoTicketPending,
+    ssoTicketPanel,
     ssoTicketExpired,
     ssoTicketFailure,
     ssoCreated,
     mode,
   ])
 
-  async function handleRegister(e: FormEvent) {
-    e.preventDefault()
-    const trimmed = username.trim()
-    if (!trimmed) return
-
-    setLoading(true)
-    setError('')
-    try {
-      const result = await api.post<{ username: string; api_key: string; status?: string }>('/api/auth/register', { username: trimmed })
-      setNewApiKey(result.api_key)
-      const isPending = result.status === 'pending'
-      setRegistrationStatus(isPending ? 'pending' : 'active')
-
-      if (isPending) {
-        // Fetch custom approval message
-        api.get<{ custom_message?: string }>('/api/auth/pending-status')
-          .then((data) => { if (data.custom_message) setPendingCustomMessage(data.custom_message) })
-          .catch(() => { /* custom message is optional — non-blocking */ })
-      }
-
-      // Persist tracker tokens if provided
-      const gh = githubToken.trim()
-      const je = jiraEmail.trim()
-      const jt = jiraToken.trim()
-      const jst = jiraSaToken.trim()
-      // Only when something was typed: the server reads an empty field as a
-      // clear, and a keyless account can already hold tracker credentials from
-      // earlier authenticated activity (#294).
-      if (gh || je || jt || jst) await persistTokensToServer(gh, je, jt, jst)
-
-      setMode('key-reveal')
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 400) {
-        const bodyMsg = typeof err.body === 'object' && err.body !== null && 'detail' in err.body
-          ? String((err.body as { detail: string }).detail)
-          : err.message
-        if (/already.*(registered|key|exists|has)/i.test(bodyMsg)) {
-          setMode('login')
-          setError('You already have an API key. Please log in.')
-        } else {
-          setError(bodyMsg)
-        }
-      } else {
-        setError(err instanceof Error ? err.message : 'Registration failed')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function handleLogin(e: FormEvent) {
-    e.preventDefault()
-    const trimmed = username.trim()
-    if (!trimmed || !apiKey.trim()) return
-
-    setLoading(true)
-    setError('')
-    setLoginCustomMessage('')
-    try {
-      await login(trimmed, apiKey.trim())
-      navigate(returnTo, { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
-        const body = typeof err.body === 'object' && err.body !== null ? err.body as Record<string, unknown> : {}
-        const status = typeof body.status === 'string' ? body.status : ''
-        if (err.status === 403 && status === 'pending') {
-          const customMsg = typeof body.custom_message === 'string' ? body.custom_message : ''
-          setError('Your account is awaiting admin approval.')
-          setLoginCustomMessage(customMsg)
-        } else if (err.status === 403 && status === 'rejected') {
-          setError('Your account has been rejected. Contact an admin.')
-        } else {
-          setError('Invalid username or API key.')
-        }
-      } else {
-        setError(err instanceof Error ? err.message : 'Login failed. Check your API key.')
-      }
-    } finally {
-      setLoading(false)
-    }
+  function fetchPendingCustomMessage() {
+    api
+      .get<{ custom_message?: string }>('/api/auth/pending-status')
+      .then((data) => {
+        if (data.custom_message) setPendingCustomMessage(data.custom_message)
+      })
+      .catch(() => { /* custom message is optional — non-blocking */ })
   }
 
   async function handleKeyAcknowledged() {
     if (ssoCreated) {
-      // The session is already set, so `/pending` or the ticket's destination is
-      // where the person belongs — not the registration page's return path.
       navigate(ssoCreated.next, { replace: true })
       return
     }
     if (registrationStatus === 'pending') {
-      // Pending users can't access the app — go to login
       setMode('login')
       return
     }
@@ -551,41 +185,23 @@ export function RegisterPage() {
   function switchMode(next: 'login' | 'register') {
     setMode(next)
     setError('')
-    setLoginCustomMessage('')
   }
 
-  /** Drop the SSO panel and its ticket fragment; the forms come back. */
   function dismissSso() {
-    setSsoTicket(null)
-    setSsoTicketExpired(false)
-    setSsoTicketFailure('')
-    setSsoTicketSettled(true)
-    // Abandoning the panel abandons the credential with it.
-    setSsoTicketCaptured('')
+    setTicketLookup((prev) => ({
+      ...IDLE_TICKET_LOOKUP,
+      key: prev.key,
+    }))
     setSsoTicketRetry(null)
     setError('')
-    // Drops the fragment as well: the ticket must not survive in the URL.
     navigate(location.pathname, { replace: true })
-  }
-
-  /** Re-post the captured ticket — the fragment stays clean, the URL never sees it. */
-  function retrySsoTicket() {
-    setSsoTicketRetry({ ticket: ssoTicketCaptured })
   }
 
   const ssoErrorSentence = ssoErrorCode
     ? ssoErrorMessage(ssoErrorCode, SSO_LOGIN_ERROR_FALLBACK)
     : ''
-  /**
-   * The choice panel's source: the ticket in hand and the metadata that belongs
-   * to it, never a previous ticket's. A ticket that has only just arrived has
-   * no metadata yet, and the old one would name the old provider over a live
-   * credential — and could submit the new ticket as that identity.
-   */
-  const ssoTicketPanel =
-    ssoTicket && ssoTicket.value === (ssoTicketValue || ssoTicketCaptured) ? ssoTicket : null
   const ssoProviderLabel = ssoTicketPanel
-    ? ssoProviders.find((p) => p.name === ssoTicketPanel.data.provider)?.display_name ?? ssoTicketPanel.data.provider
+    ? resolveProviderDisplayName(ssoTicketPanel.data.provider, ssoProviders)
     : ''
 
   const subtitle = ssoTicketPending || ssoTicketPanel || ssoTicketFailure || ssoTicketExpired
@@ -629,31 +245,20 @@ export function RegisterPage() {
                   ticketValue={ssoTicketPanel.value}
                   providerLabel={ssoProviderLabel}
                   nextPath={returnTo}
-                  onExpired={() => { setSsoTicket(null); setSsoTicketExpired(true) }}
+                  onExpired={() =>
+                    setTicketLookup((prev) => ({ ...prev, ticket: null, expired: true }))
+                  }
                   onDismiss={dismissSso}
                   onCreated={(apiKey, destination, status) => {
-                    // The account exists and the ticket is spent: drop the panel,
-                    // or it keeps winning over the reveal below, and drop the
-                    // fragment so the spent ticket does not linger in the URL.
-                    setSsoTicket(null)
+                    setTicketLookup((prev) => ({
+                      ...IDLE_TICKET_LOOKUP,
+                      key: prev.key,
+                    }))
                     clearUrlFragment()
                     setNewApiKey(apiKey)
-                    // A pending account sees the same "waiting for approval" note
-                    // registration shows, not a bare key followed by a redirect —
-                    // including the deployment's own message, which registration
-                    // fetches and this path used to skip.
                     const pending = status !== 'active'
                     setRegistrationStatus(pending ? 'pending' : 'active')
-                    if (pending) {
-                      api
-                        .get<{ custom_message?: string }>('/api/auth/pending-status')
-                        .then((data) => {
-                          if (data.custom_message) setPendingCustomMessage(data.custom_message)
-                        })
-                        .catch(() => {
-                          /* the message is optional — non-blocking */
-                        })
-                    }
+                    if (pending) fetchPendingCustomMessage()
                     setSsoCreated({ next: destination })
                     setMode('key-reveal')
                   }}
@@ -666,7 +271,17 @@ export function RegisterPage() {
                     Your sign-in link is still valid. Try again — no need to go back to
                     your provider.
                   </p>
-                  <Button className="w-full" onClick={retrySsoTicket}>Try again</Button>
+                  <Button
+                    className="w-full"
+                    onClick={() =>
+                      setSsoTicketRetry((prev) => ({
+                        ticket: ticketLookup.captured,
+                        attempt: (prev?.attempt ?? 0) + 1,
+                      }))
+                    }
+                  >
+                    Try again
+                  </Button>
                   <Button variant="outline" className="w-full" onClick={dismissSso}>Back to sign in</Button>
                 </div>
               ) : ssoTicketExpired ? (
@@ -678,105 +293,44 @@ export function RegisterPage() {
                   <Button className="w-full" onClick={dismissSso}>Back to sign in</Button>
                 </div>
               ) : mode === 'key-reveal' ? (
-                <>
-                  <h2 className="mb-4 font-display text-base font-semibold text-text-primary">Registration Complete</h2>
-                  <ApiKeyReveal apiKey={newApiKey} onAcknowledge={handleKeyAcknowledged} />
-                  {registrationStatus === 'pending' && (
-                    <div className="mt-4 rounded-md border border-signal-amber/30 bg-signal-amber/10 p-3">
-                      <p className="text-xs font-medium text-signal-amber">
-                        Your account is pending admin approval. You can save your API key now, but you won't be able to log in until an admin approves your account.
-                      </p>
-                      <CustomMessageBanner message={pendingCustomMessage} className="mt-2" />
-                    </div>
-                  )}
-                </>
+                <ApiKeyReveal
+                  apiKey={newApiKey}
+                  pending={registrationStatus === 'pending'}
+                  pendingCustomMessage={pendingCustomMessage}
+                  onAcknowledge={handleKeyAcknowledged}
+                />
               ) : mode === 'register' ? (
-                <form onSubmit={handleRegister} className="space-y-4">
-                  <fieldset disabled={loading} className="space-y-4">
-                    <WarningBanner message={error} tone="red" />
-
-                    <div className="space-y-1.5">
-                      <UsernameField
-                        id="reg-username"
-                        value={username}
-                        onChange={(v) => { setUsername(v); setError('') }}
-                        autoFocus
-                      />
-                      <p className="text-xs text-text-tertiary">Choose a username to create your account. You'll receive an API key for future logins.</p>
-                    </div>
-
-                    <TrackerTokensFields
-                      githubToken={githubToken}
-                      onGithubTokenChange={setGithubTokenValue}
-                      jiraEmail={jiraEmail}
-                      onJiraEmailChange={setJiraEmailValue}
-                      jiraToken={jiraToken}
-                      onJiraTokenChange={setJiraTokenValue}
-                      jiraSaToken={jiraSaToken}
-                      onJiraSaTokenChange={setJiraSaTokenValue}
-                      idPrefix="reg"
-                    />
-
-                    <NotificationToggle />
-
-                    <Button type="submit" className="w-full" disabled={!username.trim() || loading}>
-                      {loading ? 'Registering...' : 'Register'}
-                    </Button>
-
-                    <SsoProviderButtons providers={ssoProviders} returnTo={returnTo} />
-
-                    <p className="text-center text-xs text-text-tertiary">
-                      Already have an account?{' '}
-                      <button type="button" onClick={() => switchMode('login')} className="text-signal-blue hover:underline font-medium">
-                        Log in
-                      </button>
-                    </p>
-                  </fieldset>
-                </form>
+                <RegistrationForm
+                  username={username}
+                  onUsernameChange={setUsername}
+                  error={error}
+                  onErrorChange={setError}
+                  ssoProviders={ssoProviders}
+                  returnTo={returnTo}
+                  onRegistered={(apiKey, isPending) => {
+                    setNewApiKey(apiKey)
+                    setRegistrationStatus(isPending ? 'pending' : 'active')
+                    if (isPending) fetchPendingCustomMessage()
+                    setMode('key-reveal')
+                  }}
+                  onAlreadyRegistered={() => {
+                    setMode('login')
+                    setError('You already have an API key. Please log in.')
+                  }}
+                  onSwitchToLogin={() => switchMode('login')}
+                />
               ) : (
-                /* mode === 'login' */
-                <div className="space-y-4">
-                  <form onSubmit={handleLogin} className="space-y-4">
-                    <fieldset disabled={loading} className="space-y-4">
-                      <WarningBanner message={ssoErrorSentence} />
-                      <WarningBanner message={error} />
-
-                      <CustomMessageBanner message={loginCustomMessage} />
-
-                      <UsernameField
-                        id="login-username"
-                        value={username}
-                        onChange={(v) => { setUsername(v); setError('') }}
-                        autoFocus={!username}
-                      />
-
-                      <TokenField
-                        id="login-apikey"
-                        label="API Key"
-                        value={apiKey}
-                        onChange={(v) => { setApiKey(v); setError('') }}
-                        show={showApiKey}
-                        onToggleShow={() => setShowApiKey(!showApiKey)}
-                        placeholder="Enter your API key..."
-                        optionalLabel={false}
-                        autoFocus={!!username}
-                      />
-
-                      <Button type="submit" className="w-full" disabled={!username.trim() || !apiKey.trim() || loading}>
-                        {loading ? 'Logging in...' : 'Log in'}
-                      </Button>
-
-                      <p className="text-center text-xs text-text-tertiary">
-                        Don't have an account?{' '}
-                        <button type="button" onClick={() => switchMode('register')} className="text-signal-blue hover:underline font-medium">
-                          Register
-                        </button>
-                      </p>
-                    </fieldset>
-                  </form>
-
-                  <SsoProviderButtons providers={ssoProviders} returnTo={returnTo} />
-                </div>
+                <LoginForm
+                  username={username}
+                  onUsernameChange={setUsername}
+                  error={error}
+                  onErrorChange={setError}
+                  ssoErrorSentence={ssoErrorSentence}
+                  ssoProviders={ssoProviders}
+                  returnTo={returnTo}
+                  onSuccess={() => navigate(returnTo, { replace: true })}
+                  onSwitchToRegister={() => switchMode('register')}
+                />
               )}
             </CardContent>
           </Card>

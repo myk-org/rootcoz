@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from fastapi import Request
 
 from rootcoz.auth.api_key import ApiKeyStrategy
-from rootcoz.auth.base import AuthContext, AuthIdentity, AuthStrategy
+from rootcoz.auth.base import AuthContext, AuthIdentity, AuthSideEffects, AuthStrategy
 from rootcoz.auth.proxy import ProxyStrategy
 from rootcoz.auth.session import SessionStrategy
 from rootcoz.config import Settings
@@ -64,25 +66,21 @@ def may_replace(identity: AuthIdentity | None, strategy: AuthStrategy) -> bool:
     )
 
 
-async def resolve_identity(request: Request, settings: Settings) -> AuthIdentity | None:
-    """Resolve the caller through the ordered chain.
+@dataclass(frozen=True)
+class AuthResolution:
+    """Result of running the credential strategy chain for one request."""
+
+    identity: AuthIdentity | None
+    side_effects: AuthSideEffects
+
+
+async def resolve_auth(request: Request, settings: Settings) -> AuthResolution:
+    """Resolve the caller and any strategy side effects through the ordered chain.
 
     :func:`may_replace` decides whether a later strategy may take over what an
     earlier one resolved: a non-admin session yields to a Bearer key, an admin
     session is final, and the trusted-proxy header only applies when nothing
     else authenticated the request.
-
-    A strategy may have written to ``request.state`` while resolving —
-    ``renew_session_token`` after a session renewal, ``set_proxy_cookie`` for a
-    proxy identity — and the caller applies those to the response. A strategy
-    that returns ``None`` never clears what an earlier strategy resolved.
-
-    Args:
-        request: The incoming request.
-        settings: Settings for this request.
-
-    Returns:
-        The resolved identity, or ``None`` when no strategy authenticated it.
     """
     ctx = AuthContext(request=request, settings=settings)
     current: AuthIdentity | None = None
@@ -96,4 +94,9 @@ async def resolve_identity(request: Request, settings: Settings) -> AuthIdentity
             # A credential that did not match never clears what already resolved.
             continue
         current = identity
-    return current
+    return AuthResolution(identity=current, side_effects=ctx.side_effects)
+
+
+async def resolve_identity(request: Request, settings: Settings) -> AuthIdentity | None:
+    """Resolve the caller through the ordered chain (identity only)."""
+    return (await resolve_auth(request, settings)).identity
