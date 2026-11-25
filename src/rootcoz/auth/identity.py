@@ -364,15 +364,22 @@ async def link_existing(
         The resolution for that account.
 
     Raises:
-        AuthError: ``identity_conflict`` when the subject is already linked to
-            a different account or the account already holds a different subject
-            for this provider; ``account_missing`` when the account no longer
-            exists; ``account_<reason>`` when the account may not act at all
-            (``account_pending``, ``account_rejected``, ``account_disabled``,
-            ``account_locked``) — storage re-reads that inside the write, so a
-            block committed after the caller's own check still wins;
-            ``ticket_expired`` when the ticket is no longer live.
+        AuthError: ``bootstrap_admin_cannot_link`` when ``username`` is the
+            reserved bootstrap admin; ``identity_conflict`` when the subject is
+            already linked to a different account or the account already holds a
+            different subject for this provider; ``account_missing`` when the
+            account no longer exists; ``account_<reason>`` when the account may
+            not act at all (``account_pending``, ``account_rejected``,
+            ``account_disabled``, ``account_locked``) — storage re-reads that
+            inside the write, so a block committed after the caller's own check
+            still wins; ``ticket_expired`` when the ticket is no longer live.
     """
+    if username.strip().lower() == RESERVED_ADMIN_USERNAME:
+        raise AuthError(
+            "bootstrap_admin_cannot_link",
+            "The bootstrap admin has no account to link",
+            subject=username,
+        )
     try:
         await storage.add_user_identity(
             username,

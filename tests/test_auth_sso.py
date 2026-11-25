@@ -3803,6 +3803,118 @@ async def test_an_expired_session_cannot_start_or_finish_a_link(
         ]
 
 
+async def _insert_legacy_admin_row() -> None:
+    """Seed a pre-SSO legacy ``users`` row named ``admin``."""
+    async with storage._connect_db() as db:
+        await db.execute(
+            "INSERT INTO users (username, api_key_hash, role)"
+            " VALUES ('admin', NULL, 'operator')"
+        )
+        await db.commit()
+
+
+async def _identity_row_count() -> int:
+    """Count rows in ``user_identities`` directly."""
+    async with storage._connect_db() as db:
+        cursor = await db.execute("SELECT COUNT(*) AS n FROM user_identities")
+        row = await cursor.fetchone()
+        return int(row["n"])
+
+
+async def test_link_existing_refuses_reserved_admin(temp_db_path: Path) -> None:
+    """``auth.identity.link_existing`` translates reserved ``admin`` to AuthError."""
+    for _client in make_app_client(temp_db_path, _SSO_ENV):
+        await _insert_legacy_admin_row()
+
+        with pytest.raises(AuthError) as exc_info:
+            await auth_identity.link_existing(
+                username="Admin",
+                provider="google",
+                subject="sub-admin",
+                email="admin@example.com",
+            )
+
+        assert exc_info.value.reason == "bootstrap_admin_cannot_link"
+        assert await _identity_row_count() == 0
+
+
+@pytest.mark.parametrize("has_legacy_row", [False, True])
+async def test_bootstrap_admin_cannot_start_link_from_settings(
+    temp_db_path: Path, has_legacy_row: bool
+) -> None:
+    """Bootstrap admin is refused at ``POST /api/auth/sso/{provider}/login``.
+
+    No IdP round-trip is started and ``bootstrap_admin_cannot_link`` is audited,
+    whether or not a legacy ``users`` row for ``admin`` exists.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        if has_legacy_row:
+            await _insert_legacy_admin_row()
+        admin_login(client)
+
+        with patch.object(
+            GoogleProvider, "authorization_url", autospec=True
+        ) as authorization_url:
+            response = client.post(
+                "/api/auth/sso/google/login?next=/settings",
+                headers=_SAME_ORIGIN,
+                follow_redirects=False,
+            )
+
+        assert authorization_url.await_count == 0
+        assert response.status_code == 400
+        assert "bootstrap admin" in response.json()["detail"]
+        assert not response.cookies.get(sso_state.STATE_COOKIE)
+        refusal = await _last_sso_refusal(temp_db_path)
+        assert refusal["details"]["reason"] == "bootstrap_admin_cannot_link"
+        assert refusal["actor"] == "admin"
+
+
+@pytest.mark.parametrize(
+    ("has_legacy_row", "allow_list"),
+    [
+        (False, None),
+        (True, None),
+        (True, "someone-else"),
+    ],
+)
+async def test_bootstrap_admin_cannot_finish_link_callback(
+    temp_db_path: Path, has_legacy_row: bool, allow_list: str | None
+) -> None:
+    """A forged or live link callback sealed to ``admin`` is refused cleanly.
+
+    Even when a legacy ``users`` row named ``admin`` exists (with or without
+    ``ALLOWED_USERS`` configured), the callback refuses with a 303 error
+    redirect, audits ``bootstrap_admin_cannot_link``, and inserts no identity.
+    """
+    env = dict(_SSO_ENV)
+    if allow_list is not None:
+        env["ALLOWED_USERS"] = allow_list
+    for client in make_app_client(temp_db_path, env):
+        if has_legacy_row:
+            await _insert_legacy_admin_row()
+        admin_login(client)
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="admin", next_path="/settings"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        assert response.headers["location"] == "/settings?sso_error=denied"
+        assert await _identity_row_count() == 0
+        refusal = await _last_sso_refusal(temp_db_path)
+        assert refusal["details"]["reason"] == "bootstrap_admin_cannot_link"
+        assert refusal["actor"] == "admin"
+
+
 async def test_an_internal_link_reason_never_reaches_the_url(
     temp_db_path: Path,
 ) -> None:

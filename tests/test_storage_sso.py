@@ -1408,3 +1408,29 @@ async def test_list_identities_for_users_mixed(
         # carol: one identity
         assert len(result["carol"]) == 1
         assert result["carol"][0]["provider"] == "google"
+
+
+@pytest.mark.parametrize("username", ["admin", "Admin", " admin "])
+async def test_add_user_identity_refuses_reserved_admin_even_with_legacy_row(
+    setup_test_db: Path, username: str
+) -> None:
+    """Defense-in-depth: ``admin`` can never receive an SSO identity row.
+
+    Even if a pre-SSO database still carries a legacy ``users`` row with
+    ``username='admin'``, ``add_user_identity`` refuses before touching the DB
+    and leaves ``user_identities`` empty.
+    """
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        async with storage._connect_db() as db:
+            await db.execute(
+                "INSERT INTO users (username, api_key_hash, role)"
+                " VALUES ('admin', NULL, 'operator')"
+            )
+            await db.commit()
+
+        with pytest.raises(ValueError, match="reserved 'admin'"):
+            await storage.add_user_identity(
+                username, "google", "sub-admin", email="admin@example.com"
+            )
+
+        assert await _raw_identity_rows() == []

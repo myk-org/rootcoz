@@ -10484,12 +10484,12 @@ async def add_user_identity(
         The stored identity.
 
     Raises:
-        ValueError: When the provider is unknown, the account does not exist,
-            the account may not act at all (``account_pending``,
-            ``account_rejected``, ``account_disabled``, ``account_locked``), the
-            subject is already linked to another account, the account already
-            has a different subject for this provider, or the ticket was no
-            longer live.
+        ValueError: When the provider is unknown, ``username`` is the reserved
+            ``admin`` account, the account does not exist, the account may not
+            act at all (``account_pending``, ``account_rejected``,
+            ``account_disabled``, ``account_locked``), the subject is already
+            linked to another account, the account already has a different
+            subject for this provider, or the ticket was no longer live.
     """
     _validate_sso_provider(provider)
     _validate_identity_subject(subject)
@@ -10497,6 +10497,9 @@ async def add_user_identity(
     # predates today's pattern must stay linkable. Creation is where the name
     # rules apply (``create_user`` / ``create_user_with_identity``).
     username = _normalize_username(username)
+    if username == "admin":
+        msg = "Cannot link an identity to the reserved 'admin' account"
+        raise ValueError(msg)
     scrubbed_claims = _scrub_claims(raw_claims_json)
 
     async def _attempt() -> dict[str, Any]:

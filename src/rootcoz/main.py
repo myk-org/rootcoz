@@ -19163,6 +19163,12 @@ _SSO_NAME_DETAIL = "That name cannot be used"
 #: the audit row.
 _SSO_ACCOUNT_DETAIL = "Account cannot be used to sign in"
 
+#: 400 detail when the bootstrap admin tries to attach an SSO identity.
+_BOOTSTRAP_ADMIN_LINK_DETAIL = (
+    "The bootstrap admin has no account to link; sign in with a"
+    " registered admin account instead"
+)
+
 #: Status per refusal reason for the two ticket endpoints, so a policy refusal
 #: (domain / verification) does not read as a bad request or a conflict.
 _SSO_ERROR_STATUS: dict[str, int] = {
@@ -19469,6 +19475,17 @@ async def _sso_start(request: Request, provider: str, mode: str) -> RedirectResp
         # would silently become a login, which is not what was asked for.
         await _audit_sso_refusal(request, provider, "link_requires_session")
         return _sso_error_redirect("link_requires_session")
+    if (
+        mode == auth_sso_state.MODE_LINK
+        and caller.strip().lower() == RESERVED_ADMIN_USERNAME
+    ):
+        # The bootstrap admin lives outside the users table and cannot hold an
+        # SSO identity; refuse before starting an IdP round-trip, even if a
+        # pre-SSO database still carries a legacy ``users`` row named ``admin``.
+        await _audit_sso_refusal(
+            request, provider, "bootstrap_admin_cannot_link", subject=caller
+        )
+        raise HTTPException(status_code=400, detail=_BOOTSTRAP_ADMIN_LINK_DETAIL)
     # Linking and unlinking are the same class of account-security write, and
     # unlinking already requires a reviewer: a viewer who may not remove a
     # method must not be able to add one either.
@@ -19610,6 +19627,14 @@ async def _sso_finish_link(
             request, provider, "link_session_changed", subject=username
         )
         return _link_error_redirect(destination, "link_session_changed")
+    if username.strip().lower() == RESERVED_ADMIN_USERNAME:
+        # The bootstrap admin lives outside the users table and cannot hold an
+        # SSO identity — even if a pre-SSO database still carries a legacy
+        # ``users`` row named ``admin``.
+        await _audit_sso_refusal(
+            request, provider, "bootstrap_admin_cannot_link", subject=username
+        )
+        return _link_error_redirect(destination, "bootstrap_admin_cannot_link")
 
     # The SSO surfaces are public, so the middleware's account gate never ran for
     # this request: it is applied here, on the row re-read with the session. A
@@ -19617,7 +19642,7 @@ async def _sso_finish_link(
     # until an admin acts — the same two decisions the middleware takes, from
     # ``auth/approval`` so the two gates cannot drift. ``locked`` is a login-only
     # guard and is deliberately not applied to a live session; the bootstrap admin
-    # has no row and is unaffected.
+    # was already refused above.
     user = await storage.get_user_by_username(username)
     status = await storage.get_user_status(username) or ""
     if auth_approval.is_approval_blocked(status):
@@ -20234,7 +20259,9 @@ async def sso_link_account(request: Request) -> Response:
     # Verify before spending the ticket: a mistyped key must not cost another
     # IdP trip either.
     verified = await auth_password.PasswordLogin().verify(username, api_key, settings)
-    if verified.authenticated and verified.account is None:
+    if verified.authenticated and (
+        verified.account is None or username == RESERVED_ADMIN_USERNAME
+    ):
         # The bootstrap admin authenticates against ADMIN_KEY and has no users
         # row, so there is nothing to link an identity to. Say that, instead of
         # calling a valid credential invalid.
@@ -20243,10 +20270,7 @@ async def sso_link_account(request: Request) -> Response:
         )
         raise HTTPException(
             status_code=400,
-            detail=(
-                "The bootstrap admin has no account to link; sign in with a"
-                " registered admin account instead"
-            ),
+            detail=_BOOTSTRAP_ADMIN_LINK_DETAIL,
         )
     if not verified.authenticated:
         # Same guessing guard as the password login: this endpoint verifies the
