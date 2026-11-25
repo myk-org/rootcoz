@@ -96,7 +96,17 @@ interface ServerSetting {
   multiple?: boolean
   allow_custom?: boolean
   jira_verified_method?: string
+  server_only?: boolean
+  derived?: boolean
   persistable?: boolean
+  /** Canonical tab order index from the backend settings registry (#663). */
+  category_order?: number
+  /** Logical setting group from the backend registry (e.g. 'transcripts'). */
+  group?: string
+  /** Optional inline hint text from the backend registry. */
+  hint?: string
+  /** Value -> warning text map for non-obvious values (e.g. '0' waits forever). */
+  value_traps?: Record<string, string>
   /**
    * Render only while the controlling setting holds one of these values
    * (#585, e.g. the Jira fields by `jira_auth_mode`). Older servers omit it,
@@ -129,21 +139,6 @@ interface SettingsImportResult {
   dry_run?: boolean
 }
 
-// Deployment-level settings first, then the two CI sources adjacent and before what consumes their artifacts, then analysis/output, then the operator-facing categories (mirrors backend _SETTINGS_CATEGORIES order).
-const CATEGORY_ORDER = [
-  'Server', 'Jenkins', 'Prow', 'Analysis', 'Jira', 'GitHub issues',
-  'Report Portal', 'Datadog', 'Auth & Security', 'Notifications',
-  'Data & retention', 'Repos & workspace', 'Logging', 'Advanced',
-]
-
-// The Sidecar rows whose live transcript directory usage the card below them
-// reports (a recording directory plus its two retention budgets).
-const TRANSCRIPT_SETTING_KEYS = new Set([
-  'pi_sidecar_transcripts_dir',
-  'pi_sidecar_transcripts_max_age_days',
-  'pi_sidecar_transcripts_max_size_mb',
-])
-
 // Categories with a test-connection endpoint (category -> integration id).
 const TEST_INTEGRATIONS: Record<string, string> = {
   Jenkins: 'jenkins',
@@ -172,21 +167,19 @@ const JIRA_METHODS: { id: JiraMethod; label: string }[] = [
 
 const jiraMethodLabel = (id: JiraMethod) => JIRA_METHODS.find(m => m.id === id)!.label
 
-// Locator/TLS fields shared by oauth and atst (same Atlassian gateway tenant).
-const JIRA_SHARED_FIELDS = new Set(['atlassian_oauth_cloud_id', 'jira_oauth_ssl_verify'])
-
-function jiraSharedFieldHint(method: JiraMethod | null, key: string): string | undefined {
-  if (!method || !JIRA_SHARED_FIELDS.has(key)) return undefined
-  const other = method === 'oauth' ? 'atst' : method === 'atst' ? 'oauth' : null
+function jiraSharedFieldHint(method: JiraMethod | null, setting: ServerSetting): string | undefined {
+  if (!method || setting.visible_when?.key !== 'jira_auth_mode' || setting.visible_when.in.length < 2) {
+    return undefined
+  }
+  const other = parseJiraMethod(setting.visible_when.in.find(m => m !== method))
   return other ? `Shared with the ${jiraMethodLabel(other)} method — both target the same Atlassian gateway tenant.` : undefined
 }
 
-// Per-setting hints for fields whose meaning is not obvious from the description.
-function settingHint(category: string, method: JiraMethod | null, key: string): string | undefined {
-  if (key === 'login_lockout_threshold') {
-    return 'Failed logins before the account locks. 0 disables lockout.'
-  }
-  return category === 'Jira' ? jiraSharedFieldHint(method, key) : undefined
+// Per-setting hints come from backend registry metadata, plus the dynamic
+// cross-method hint for Jira fields shared by multiple auth modes.
+function settingHint(category: string, method: JiraMethod | null, setting: ServerSetting): string | undefined {
+  if (setting.hint) return setting.hint
+  return category === 'Jira' ? jiraSharedFieldHint(method, setting) : undefined
 }
 
 // Why the threshold cannot be edited while the switch is off (E2E-F34).
@@ -203,19 +196,12 @@ function visibleWhenMet(setting: ServerSetting, valueOf: (key: string) => string
   return when.in.includes(valueOf(when.key))
 }
 
-// A value whose default reads like "disabled" but is not. Rendered next to the
-// control as well as in the tooltip — a tooltip is invisible until hovered
-// (#585 decision 7).
+// Value warnings delivered from backend registry metadata (#585, #663),
+// rendered next to the control so non-obvious values like "0 waits forever"
+// are visible without hovering.
 function valueTrap(setting: ServerSetting, value: string): string | undefined {
-  if (setting.key === 'max_wait_minutes' && value === '0') {
-    return '0 means wait forever — the build is polled until it finishes.'
-  }
-  return undefined
+  return setting.value_traps?.[value]
 }
-
-// Server-only settings (env/CLI-owned, never persistable to the DB) — the
-// known set, kept alongside the backend's server-only metadata marker.
-const SERVER_ONLY_SETTING_KEYS = new Set(['admin_key', 'db_path', 'debug'])
 
 // How long a ?highlight= row stays marked after the audit link lands on it.
 const HIGHLIGHT_MS = 2500
@@ -1222,16 +1208,18 @@ export function ServerSettingsPage() {
   // ---- Group & filter ----
   const allGroups: CategoryGroup[] = useMemo(() => {
     const categoryMap = new Map<string, ServerSetting[]>()
+    const orderMap = new Map<string, number>()
     for (const s of state.settings) {
       const cat = s.category || 'General'
       if (!categoryMap.has(cat)) categoryMap.set(cat, [])
       categoryMap.get(cat)!.push(s)
+      if (typeof s.category_order === 'number') {
+        const prev = orderMap.get(cat)
+        orderMap.set(cat, prev === undefined ? s.category_order : Math.min(prev, s.category_order))
+      }
     }
 
-    const order = (cat: string) => {
-      const idx = CATEGORY_ORDER.indexOf(cat)
-      return idx === -1 ? CATEGORY_ORDER.length : idx
-    }
+    const order = (cat: string) => orderMap.get(cat) ?? Number.MAX_SAFE_INTEGER
     return Array.from(categoryMap.entries())
       .sort(([a], [b]) => order(a) - order(b) || a.localeCompare(b))
       .map(([category, settings]) => ({ category, settings }))
@@ -1368,7 +1356,7 @@ export function ServerSettingsPage() {
   // is hardcoded here and a rename can never orphan it again (#585 E2E).
   const showsTranscriptsUsage = (category: string, settings: ServerSetting[]) =>
     !state.collapsedCategories.has(category)
-    && settings.some(s => TRANSCRIPT_SETTING_KEYS.has(s.key))
+    && settings.some(s => s.group === 'transcripts')
   // Only fetched while the transcript rows are actually on screen: the probe
   // samples CPU and walks the data directory, which no unrelated tab pays for.
   const transcriptsUsageVisible = groups.some(
@@ -1453,7 +1441,7 @@ export function ServerSettingsPage() {
     // backend's persistable flag is authoritative — derived settings like
     // sidecar_url must not offer persistence even when env-sourced (#352).
     const saveToDbNode = (s: ServerSetting) =>
-      s.source === 'env' && !SERVER_ONLY_SETTING_KEYS.has(s.key) && s.persistable !== false ? (
+      s.source === 'env' && !s.server_only && s.persistable !== false ? (
         <SaveToDbButton saving={persistingKey === s.key} onClick={() => handlePersistEnv(s.key)} />
       ) : null
     // Search must be able to find every Jira field, so `visible_when` hiding
@@ -1823,7 +1811,7 @@ export function ServerSettingsPage() {
           key={setting.key}
           setting={setting}
           saveToDbNode={saveToDbNode(setting)}
-          hint={lockoutOff ? LOCKOUT_OFF_HINT : settingHint(category, persistedJiraMethod, setting.key)}
+          hint={lockoutOff ? LOCKOUT_OFF_HINT : settingHint(category, persistedJiraMethod, setting)}
           disabled={lockoutOff}
           isEditing={state.editingKey === setting.key}
           editValue={state.editValue}

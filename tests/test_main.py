@@ -321,7 +321,7 @@ def _no_key_providers(monkeypatch) -> None:
     otherwise feed real provider IDs into AMBIENT_AUTH_PROVIDERS validation.
     """
     monkeypatch.setattr(
-        "rootcoz.main.supported_key_providers", AsyncMock(return_value=[])
+        "rootcoz.ai_client.supported_key_providers", AsyncMock(return_value=[])
     )
 
 
@@ -16549,7 +16549,7 @@ class TestAdminSettingsEndpoints:
         """A provider the sidecar reports as configured is accepted (#379 J08)."""
         _no_key_providers(monkeypatch)
         monkeypatch.setattr(
-            "rootcoz.main.supported_key_providers",
+            "rootcoz.ai_client.supported_key_providers",
             AsyncMock(return_value=["google-vertex-claude"]),
         )
         # ADC/Vertex authenticates it — no <PROVIDER>_API_KEY anywhere
@@ -16635,10 +16635,12 @@ class TestAdminSettingsEndpoints:
 
         monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
         monkeypatch.setattr(
-            "rootcoz.main.supported_key_providers", AsyncMock(return_value=[])
+            "rootcoz.ai_client.supported_key_providers", AsyncMock(return_value=[])
         )
         _provider_auth_status(monkeypatch, {})
-        with capture_main_logs(caplog, logging.WARNING):
+        with capture_main_logs(
+            caplog, logging.WARNING, logger="rootcoz.settings_registry"
+        ):
             response = test_client.put(
                 "/api/admin/settings",
                 json={"settings": {"ambient_auth_providers": "Some New Provider"}},
@@ -16661,7 +16663,9 @@ class TestAdminSettingsEndpoints:
         monkeypatch.setattr(
             "rootcoz.ai_client.deployment_provider_credentials", lambda: None
         )
-        with capture_main_logs(caplog, logging.WARNING):
+        with capture_main_logs(
+            caplog, logging.WARNING, logger="rootcoz.settings_registry"
+        ):
             response = test_client.put(
                 "/api/admin/settings",
                 json={"settings": {"ambient_auth_providers": "claude"}},
@@ -17498,7 +17502,9 @@ class TestEnumeratedSettings:
         from rootcoz import main
 
         monkeypatch.setattr(main, "_EXPORTER_CLASSES", {})
-        with capture_main_logs(caplog, logging.WARNING):
+        with capture_main_logs(
+            caplog, logging.WARNING, logger="rootcoz.settings_registry"
+        ):
             response = test_client.put(
                 "/api/admin/settings",
                 json={"settings": {"auto_push_exporters": "not-loaded-yet"}},

@@ -84,12 +84,33 @@ interface TestSetting {
   multiple?: boolean
   allow_custom?: boolean
   jira_verified_method?: string
+  server_only?: boolean
   persistable?: boolean
   derived?: boolean
+  category_order?: number
+  group?: string
+  hint?: string
+  value_traps?: Record<string, string>
   visible_when?: { key: string; in: string[] }
 }
 
+const FIXTURE_CATEGORY_ORDER = [
+  'Server', 'Jenkins', 'Prow', 'Analysis', 'Jira', 'GitHub issues',
+  'Report Portal', 'Datadog', 'Auth & Security', 'Notifications',
+  'Data & retention', 'Repos & workspace', 'Logging', 'Advanced',
+]
+
+const FIXTURE_TRANSCRIPT_KEYS = new Set([
+  'pi_sidecar_transcripts_dir',
+  'pi_sidecar_transcripts_max_age_days',
+  'pi_sidecar_transcripts_max_size_mb',
+])
+
+const FIXTURE_SERVER_ONLY_KEYS = new Set(['admin_key', 'db_path', 'debug'])
+
 function mk(key: string, category: string, value = '', extra: Partial<TestSetting> = {}): TestSetting {
+  const categoryOrder = FIXTURE_CATEGORY_ORDER.indexOf(category)
+  const isServerOnly = FIXTURE_SERVER_ONLY_KEYS.has(key)
   return {
     key,
     label: key.replace(/_/g, ' '),
@@ -99,8 +120,18 @@ function mk(key: string, category: string, value = '', extra: Partial<TestSettin
     description: `Description for ${key}`,
     type: 'string',
     category,
+    ...(categoryOrder !== -1 ? { category_order: categoryOrder } : {}),
+    ...(FIXTURE_TRANSCRIPT_KEYS.has(key) ? { group: 'transcripts' } : {}),
+    ...(key === 'login_lockout_threshold'
+      ? { hint: 'Failed logins before the account locks. 0 disables lockout.' }
+      : {}),
+    ...(key === 'max_wait_minutes'
+      ? { value_traps: { '0': '0 means wait forever — the build is polled until it finishes.' } }
+      : {}),
     sensitive: false,
     restart_required: false,
+    server_only: isServerOnly,
+    persistable: !isServerOnly,
     source: 'default',
     updated_by: '',
     updated_at: '',
@@ -3659,5 +3690,58 @@ describe('Editing a configured unrevealed SSO client secret (#585 Qodo finding 1
 
     // Save is enabled (it has a real value)
     expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled()
+  })
+})
+
+describe('ServerSettingsPage backend-driven registry metadata (#663)', () => {
+  it('orders tabs strictly by backend category_order instead of a hardcoded list', async () => {
+    get.mockResolvedValue([
+      mk('zeta_setting', 'Zeta', '1', { category_order: 0 }),
+      mk('alpha_setting', 'Alpha', '2', { category_order: 1 }),
+      mk('beta_setting', 'Beta', '3', { category_order: 2 }),
+    ] as never)
+
+    renderPage()
+    await waitForRow('zeta_setting')
+
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
+      'Zeta',
+      'Alpha',
+      'Beta',
+    ])
+  })
+
+  it('renders backend-supplied hint and value_traps for any setting key', async () => {
+    get.mockResolvedValue([
+      mk('custom_budget', 'Server', '0', {
+        type: 'integer',
+        category_order: 0,
+        hint: 'Custom backend hint text.',
+        value_traps: { '0': '0 means unlimited custom budget.' },
+      }),
+    ] as never)
+
+    renderPage()
+    await waitForRow('custom_budget')
+
+    expect(screen.getByText('Custom backend hint text.')).toBeInTheDocument()
+    expect(row('custom_budget')!.querySelector('[data-setting-trap]')?.textContent).toContain(
+      '0 means unlimited custom budget.',
+    )
+  })
+
+  it('hides Save to DB for any env-sourced setting flagged server_only by the backend', async () => {
+    get.mockResolvedValue([
+      mk('custom_bootstrap_secret', 'Server', 'val', {
+        source: 'env',
+        server_only: true,
+        persistable: true,
+      }),
+    ] as never)
+
+    renderPage()
+    await waitForRow('custom_bootstrap_secret')
+
+    expect(screen.queryByRole('button', { name: 'Save to DB' })).not.toBeInTheDocument()
   })
 })

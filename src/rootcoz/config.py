@@ -811,8 +811,8 @@ class Settings(BaseSettings):
     # with a non-empty value every authenticated non-admin who is not listed
     # gets 403 on the write routes even when their role would allow the
     # action, and empty removes only this extra restriction (each user's role
-    # still decides what they may do). Admins always bypass. Server-only
-    # (env-var-only, see _SERVER_ONLY_SETTINGS in main.py).
+    # still decides what they may do). Admins always bypass. Admin-editable
+    # in Server Settings (registered in settings_registry.py).
     allowed_users: str = Field(
         default="",
         description=(
@@ -1109,52 +1109,6 @@ class Settings(BaseSettings):
             " while this is set. Empty disables the check."
         ),
     )
-
-    @field_validator(
-        "sso_openshift_issuer", "sso_openshift_api_url", "sso_redhat_issuer"
-    )
-    @classmethod
-    def _validate_issuer(cls, value: str, info: ValidationInfo) -> str:
-        """Require an absolute http(s) issuer or cluster API URL, where written.
-
-        A malformed issuer used to make the provider silently disappear from the
-        login page; refusing it at save time tells the admin instead. The cluster
-        API URL follows the same rule for the same reason: it crosses the network
-        with the caller's token. Only the wording of a refusal differs — the API
-        URL is not an issuer, so telling an admin "the issuer must be https" about
-        it would name the wrong field back to them.
-
-        A path is refused for the two OpenShift settings but allowed for the Red Hat
-        issuer: OpenShift's provider appends ``/oauth/authorize``, ``/oauth/token``
-        and ``/api/...`` to these origins, so a path left on them misroutes sign-in,
-        whereas the Red Hat issuer is a Keycloak realm whose path
-        (``/auth/realms/<realm>``) is part of the value in ``iss``.
-
-        Args:
-            value: The raw setting.
-            info: Which field is being validated, for the refusal's wording.
-
-        Returns:
-            The value without a trailing slash (the form discovery is built from).
-
-        Raises:
-            ValueError: When the value is set but is not an http(s) URL.
-        """
-        issuer = value.strip()
-        if not issuer:
-            return ""
-        if not issuer.startswith(("https://", "http://")):
-            msg = f"{issuer!r} is not an http(s) URL"
-            raise ValueError(msg)
-        # The Red Hat issuer is a Keycloak realm and carries ``/auth/realms/<realm>``;
-        # the two OpenShift settings are origins the provider appends paths to.
-        is_redhat_realm = info.field_name == "sso_redhat_issuer"
-        is_api_url = info.field_name == "sso_openshift_api_url"
-        noun = "cluster API URL" if is_api_url else "issuer"
-        problem = issuer_problem(issuer, noun=noun, allow_path=is_redhat_realm)
-        if problem is not None:
-            raise ValueError(f"{issuer!r}: {problem}")
-        return issuer.rstrip("/")
 
     @field_validator("sso_allowed_domains")
     @classmethod
@@ -1875,17 +1829,6 @@ class Settings(BaseSettings):
             "gcs_bucket",
             "jira_cloud_url",
             "jira_server_url",
-            # An SSO credential that is only whitespace is not configured: the
-            # provider would otherwise be offered as a button that cannot finish
-            # a login. Blank stays "" — these fields are plain strings, and a
-            # None here would fail the re-validation `_build_settings` performs.
-            "sso_google_client_id",
-            "sso_github_client_id",
-            "sso_openshift_client_id",
-            "sso_openshift_issuer",
-            "sso_openshift_api_url",
-            "sso_redhat_client_id",
-            "sso_redhat_issuer",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
@@ -1911,10 +1854,6 @@ class Settings(BaseSettings):
             "reportportal_api_token",
             "datadog_api_key",
             "datadog_app_key",
-            "sso_google_client_secret",
-            "sso_github_client_secret",
-            "sso_openshift_client_secret",
-            "sso_redhat_client_secret",
         ):
             secret = getattr(self, field_name)
             if secret is not None:
@@ -1924,6 +1863,12 @@ class Settings(BaseSettings):
                     field_name,
                     SecretStr(stripped) if stripped else None,
                 )
+        # Single-source SSO provider field stripping & URL validation:
+        # derived from auth.sso.PROVIDER_CLASSES via settings_registry so
+        # adding a provider requires no edits to hardcoded tuples here.
+        from rootcoz.settings_registry import validate_and_strip_sso_fields
+
+        validate_and_strip_sso_fields(self)
         return self
 
     @model_validator(mode="after")
@@ -2723,7 +2668,7 @@ def _build_settings() -> Settings:
 
 # Test seam, not a setting: hold a build between build and publish so a
 # ``clear_settings_cache()`` can land in that window (the #529 race). Env
-# only — deliberately absent from Settings and from ``_SETTINGS_CATEGORIES``,
+# only — deliberately absent from Settings and from ``settings_registry``,
 # so it can never be set through Server Settings or shown to a customer.
 _SETTINGS_BUILD_HOLD_ENV = "ROOTCOZ_SETTINGS_BUILD_HOLD_MS"
 
