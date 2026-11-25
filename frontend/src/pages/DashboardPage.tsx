@@ -58,7 +58,7 @@ import { ConnectSignInMethodBanner } from '@/components/shared/ConnectSignInMeth
 import { useMetadataOptions } from '@/components/shared/useMetadataOptions'
 import { useFilterFacets } from '@/components/shared/useFilterFacets'
 import { useSubmitters } from '@/components/shared/useSubmitters'
-import { MetadataBadges } from '@/components/shared/MetadataBadges'
+import { MetadataBadges, JobTagBadges } from '@/components/shared/MetadataBadges'
 import { WhatsNewDialog } from '@/components/shared/WhatsNewDialog'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 
@@ -1020,22 +1020,7 @@ export function DashboardPage() {
                         )}
                       </div>
                       <MetadataBadges metadata={job.metadata} />
-                      {job.tags && job.tags.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-1">
-                          {job.tags.map((tag) => (
-                            <span
-                              key={tag}
-                              className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                                tag === 're-analyze'
-                                  ? 'bg-signal-orange/10 text-signal-orange'
-                                  : 'bg-signal-blue/10 text-signal-blue'
-                              }`}
-                            >
-                              {tag}
-                            </span>
-                          ))}
-                        </div>
-                      )}
+                      <JobTagBadges tags={job.tags} className="flex flex-wrap gap-1 mt-1" />
                       {failureHint && (
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -1243,22 +1228,7 @@ export function DashboardPage() {
                                   )}
                                 </div>
                                 <MetadataBadges metadata={job.metadata} />
-                                {job.tags && job.tags.length > 0 && (
-                                  <div className="flex flex-wrap gap-1 mt-1">
-                                    {job.tags.map((tag) => (
-                                      <span
-                                        key={tag}
-                                        className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                                          tag === 're-analyze'
-                                            ? 'bg-signal-orange/10 text-signal-orange'
-                                            : 'bg-signal-blue/10 text-signal-blue'
-                                        }`}
-                                      >
-                                        {tag}
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
+                                <JobTagBadges tags={job.tags} className="flex flex-wrap gap-1 mt-1" />
                                 {failureHint && (
                                   <Tooltip>
                                     <TooltipTrigger asChild>

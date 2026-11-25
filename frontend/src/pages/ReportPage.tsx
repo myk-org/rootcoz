@@ -26,6 +26,7 @@ import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Skeleton } from '@/components/ui/skeleton'
 import { StatusChip } from '@/components/shared/StatusChip'
+import { JobMetadataAndTags } from '@/components/shared/MetadataBadges'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 import { Button } from '@/components/ui/button'
 import { ExternalLink, CheckCircle2, Clock, Calendar, Timer, FolderGit2, RotateCw, Copy, Check, MessageCircle } from 'lucide-react'
@@ -162,6 +163,28 @@ function ReportContent() {
     })
   }, [dispatch])
 
+  const applyResultResponse = useCallback((resultRes: ResultResponse) => {
+    if (!resultRes.result) return
+    dispatch({
+      type: 'SET_RESULT',
+      payload: {
+        result: resultRes.result,
+        metadata: resultRes.metadata ?? null,
+        createdAt: resultRes.created_at,
+        completedAt: resultRes.completed_at ?? '',
+        analysisStartedAt: resultRes.analysis_started_at ?? '',
+        graftEstimatedTokensSaved: resultRes.graft_estimated_tokens_saved,
+        reanalyzedFromJobId: resultRes.reanalyzed_from_job_id,
+        originJobName: resultRes.origin_job_name,
+        reanalyzedToJobIds: resultRes.reanalyzed_to_job_ids,
+      },
+    })
+    // Tracked-in data (keyed by reviewKey → {tracked_in_url, tracked_in_type})
+    dispatch({ type: 'SET_TRACKED_IN', payload: resultRes.tracked_in ?? {} })
+    // Use capabilities from the result response (job-scoped, avoids separate call)
+    applyCapabilities(resultRes.capabilities)
+  }, [dispatch, applyCapabilities])
+
   useEffect(() => {
     if (!jobId) return
     const id = jobId
@@ -191,13 +214,7 @@ function ReportContent() {
           return
         }
 
-        dispatch({ type: 'SET_RESULT', payload: { result: resultRes.result, createdAt: resultRes.created_at, completedAt: resultRes.completed_at ?? '', analysisStartedAt: resultRes.analysis_started_at ?? '', graftEstimatedTokensSaved: resultRes.graft_estimated_tokens_saved, reanalyzedFromJobId: resultRes.reanalyzed_from_job_id, originJobName: resultRes.origin_job_name, reanalyzedToJobIds: resultRes.reanalyzed_to_job_ids } })
-
-        // Tracked-in data (keyed by reviewKey → {tracked_in_url, tracked_in_type})
-        dispatch({ type: 'SET_TRACKED_IN', payload: resultRes.tracked_in ?? {} })
-
-        // Use capabilities from the result response (job-scoped, avoids separate call)
-        applyCapabilities(resultRes.capabilities)
+        applyResultResponse(resultRes)
 
         // Initial comment fetch via the shared single-flight helper
         fetchComments(id)
@@ -246,7 +263,7 @@ function ReportContent() {
 
     load()
     return () => { cancelled = true }
-  }, [jobId, navigate, dispatch, refreshEnrichments, fetchComments, applyCapabilities])
+  }, [jobId, navigate, dispatch, refreshEnrichments, fetchComments, applyResultResponse])
 
   // Ref to track draft count without re-running SSE effect
   const commentDraftCountRef = useRef(state.commentDraftCount)
@@ -281,16 +298,13 @@ function ReportContent() {
       try {
         const resultRes = await api.get<ResultResponse>(`/results/${jobId}`)
         if (resultRes.result) {
-          dispatch({ type: 'SET_RESULT', payload: { result: resultRes.result, createdAt: resultRes.created_at, completedAt: resultRes.completed_at ?? '', analysisStartedAt: resultRes.analysis_started_at ?? '', graftEstimatedTokensSaved: resultRes.graft_estimated_tokens_saved, reanalyzedFromJobId: resultRes.reanalyzed_from_job_id, originJobName: resultRes.origin_job_name, reanalyzedToJobIds: resultRes.reanalyzed_to_job_ids } })
-          dispatch({ type: 'SET_TRACKED_IN', payload: resultRes.tracked_in ?? {} })
-          // Re-apply capability flags so gate toggles reach an open report
-          applyCapabilities(resultRes.capabilities)
+          applyResultResponse(resultRes)
         }
       } catch {
         // best-effort refresh
       }
     },
-  }), [jobId, dispatch, applyCapabilities])
+  }), [jobId, applyResultResponse])
 
   useSSE(jobId ? `results:${jobId}` : null, resultEvents)
 
@@ -518,6 +532,14 @@ function ReportContent() {
             </span>
           )}
         </div>
+
+        {/* ---- Job metadata labels & per-job tags ---- */}
+        <JobMetadataAndTags
+          metadata={state.metadata}
+          tags={result.tags}
+          className="mt-1.5 flex flex-wrap items-center gap-1.5"
+          testId="job-metadata-tags"
+        />
 
         {/* ---- Model + token summary + actions ---- */}
         <div className="mt-2 flex flex-wrap items-center gap-3">

@@ -9435,6 +9435,17 @@ async def get_job_result(
         )
     # Attach tracked-in data per failure
     result["tracked_in"] = await storage.get_tracked_in_for_job(job_id)
+    # Attach job-level metadata (team, tier, version, labels) matching dashboard rows
+    job_name = (
+        result["result"].get("job_name")
+        if isinstance(result.get("result"), dict)
+        else None
+    )
+    result["metadata"] = (
+        await storage.get_job_metadata(job_name)
+        if isinstance(job_name, str) and job_name
+        else None
+    )
     settings = get_settings()
     result["capabilities"] = _build_capabilities(settings)
     _attach_slot_queue(result, job_id)
