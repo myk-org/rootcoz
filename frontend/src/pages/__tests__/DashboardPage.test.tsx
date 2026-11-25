@@ -834,3 +834,82 @@ describe('DashboardPage clear filters and inline clear (#652)', () => {
     expect(screen.queryByRole('button', { name: 'Clear test name' })).toBeNull()
   })
 })
+
+describe('DashboardPage Test Results column (#671)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    sessionStorage.clear()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function mockCustomJobs(jobsList: ReturnType<typeof job>[]) {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/dashboard/submitters') {
+        return Promise.resolve({ submitters: ['alice'] })
+      }
+      if (path.startsWith('/api/dashboard/filtered')) {
+        return Promise.resolve({ jobs: jobsList, total: jobsList.length })
+      }
+      return Promise.resolve([])
+    })
+  }
+
+  it('labels the multi-status column "Test Results" in flat view and sorts by failure_count', async () => {
+    mockCustomJobs([
+      job({ job_id: 'j-low', job_name: 'job-low', failure_count: 1, passed_count: 10, skipped_count: 2, created_at: '2024-01-03 10:00:00' }),
+      job({ job_id: 'j-high', job_name: 'job-high', failure_count: 7, passed_count: 3, skipped_count: 0, created_at: '2024-01-02 10:00:00' }),
+      job({ job_id: 'j-empty', job_name: 'job-empty', failure_count: 0, passed_count: 0, skipped_count: 0, created_at: '2024-01-01 10:00:00' }),
+    ])
+    renderPage('/')
+
+    const header = await screen.findByRole('columnheader', { name: 'Test Results' })
+    expect(header).toHaveAttribute('title', 'Sort by failure count')
+    expect(header).toHaveAttribute('aria-sort', 'none')
+    expect(screen.queryByRole('columnheader', { name: 'Failures' })).toBeNull()
+
+    // First row displays all three status counts (1 failed, 10 passed, 2 skipped)
+    const rowsBefore = screen.getAllByRole('row').slice(1)
+    expect(within(rowsBefore[0]).getByText('1')).toBeInTheDocument()
+    expect(within(rowsBefore[0]).getByText('10')).toBeInTheDocument()
+    expect(within(rowsBefore[0]).getByText('2')).toBeInTheDocument()
+
+    // Click header to sort ascending by failure_count (0, 1, 7)
+    await userEvent.click(header)
+    expect(header).toHaveAttribute('aria-sort', 'ascending')
+    const rowsAsc = screen.getAllByRole('row').slice(1)
+    expect(within(rowsAsc[0]).getByText('job-empty')).toBeInTheDocument()
+    expect(within(rowsAsc[1]).getByText('job-low')).toBeInTheDocument()
+    expect(within(rowsAsc[2]).getByText('job-high')).toBeInTheDocument()
+
+    // Click again to sort descending by failure_count (7, 1, 0)
+    await userEvent.click(header)
+    expect(header).toHaveAttribute('aria-sort', 'descending')
+    const rowsDesc = screen.getAllByRole('row').slice(1)
+    expect(within(rowsDesc[0]).getByText('job-high')).toBeInTheDocument()
+    expect(within(rowsDesc[1]).getByText('job-low')).toBeInTheDocument()
+    expect(within(rowsDesc[2]).getByText('job-empty')).toBeInTheDocument()
+  })
+
+  it('labels the multi-status column "Test Results" in grouped view', async () => {
+    mockCustomJobs([
+      job({ job_id: 'j-1', job_name: 'suite-alpha', failure_count: 3, passed_count: 12, skipped_count: 4 }),
+    ])
+    renderPage('/')
+
+    await screen.findByRole('columnheader', { name: 'Test Results' })
+    await userEvent.click(screen.getByRole('button', { name: 'Grouped by job view' }))
+    await userEvent.click(screen.getByRole('button', { name: /suite-alpha/i }))
+
+    const groupedHeader = await screen.findByRole('columnheader', { name: 'Test Results' })
+    expect(groupedHeader).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Failures' })).toBeNull()
+
+    const groupedRow = screen.getAllByRole('row')[1]
+    expect(within(groupedRow).getByText('3')).toBeInTheDocument()
+    expect(within(groupedRow).getByText('12')).toBeInTheDocument()
+    expect(within(groupedRow).getByText('4')).toBeInTheDocument()
+  })
+})
