@@ -29,7 +29,12 @@ import pytest
 from rootcoz import ai_client, main, monitoring, storage
 from rootcoz.config import update_db_settings_cache
 from rootcoz.encryption import encrypt_sensitive_fields
-from tests.conftest import admin_login, capture_main_logs, make_app_client
+from tests.conftest import (
+    admin_login,
+    capture_main_logs,
+    make_app_client,
+    principal_state,
+)
 
 MAIN_PATH = Path(__file__).resolve().parents[1] / "src" / "rootcoz" / "main.py"
 
@@ -61,7 +66,7 @@ def _fake_request(
 ) -> Any:
     """Minimal stand-in for a Starlette Request on the audit code paths."""
     return SimpleNamespace(
-        state=SimpleNamespace(role=role, is_admin=is_admin),
+        state=principal_state(role=role, is_admin=is_admin, authenticated=True),
         headers=headers or {},
         client=SimpleNamespace(host=client_host) if client_host else None,
     )
@@ -873,7 +878,7 @@ def test_startup_prune_respects_saved_retention(tmp_path: Path, monkeypatch) -> 
 
 async def test_log_stream_is_audited(audit_db: Path) -> None:
     request = SimpleNamespace(
-        state=SimpleNamespace(role="admin", is_admin=True, username="admin"),
+        state=principal_state(role="admin", is_admin=True, username="admin"),
         headers={},
         client=None,
     )
@@ -1947,7 +1952,7 @@ def test_analysis_submit_records_the_resolved_model(app_client) -> None:
 async def test_a_cancelled_submit_is_not_logged_as_a_success(audit_db: Path) -> None:
     """A cancelled enqueue produced no job, so it is a failure, not a success."""
     request = SimpleNamespace(
-        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        state=principal_state(username="alice", role="admin", is_admin=True),
         headers={},
         client=None,
     )
@@ -3237,7 +3242,7 @@ async def test_ai_credential_set_records_the_model_and_whether_it_replaced(
 
     monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
     request = SimpleNamespace(
-        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        state=principal_state(username="alice", role="admin", is_admin=True),
         headers={},
         client=None,
     )
@@ -3276,7 +3281,7 @@ async def test_ai_credential_failures_are_each_audited_once(
     from rootcoz import ai_client
 
     request = SimpleNamespace(
-        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        state=principal_state(username="alice", role="admin", is_admin=True),
         headers={},
         client=None,
     )
@@ -3352,7 +3357,7 @@ async def test_ai_credential_case_variant_is_not_a_rotation(
 
     monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
     request = SimpleNamespace(
-        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        state=principal_state(username="alice", role="admin", is_admin=True),
         headers={},
         client=None,
     )
@@ -6101,9 +6106,15 @@ def test_audit_endpoints_reject_unauthenticated(app_client) -> None:
 
 
 async def test_audit_stream_emits_new_event(audit_db: Path) -> None:
+    from rootcoz.auth import principal as auth_principal
+
     request = AsyncMock()
-    request.state.is_admin = True
-    request.state.username = "admin"
+    auth_principal.attach_principal(
+        request,
+        auth_principal.Principal(
+            username="admin", role="admin", is_admin=True, authenticated=True
+        ),
+    )
     request.is_disconnected = AsyncMock(return_value=False)
 
     response = await main.stream_audit_events(request)
@@ -6133,8 +6144,10 @@ async def test_audit_stream_emits_new_event(audit_db: Path) -> None:
 
 
 async def test_audit_stream_requires_admin() -> None:
+    from rootcoz.auth import principal as auth_principal
+
     request = AsyncMock()
-    request.state.is_admin = False
+    auth_principal.attach_principal(request, auth_principal.ANONYMOUS_PRINCIPAL)
 
     with pytest.raises(Exception) as exc_info:
         await main.stream_audit_events(request)
@@ -6147,9 +6160,15 @@ def _sse_payload(chunk: str) -> dict[str, Any]:
 
 async def test_audit_stream_strips_nested_credentials(audit_db: Path) -> None:
     """A queued event is projected like the list endpoint before it is sent."""
+    from rootcoz.auth import principal as auth_principal
+
     request = AsyncMock()
-    request.state.is_admin = True
-    request.state.username = "admin"
+    auth_principal.attach_principal(
+        request,
+        auth_principal.Principal(
+            username="admin", role="admin", is_admin=True, authenticated=True
+        ),
+    )
     request.is_disconnected = AsyncMock(return_value=False)
 
     response = await main.stream_audit_events(request)
@@ -8329,7 +8348,7 @@ async def test_ai_credential_failure_rows_name_the_model(
 
     monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="rejected"))
     request = SimpleNamespace(
-        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        state=principal_state(username="alice", role="admin", is_admin=True),
         headers={},
         client=None,
     )

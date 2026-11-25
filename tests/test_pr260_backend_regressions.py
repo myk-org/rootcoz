@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from rootcoz import ai_client, main, storage
 from rootcoz.engine.chat import safe_exception_frames
+from tests.conftest import principal_state
 
 
 @pytest.mark.asyncio
@@ -161,7 +162,7 @@ async def test_stale_provider_status_and_delete_without_discovery(
         "alice", "removed-provider", "valid-key-value"
     )
     monkeypatch.setattr(main, "supported_key_providers", AsyncMock(return_value=[]))
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
     status = await main.get_user_ai_credentials(request)
     assert b"removed-provider" in status.body
     assert (
@@ -201,7 +202,7 @@ async def test_catalog_lists_server_pool_and_isolates_bad_key(monkeypatch):
     )
     discover = AsyncMock(side_effect=ValueError("bad credential"))
     monkeypatch.setattr(ai_client, "models_for_api_key", discover)
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", is_admin=False))
+    request = SimpleNamespace(state=principal_state(username="alice", is_admin=False))
     result = await main.list_ai_models(request, provider="")
     assert result["providers"]["server"][0]["id"] == "model"
     assert result["provider_status"]["bad"]["unavailable"]
@@ -216,7 +217,7 @@ async def test_short_credential_rejected_at_api(monkeypatch):
     monkeypatch.setattr(main, "_credential_user", AsyncMock(return_value="alice"))
     save = AsyncMock()
     monkeypatch.setattr(storage, "update_user_ai_credential", save)
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    request = SimpleNamespace(state=principal_state(username="alice", role="admin"))
     with pytest.raises(HTTPException, match="8-1024"):
         await main.set_user_ai_credential(
             "openai", main.AiCredentialInput(api_key="a", model="gpt-test"), request

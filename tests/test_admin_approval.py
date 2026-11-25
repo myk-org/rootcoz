@@ -486,7 +486,9 @@ class _StubRequest:
     """Minimal Request stand-in for driving the navbar SSE generators."""
 
     def __init__(self, username: str | None = None, is_admin: bool = False):
-        self.state = type("State", (), {"username": username, "is_admin": is_admin})()
+        from tests.conftest import principal_state
+
+        self.state = principal_state(username=username, is_admin=is_admin)
 
     async def is_disconnected(self) -> bool:
         return False

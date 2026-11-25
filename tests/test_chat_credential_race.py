@@ -11,7 +11,7 @@ from fastapi import BackgroundTasks
 
 from rootcoz import main, storage
 from rootcoz.models import ChatInitRequest, ChatMessageRequest
-from tests.conftest import capture_main_logs
+from tests.conftest import capture_main_logs, principal_state
 
 
 @pytest.mark.asyncio
@@ -54,7 +54,7 @@ async def test_queued_admin_chat_demotion_cannot_mint_admin_token_or_call_ai(
     monkeypatch.setattr(storage, "create_session", track_session)
     ai = AsyncMock(return_value=(True, "reply", "sid"))
     monkeypatch.setattr(chat, "admin_chat_with_ai", ai)
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", is_admin=True))
+    request = SimpleNamespace(state=principal_state(username="alice", is_admin=True))
     tasks = BackgroundTasks()
     queued = await main.send_admin_chat_message(
         ChatMessageRequest(message="hello"), request, tasks
@@ -259,7 +259,7 @@ async def test_admin_db_query_demotion_while_reading_body_rejects_sql(
         return {"sql": "SELECT 1 AS result"}
 
     request = SimpleNamespace(
-        state=SimpleNamespace(username="alice", is_admin=True), json=delayed_json
+        state=principal_state(username="alice", is_admin=True), json=delayed_json
     )
     task = asyncio.create_task(main.admin_db_query(request))
     try:
@@ -286,7 +286,7 @@ async def test_admin_db_query_still_allows_bootstrap_and_live_admin(
 
     for username in ("alice", "admin"):
         request = SimpleNamespace(
-            state=SimpleNamespace(username=username, is_admin=True), json=body
+            state=principal_state(username=username, is_admin=True), json=body
         )
         assert (await main.admin_db_query(request))["rows"] == [{"result": 1}]
 
@@ -1297,7 +1297,7 @@ async def test_initial_chat_handler_revokes_session_rotated_before_insert(
             ),
         )
         result = await main.init_admin_chat(
-            SimpleNamespace(state=SimpleNamespace(username="alice", is_admin=True)),
+            SimpleNamespace(state=principal_state(username="alice", is_admin=True)),
             ChatInitRequest(ai_provider="p", ai_model="m"),
         )
         job_id = main.ADMIN_CHAT_JOB_ID

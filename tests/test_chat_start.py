@@ -16,7 +16,7 @@ from fastapi import BackgroundTasks, HTTPException
 
 from rootcoz import ai_client, main, storage
 from rootcoz.models import ChatInitRequest, ChatMessageRequest
-from tests.conftest import capture_main_logs, record_chat_pushes
+from tests.conftest import capture_main_logs, principal_state, record_chat_pushes
 
 
 async def _settle(job_id: str = "job") -> None:
@@ -54,7 +54,7 @@ async def test_start_requires_pair_and_send_requires_start(
             },
         )
     request = SimpleNamespace(
-        state=SimpleNamespace(username="alice", is_admin=True, role="admin")
+        state=principal_state(username="alice", is_admin=True, role="admin")
     )
     from pydantic import ValidationError
 
@@ -139,7 +139,7 @@ async def test_start_and_send_use_selected_source_not_job_or_settings(
         chat, "init_admin_chat_session" if admin else "init_chat_session", create
     )
     request = SimpleNamespace(
-        state=SimpleNamespace(username="alice", is_admin=True, role="admin")
+        state=principal_state(username="alice", is_admin=True, role="admin")
     )
     body = {"ai_provider": "openai", "ai_model": "chosen"}
     result = await (
@@ -225,7 +225,7 @@ async def test_send_after_user_key_removed_requires_new_start(
         )
         await db.commit()
     request = SimpleNamespace(
-        state=SimpleNamespace(username="alice", is_admin=True, role="admin")
+        state=principal_state(username="alice", is_admin=True, role="admin")
     )
     with pytest.raises(HTTPException) as exc:
         if admin:
@@ -324,7 +324,7 @@ async def test_start_rejects_server_without_grant(monkeypatch, tmp_path):
     )
     await storage.create_user("bob", role="reviewer", can_use_server_providers=False)
     request = SimpleNamespace(
-        state=SimpleNamespace(username="bob", is_admin=False, role="reviewer")
+        state=principal_state(username="bob", is_admin=False, role="reviewer")
     )
     with pytest.raises(HTTPException) as exc:
         await main.init_chat(
@@ -381,7 +381,7 @@ async def test_new_session_replaces_stale_welcome_but_keeps_replies(
 
     monkeypatch.setattr(chat, "init_chat_session", create)
     request = SimpleNamespace(
-        state=SimpleNamespace(username="alice", is_admin=True, role="admin")
+        state=principal_state(username="alice", is_admin=True, role="admin")
     )
     body = ChatInitRequest(ai_provider="openai", ai_model="chosen")
     await main.init_chat(job_id, request, body)
@@ -415,7 +415,7 @@ async def test_new_session_replaces_stale_welcome_but_keeps_replies(
 def _start_request(admin: bool):
     """The request the route reads: ``admin`` must reach the caller's identity."""
     return SimpleNamespace(
-        state=SimpleNamespace(
+        state=principal_state(
             username="alice", is_admin=admin, role="admin" if admin else "reviewer"
         )
     )

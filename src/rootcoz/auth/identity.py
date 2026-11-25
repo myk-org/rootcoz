@@ -380,6 +380,7 @@ async def link_existing(
             "The bootstrap admin has no account to link",
             subject=username,
         )
+
     try:
         await storage.add_user_identity(
             username,
@@ -387,23 +388,12 @@ async def link_existing(
             subject,
             email=email,
             ticket=ticket,
+            eligibility_check=auth_approval.default_eligibility_check,
         )
+    except storage.IdentityStorageError as exc:
+        raise AuthError(exc.reason, str(exc), subject=username) from exc
     except ValueError as exc:
-        # The account disappeared between the credential check and this write: it
-        # is not a conflict, and the caller must not be told "already linked".
-        text = str(exc)
-        if text.startswith("account_"):
-            # Storage's eligibility verdict, already in its route-facing shape
-            # (``account_pending``): the route answers and audits it as if it had
-            # been the one to refuse.
-            reason = text.split(" ", 1)[0]
-        elif "ticket" in text:
-            reason = "ticket_expired"
-        elif "not found" in text:
-            reason = "account_missing"
-        else:
-            reason = "identity_conflict"
-        raise AuthError(reason, str(exc), subject=username) from exc
+        raise AuthError("identity_conflict", str(exc), subject=username) from exc
     return IdentityResolution(
         username=username, created=False, status=await status_of(username)
     )
@@ -480,11 +470,12 @@ async def create_new(
             created_via=provider,
             ticket=ticket,
         )
-    except ValueError as exc:
-        reason = (
-            "identity_conflict" if "already linked" in str(exc) else "invalid_username"
-        )
-        raise AuthError(reason, str(exc), subject=candidate) from exc
+    except storage.IdentityConflictError as exc:
+        raise AuthError(exc.reason, str(exc), subject=candidate) from exc
+    except (storage.IdentityStorageError, ValueError) as exc:
+        # Preserve exact refusal reason parity for username/ticket failures on
+        # first-login account creation (``invalid_username``).
+        raise AuthError("invalid_username", str(exc), subject=candidate) from exc
     return IdentityResolution(
         username=candidate, created=True, status=status, api_key=api_key
     )

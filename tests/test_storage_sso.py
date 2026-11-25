@@ -14,6 +14,9 @@ from unittest.mock import patch
 import pytest
 
 from rootcoz import storage
+from rootcoz.auth.approval import (
+    default_eligibility_check as _default_eligibility_check,
+)
 
 
 @pytest.fixture
@@ -83,7 +86,9 @@ async def test_linking_an_identity_does_not_change_provenance(
     """``created_via`` describes creation; a link is not a creation."""
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice", created_via="github")
-        await storage.add_user_identity("alice", "github", "42")
+        await storage.add_user_identity(
+            "alice", "github", "42", eligibility_check=_default_eligibility_check
+        )
 
         async with storage._connect_db() as db:
             cursor = await db.execute(
@@ -137,7 +142,9 @@ async def test_the_schema_migration_is_idempotent(setup_test_db: Path) -> None:
     """Re-opening an existing database must not fail or rewrite its rows."""
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice", created_via="github")
-        await storage.add_user_identity("alice", "google", "sub-1")
+        await storage.add_user_identity(
+            "alice", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
         token = await storage.create_session("alice", auth_provider="google")
 
         await storage.init_db()
@@ -153,7 +160,11 @@ async def test_identity_links_lookup_list_and_unlink(setup_test_db: Path) -> Non
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
         created = await storage.add_user_identity(
-            "alice", "google", "sub-1", email="alice@example.com"
+            "alice",
+            "google",
+            "sub-1",
+            email="alice@example.com",
+            eligibility_check=_default_eligibility_check,
         )
 
         assert created["username"] == "alice"
@@ -172,8 +183,12 @@ async def test_identity_links_lookup_list_and_unlink(setup_test_db: Path) -> Non
         assert len(await storage.list_user_identities("alice")) == 0
 
         # Re-link two providers, then unlink one at a time.
-        await storage.add_user_identity("alice", "google", "sub-2")
-        await storage.add_user_identity("alice", "github", "gh-1")
+        await storage.add_user_identity(
+            "alice", "google", "sub-2", eligibility_check=_default_eligibility_check
+        )
+        await storage.add_user_identity(
+            "alice", "github", "gh-1", eligibility_check=_default_eligibility_check
+        )
         assert await storage.unlink_user_identity("alice", "google") == "deleted"
         assert [i["provider"] for i in await storage.list_user_identities("alice")] == [
             "github"
@@ -185,14 +200,24 @@ async def test_keyless_user_cannot_unlink_last_identity(setup_test_db: Path) -> 
     """A keyless account's sole SSO identity is its only sign-in method."""
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_keyless_user("keyless-alice", created_via="proxy")
-        await storage.add_user_identity("keyless-alice", "google", "sub-k1")
+        await storage.add_user_identity(
+            "keyless-alice",
+            "google",
+            "sub-k1",
+            eligibility_check=_default_eligibility_check,
+        )
 
         assert await storage.user_has_api_key("keyless-alice") is False
         assert await storage.unlink_user_identity("keyless-alice", "google") == "last"
         assert len(await storage.list_user_identities("keyless-alice")) == 1
 
         # With two identities, unlinking one is allowed even without a key.
-        await storage.add_user_identity("keyless-alice", "github", "gh-k1")
+        await storage.add_user_identity(
+            "keyless-alice",
+            "github",
+            "gh-k1",
+            eligibility_check=_default_eligibility_check,
+        )
         assert (
             await storage.unlink_user_identity("keyless-alice", "google") == "deleted"
         )
@@ -213,7 +238,9 @@ async def test_a_link_reads_its_row_inside_the_link_transaction(
     for that vanishing row: it reports nothing outside a write transaction, so
     the return has to come from the transaction that made the row.
     """
-    real_select = storage._select_identities
+    from rootcoz import sso_store
+
+    real_select = sso_store._select_identities
 
     async def _vanishes_outside_a_transaction(db, where, params, *, order=""):
         if not db.in_transaction:
@@ -222,14 +249,20 @@ async def test_a_link_reads_its_row_inside_the_link_transaction(
 
     with (
         patch.object(storage, "DB_PATH", setup_test_db),
-        patch.object(storage, "_select_identities", _vanishes_outside_a_transaction),
+        patch.object(sso_store, "_select_identities", _vanishes_outside_a_transaction),
     ):
         await storage.create_user("alice")
         created = await storage.add_user_identity(
-            "alice", "google", "sub-1", email="alice@example.com"
+            "alice",
+            "google",
+            "sub-1",
+            email="alice@example.com",
+            eligibility_check=_default_eligibility_check,
         )
         # A repeat link returns the row it already holds, the same way.
-        again = await storage.add_user_identity("alice", "google", "sub-1")
+        again = await storage.add_user_identity(
+            "alice", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
 
     assert created["subject"] == "sub-1"
     assert created["email"] == "alice@example.com"
@@ -242,16 +275,20 @@ async def test_a_blocked_account_cannot_be_handed_a_link(
 ) -> None:
     """A block committed after the route's check still refuses the link write.
 
-    The route applies the same gate before it gets here; this pins the write
-    itself, which is what a caller added later would otherwise trust. Nothing is
-    stored either way.
+    The eligibility predicate is injected from ``auth.approval`` so storage
+    never imports auth; this pins the in-transaction enforcement.
     """
+    from rootcoz.auth import approval as auth_approval
     from rootcoz.config import Settings
 
-    with (
-        patch.object(storage, "DB_PATH", setup_test_db),
-        patch("rootcoz.config._cached_settings", Settings(require_approval=True)),
-    ):
+    settings = Settings(require_approval=True)
+
+    def _check(user: dict[str, object], is_admin: bool) -> str:
+        return auth_approval.account_eligibility_refusal(
+            user, is_admin=is_admin, settings=settings
+        )
+
+    with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
         if block == "disabled":
             assert await storage.set_user_disabled("alice", True) is not None
@@ -262,8 +299,13 @@ async def test_a_blocked_account_cannot_be_handed_a_link(
                 )
                 await db.commit()
 
-        with pytest.raises(ValueError, match=f"^account_{block}$"):
-            await storage.add_user_identity("alice", "google", "sub-1")
+        with pytest.raises(
+            storage.AccountIneligibleError, match=f"^account_{block}$"
+        ) as exc_info:
+            await storage.add_user_identity(
+                "alice", "google", "sub-1", eligibility_check=_check
+            )
+        assert exc_info.value.reason == f"account_{block}"
 
         assert await _raw_identity_rows() == []
 
@@ -272,12 +314,17 @@ async def test_an_admin_is_not_held_by_its_own_approval_status_when_linking(
     setup_test_db: Path,
 ) -> None:
     """An administrator is exempt by role, not by status, in the link write too."""
+    from rootcoz.auth import approval as auth_approval
     from rootcoz.config import Settings
 
-    with (
-        patch.object(storage, "DB_PATH", setup_test_db),
-        patch("rootcoz.config._cached_settings", Settings(require_approval=True)),
-    ):
+    settings = Settings(require_approval=True)
+
+    def _check(user: dict[str, object], is_admin: bool) -> str:
+        return auth_approval.account_eligibility_refusal(
+            user, is_admin=is_admin, settings=settings
+        )
+
+    with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_admin_user("boss")
         async with storage._connect_db() as db:
             await db.execute(
@@ -285,7 +332,9 @@ async def test_an_admin_is_not_held_by_its_own_approval_status_when_linking(
             )
             await db.commit()
 
-        created = await storage.add_user_identity("boss", "google", "sub-1")
+        created = await storage.add_user_identity(
+            "boss", "google", "sub-1", eligibility_check=_check
+        )
 
     assert created["username"] == "boss"
     assert created["subject"] == "sub-1"
@@ -348,8 +397,12 @@ async def test_concurrent_unlinks_cannot_leave_an_account_without_a_method(
     succeed, leaving a keyless SSO-created account with no way in at all.
     """
     await storage.create_keyless_user("alice", created_via="proxy")
-    await storage.add_user_identity("alice", "google", "sub-1")
-    await storage.add_user_identity("alice", "github", "gh-1")
+    await storage.add_user_identity(
+        "alice", "google", "sub-1", eligibility_check=_default_eligibility_check
+    )
+    await storage.add_user_identity(
+        "alice", "github", "gh-1", eligibility_check=_default_eligibility_check
+    )
 
     results = await asyncio.gather(
         storage.unlink_user_identity("alice", "google"),
@@ -371,7 +424,11 @@ async def test_identity_claims_are_scrubbed_and_readable(
             ' "nested": {"id_token": "secret-2", "email_verified": true}}'
         )
         created = await storage.add_user_identity(
-            "alice", "github", "42", raw_claims_json=claims
+            "alice",
+            "github",
+            "42",
+            raw_claims_json=claims,
+            eligibility_check=_default_eligibility_check,
         )
 
         stored = created["raw_claims_json"]
@@ -391,7 +448,9 @@ async def test_an_empty_identity_subject_is_refused(setup_test_db: Path) -> None
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
         with pytest.raises(ValueError, match="non-empty subject"):
-            await storage.add_user_identity("alice", "google", "   ")
+            await storage.add_user_identity(
+                "alice", "google", "   ", eligibility_check=_default_eligibility_check
+            )
 
 
 async def test_a_subject_already_linked_to_another_account_is_refused(
@@ -401,11 +460,15 @@ async def test_a_subject_already_linked_to_another_account_is_refused(
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
         await storage.create_user("bob")
-        await storage.add_user_identity("alice", "github", "12345")
+        await storage.add_user_identity(
+            "alice", "github", "12345", eligibility_check=_default_eligibility_check
+        )
 
         # The refusal must not name the account that holds the subject.
         with pytest.raises(ValueError, match=r"already linked$") as excinfo:
-            await storage.add_user_identity("bob", "github", "12345")
+            await storage.add_user_identity(
+                "bob", "github", "12345", eligibility_check=_default_eligibility_check
+            )
         assert "alice" not in str(excinfo.value)
 
         assert [i["provider"] for i in await storage.list_user_identities("bob")] == []
@@ -415,10 +478,14 @@ async def test_one_identity_per_provider_per_account(setup_test_db: Path) -> Non
     """Linking a second Google account requires unlinking the first."""
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
-        await storage.add_user_identity("alice", "google", "sub-1")
+        await storage.add_user_identity(
+            "alice", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
 
         with pytest.raises(ValueError, match="already has a google identity"):
-            await storage.add_user_identity("alice", "google", "sub-2")
+            await storage.add_user_identity(
+                "alice", "google", "sub-2", eligibility_check=_default_eligibility_check
+            )
 
 
 async def test_the_database_enforces_both_uniqueness_rules(
@@ -430,7 +497,9 @@ async def test_the_database_enforces_both_uniqueness_rules(
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
         await storage.create_user("bob")
-        await storage.add_user_identity("alice", "google", "sub-1")
+        await storage.add_user_identity(
+            "alice", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
         alice = await storage.get_user_by_username("alice")
         assert alice is not None
 
@@ -467,9 +536,16 @@ async def test_identity_requires_a_known_provider_and_account(
         with pytest.raises(ValueError, match="Invalid SSO provider"):
             await storage.get_user_identity("ldap", "sub-1")
         with pytest.raises(ValueError, match="Invalid SSO provider"):
-            await storage.add_user_identity("alice", "ldap", "sub-1")
+            await storage.add_user_identity(
+                "alice", "ldap", "sub-1", eligibility_check=_default_eligibility_check
+            )
         with pytest.raises(ValueError, match="not found"):
-            await storage.add_user_identity("nobody", "google", "sub-1")
+            await storage.add_user_identity(
+                "nobody",
+                "google",
+                "sub-1",
+                eligibility_check=_default_eligibility_check,
+            )
 
 
 async def test_deleting_an_account_removes_its_identities(
@@ -478,7 +554,9 @@ async def test_deleting_an_account_removes_its_identities(
     """No orphan identity: it would hold its unique slot and block a re-link."""
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
-        await storage.add_user_identity("alice", "google", "sub-1")
+        await storage.add_user_identity(
+            "alice", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
 
         await storage.delete_user("alice")
 
@@ -488,16 +566,20 @@ async def test_deleting_an_account_removes_its_identities(
 
         # The consequence the orphan would have caused: the subject is free again.
         await storage.create_user("bob")
-        assert (await storage.add_user_identity("bob", "google", "sub-1"))[
-            "username"
-        ] == "bob"
+        assert (
+            await storage.add_user_identity(
+                "bob", "google", "sub-1", eligibility_check=_default_eligibility_check
+            )
+        )["username"] == "bob"
 
 
 async def test_an_orphan_identity_can_be_healed(setup_test_db: Path) -> None:
     """A row whose account is gone holds the unique slot; deleting it frees it."""
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
-        await storage.add_user_identity("alice", "google", "sub-1")
+        await storage.add_user_identity(
+            "alice", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
         # Simulate a row that outlived its account (a crashed delete, or history).
         async with storage._connect_db() as db:
             await db.execute("DELETE FROM users WHERE username = 'alice'")
@@ -506,7 +588,9 @@ async def test_an_orphan_identity_can_be_healed(setup_test_db: Path) -> None:
         assert await storage.delete_orphan_identity("google", "sub-1") is True
         # A live identity is never touched by the healing path.
         await storage.create_user("bob")
-        await storage.add_user_identity("bob", "google", "sub-2")
+        await storage.add_user_identity(
+            "bob", "google", "sub-2", eligibility_check=_default_eligibility_check
+        )
         assert await storage.delete_orphan_identity("google", "sub-2") is False
         assert await storage.get_user_identity("google", "sub-2") is not None
 
@@ -795,19 +879,24 @@ async def test_a_device_code_is_approved_then_redeemed_exactly_once(
         # The exchange is the step that ends the flow: one commit writes the
         # session and spends the code.
         minted = await storage.exchange_device_code_for_session(
-            code["device_code"], username="alice"
+            code["device_code"],
+            username="alice",
+            eligibility_check=_default_eligibility_check,
         )
         assert minted is not None
+        assert minted.ok
         # The rights come from the row, not from the caller.
-        assert minted["role"] == "reviewer"
-        assert minted["is_admin"] is False
-        assert (await storage.get_session(minted["token"]))["username"] == "alice"
+        assert minted.role == "reviewer"
+        assert minted.is_admin is False
+        assert (await storage.get_session(minted.token))["username"] == "alice"
         assert await storage.get_device_code(code["device_code"]) is None
         assert await storage.get_device_code_by_user_code(code["user_code"]) is None
         # Nothing left to exchange: a second exchange cannot mint a second token.
         assert (
             await storage.exchange_device_code_for_session(
-                code["device_code"], username="alice"
+                code["device_code"],
+                username="alice",
+                eligibility_check=_default_eligibility_check,
             )
             is None
         )
@@ -918,7 +1007,9 @@ async def test_a_failed_session_write_spends_nothing(setup_test_db: Path) -> Non
             pytest.raises(RuntimeError),
         ):
             await storage.exchange_device_code_for_session(
-                code["device_code"], username="alice"
+                code["device_code"],
+                username="alice",
+                eligibility_check=_default_eligibility_check,
             )
 
         # Nothing was written, and the code is still there to retry with.
@@ -930,7 +1021,9 @@ async def test_a_failed_session_write_spends_nothing(setup_test_db: Path) -> Non
             assert (await cursor.fetchone())["n"] == 0
 
         minted = await storage.exchange_device_code_for_session(
-            code["device_code"], username="alice"
+            code["device_code"],
+            username="alice",
+            eligibility_check=_default_eligibility_check,
         )
         assert minted is not None
         assert await storage.get_device_code(code["device_code"]) is None
@@ -949,13 +1042,17 @@ async def test_a_claim_cannot_be_exchanged_for_another_account(
 
         assert (
             await storage.exchange_device_code_for_session(
-                code["device_code"], username="bob"
+                code["device_code"],
+                username="bob",
+                eligibility_check=_default_eligibility_check,
             )
             is None
         )
         assert (
             await storage.exchange_device_code_for_session(
-                code["device_code"], username="alice"
+                code["device_code"],
+                username="alice",
+                eligibility_check=_default_eligibility_check,
             )
             is not None
         )
@@ -980,12 +1077,14 @@ async def test_a_downgraded_account_cannot_redeem_its_admin_session(
         await storage.change_user_role("boss", "reviewer")
 
         minted = await storage.exchange_device_code_for_session(
-            code["device_code"], username="boss"
+            code["device_code"],
+            username="boss",
+            eligibility_check=_default_eligibility_check,
         )
         assert minted is not None
-        assert minted["role"] == "reviewer"
-        assert minted["is_admin"] is False
-        session = await storage.get_session(minted["token"])
+        assert minted.role == "reviewer"
+        assert minted.is_admin is False
+        session = await storage.get_session(minted.token)
         assert session is not None
         assert session["role"] == "reviewer"
         assert not session["is_admin"]
@@ -1014,12 +1113,14 @@ async def test_the_exchange_reads_the_role_at_mint_time(setup_test_db: Path) -> 
         await storage.change_user_role("alice", "admin")
 
         minted = await storage.exchange_device_code_for_session(
-            code["device_code"], username="alice"
+            code["device_code"],
+            username="alice",
+            eligibility_check=_default_eligibility_check,
         )
         assert minted is not None
-        assert minted["role"] == "admin"
-        assert minted["is_admin"] is True
-        session = await storage.get_session(minted["token"])
+        assert minted.role == "admin"
+        assert minted.is_admin is True
+        session = await storage.get_session(minted.token)
         assert session is not None
         assert session["role"] == "admin"
         assert bool(session["is_admin"]) is True
@@ -1035,11 +1136,13 @@ async def test_a_row_less_bootstrap_admin_is_minted_as_an_admin(
         assert await storage.redeem_device_code(code["device_code"]) is not None
 
         minted = await storage.exchange_device_code_for_session(
-            code["device_code"], username="admin"
+            code["device_code"],
+            username="admin",
+            eligibility_check=_default_eligibility_check,
         )
         assert minted is not None
-        assert minted["role"] == "admin"
-        assert minted["is_admin"] is True
+        assert minted.role == "admin"
+        assert minted.is_admin is True
 
 
 async def test_an_account_that_lost_its_row_gets_no_session(
@@ -1056,7 +1159,9 @@ async def test_an_account_that_lost_its_row_gets_no_session(
 
         assert (
             await storage.exchange_device_code_for_session(
-                code["device_code"], username="alice"
+                code["device_code"],
+                username="alice",
+                eligibility_check=_default_eligibility_check,
             )
             is None
         )
@@ -1136,8 +1241,19 @@ async def test_a_block_committed_while_the_code_waited_refuses_the_mint(
 
     The block already dropped the account's sessions, so a token minted after it
     would outlive that invalidation. The exchange re-reads the row inside its own
-    transaction and refuses, naming the block so the poll can audit it.
+    transaction and refuses via the injected eligibility predicate, returning a
+    typed :class:`DeviceCodeExchangeResult`.
     """
+    from rootcoz.auth import approval as auth_approval
+    from rootcoz.config import Settings
+
+    settings = Settings(require_approval=True)
+
+    def _check(user: dict[str, object], is_admin: bool) -> str:
+        return auth_approval.account_eligibility_refusal(
+            user, is_admin=is_admin, settings=settings
+        )
+
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
         code = await _approve_and_claim("alice")
@@ -1155,46 +1271,49 @@ async def test_a_block_committed_while_the_code_waited_refuses_the_mint(
                 await db.commit()
 
         refused = await storage.exchange_device_code_for_session(
-            code["device_code"], username="alice"
+            code["device_code"], username="alice", eligibility_check=_check
         )
-        # Named, not silent: the poll reports it as a refusal with this reason.
-        assert refused == {"refused": f"account_{block}"}
+        assert refused == storage.DeviceCodeExchangeResult(refused=f"account_{block}")
+        assert not refused.ok
 
         async with storage._connect_db() as db:
             cursor = await db.execute(
                 "SELECT COUNT(*) AS n FROM sessions WHERE username = 'alice'"
             )
             assert (await cursor.fetchone())["n"] == 0
-        # The claim is spent, so no poll can mint while the block stands; an
-        # admin who lifts it does not hand the terminal a token it never asked
-        # for again — the person signs in afresh.
         assert await storage.get_device_code(code["device_code"]) is not None
         again = await storage.exchange_device_code_for_session(
-            code["device_code"], username="alice"
+            code["device_code"], username="alice", eligibility_check=_check
         )
-        assert again is not None and "token" not in again
+        assert again is not None and not again.ok
 
 
 async def test_below_require_approval_a_pending_row_still_mints(
     setup_test_db: Path,
 ) -> None:
     """With approval off a pending row is an ordinary account, exactly as at login."""
+    from rootcoz.auth import approval as auth_approval
     from rootcoz.config import Settings
 
-    with (
-        patch.object(storage, "DB_PATH", setup_test_db),
-        patch("rootcoz.config._cached_settings", Settings(require_approval=False)),
-    ):
+    settings = Settings(require_approval=False)
+
+    def _check(user: dict[str, object], is_admin: bool) -> str:
+        return auth_approval.account_eligibility_refusal(
+            user, is_admin=is_admin, settings=settings
+        )
+
+    with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice", status="pending")
         code = await _approve_and_claim("alice")
 
         minted = await storage.exchange_device_code_for_session(
-            code["device_code"], username="alice"
+            code["device_code"], username="alice", eligibility_check=_check
         )
 
         assert minted is not None
-        assert minted["role"] == "reviewer"
-        assert (await storage.get_session(minted["token"]))["username"] == "alice"
+        assert minted.ok
+        assert minted.role == "reviewer"
+        assert (await storage.get_session(minted.token))["username"] == "alice"
 
 
 class _MovableClock:
@@ -1385,13 +1504,25 @@ async def test_list_identities_for_users_mixed(
         await storage.create_user("carol")
 
         await storage.add_user_identity(
-            "alice", "google", "g-alice", email="alice@g.com"
+            "alice",
+            "google",
+            "g-alice",
+            email="alice@g.com",
+            eligibility_check=_default_eligibility_check,
         )
         await storage.add_user_identity(
-            "alice", "github", "gh-alice", email="alice@gh.com"
+            "alice",
+            "github",
+            "gh-alice",
+            email="alice@gh.com",
+            eligibility_check=_default_eligibility_check,
         )
         await storage.add_user_identity(
-            "carol", "google", "g-carol", email="carol@g.com"
+            "carol",
+            "google",
+            "g-carol",
+            email="carol@g.com",
+            eligibility_check=_default_eligibility_check,
         )
         # bob has no identities
 
@@ -1430,7 +1561,11 @@ async def test_add_user_identity_refuses_reserved_admin_even_with_legacy_row(
 
         with pytest.raises(ValueError, match="reserved 'admin'"):
             await storage.add_user_identity(
-                username, "google", "sub-admin", email="admin@example.com"
+                username,
+                "google",
+                "sub-admin",
+                email="admin@example.com",
+                eligibility_check=_default_eligibility_check,
             )
 
         assert await _raw_identity_rows() == []

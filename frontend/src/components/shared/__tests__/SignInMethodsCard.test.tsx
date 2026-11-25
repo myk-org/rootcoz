@@ -41,11 +41,18 @@ beforeEach(() => {
 })
 
 it('lists the connected providers', async () => {
-  mockState([{ provider: 'google', email: 'a@example.com', created_at: '' }], true)
+  mockState([{ provider: 'google', display_name: 'Google', email: 'a@example.com', created_at: '' }], true)
   render(<SignInMethodsCard />)
 
   expect(await screen.findByText('Google')).toBeTruthy()
   expect(screen.getByText('a@example.com')).toBeTruthy()
+})
+
+it('uses server-supplied display_name without a hardcoded provider map', async () => {
+  mockState([{ provider: 'corp-oidc', display_name: 'Corp SSO', email: 'a@corp.example', created_at: '' }], true)
+  render(<SignInMethodsCard />)
+
+  expect(await screen.findByText('Corp SSO')).toBeTruthy()
 })
 
 it('says no provider is connected when the list is empty', async () => {
@@ -175,7 +182,7 @@ it('offers the connect button when the server allows browser sign-in', async () 
 })
 
 it('opens a confirmation dialog when disconnecting the only SSO provider', async () => {
-  mockState([{ provider: 'google', email: 'a@example.com', created_at: '' }], true)
+  mockState([{ provider: 'google', display_name: 'Google', email: 'a@example.com', created_at: '' }], true)
   render(<SignInMethodsCard />)
 
   const btn = await screen.findByRole('button', { name: /disconnect/i })

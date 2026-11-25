@@ -12,6 +12,7 @@ import pytest
 
 from rootcoz import main, storage
 from rootcoz.models import ChatInitRequest
+from tests.conftest import principal_state
 
 
 async def _setup_job(
@@ -77,7 +78,7 @@ async def _setup_job(
 
 def _request():
     return SimpleNamespace(
-        state=SimpleNamespace(username="alice", is_admin=False, role="reviewer")
+        state=principal_state(username="alice", is_admin=False, role="reviewer")
     )
 
 

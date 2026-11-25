@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, ApiError, extractApiDetail } from '@/lib/api'
+import { isIdentityUnlinkable } from '@/lib/ssoProviders'
 import { useClipboard } from '@/lib/useClipboard'
 import { parsePageSize } from '@/lib/pageParams'
 import { RoleBadge } from '@/components/shared/RoleBadge'
@@ -149,7 +150,7 @@ function SignInCell({
   onUnlink: (target: { username: string; provider: string; displayName: string; isLastSso: boolean }) => void
 }) {
   const identities = user.identities ?? []
-  const unlinkable = user.identities_unlinkable ?? (identities.length > 1 || Boolean(user.has_api_key))
+  const unlinkable = user.identities_unlinkable ?? isIdentityUnlinkable(identities, user.has_api_key)
   const isLastSso = identities.length === 1
   const wrappedOnUnlink = useCallback(
     (target: { username: string; provider: string; displayName: string; isLastSso: boolean }) =>
@@ -471,7 +472,7 @@ export function UsersPage() {
         prev.map((u) => {
           if (u.username !== unlinkTarget.username) return u
           const nextIdentities = (u.identities ?? []).filter((id) => id.provider !== unlinkTarget.provider)
-          return { ...u, identities: nextIdentities, identities_unlinkable: nextIdentities.length > 1 || Boolean(u.has_api_key) }
+          return { ...u, identities: nextIdentities, identities_unlinkable: isIdentityUnlinkable(nextIdentities, u.has_api_key) }
         }),
       )
       setUnlinkTarget(null)

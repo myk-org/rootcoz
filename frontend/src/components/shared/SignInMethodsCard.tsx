@@ -3,28 +3,17 @@ import { api, extractApiDetail } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { SSO_LINK_ERROR_FALLBACK, ssoErrorMessage } from '@/lib/ssoErrors'
 import {
-  browserSignIn,
+  canManageSignInMethods,
+  fetchBrowserSignIn,
+  resolveProviderDisplayName,
   type BrowserSignIn,
-  type SsoProvidersResponse,
+  type IdentitiesResponse,
+  type LinkedIdentity,
 } from '@/lib/ssoProviders'
 import { stripQueryParams } from '@/lib/navigation'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
-
-/** One identity as `GET /api/user/identities` reports it. */
-interface LinkedIdentity {
-  provider: string
-  display_name?: string
-  email: string | null
-  created_at: string
-}
-
-interface IdentitiesResponse {
-  identities: LinkedIdentity[]
-  unlinkable: boolean
-}
-
 
 /** `null` identities cannot tell "never loaded" from "load failed", so the list
  *  has its own state: a failed load must not read as still loading. */
@@ -36,30 +25,11 @@ type LoadStatus = 'loading' | 'ready' | 'failed'
  * "Connect" leaves the SPA for the provider and comes back with
  * `?sso_linked=<provider>`, because a redirect exchange cannot happen inside a
  * fetch. It is a real form POST, never a link: a cross-site navigation can follow
- * a GET, so the server accepts `mode=link` only as a same-origin POST. The last
- * identity cannot be removed: an account created through SSO is
- * shown its API key once, at creation, and may never have saved it, so unlinking
- * the only way in would lock the person out — the server refuses it and this card
- * says so before the click.
+ * a GET, so the server accepts `mode=link` only as a same-origin POST.
  */
-const PROVIDER_LABELS: Record<string, string> = {
-  google: 'Google',
-  github: 'GitHub',
-  openshift: 'OpenShift',
-  redhat: 'Red Hat SSO',
-}
-
-function label(provider: string): string {
-  return PROVIDER_LABELS[provider] ?? provider
-}
-
 export function SignInMethodsCard() {
-  // Connecting and disconnecting are reviewer-level writes on the account, so a
-  // viewer is told that instead of being offered a button the server refuses. The
-  // bootstrap administrator is excluded for a different reason: it has no users
-  // row, so no provider identity could ever be attached to it.
   const { role, username } = useAuth()
-  const canManage = role !== 'viewer' && username !== 'admin'
+  const canManage = canManageSignInMethods(role, username)
   const [status, setStatus] = useState<LoadStatus>('loading')
   const [identities, setIdentities] = useState<LinkedIdentity[] | null>(null)
   const [unlinkable, setUnlinkable] = useState(true)
@@ -67,7 +37,16 @@ export function SignInMethodsCard() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState('')
+  const [linkedNoticeProvider, setLinkedNoticeProvider] = useState('')
   const [confirmProvider, setConfirmProvider] = useState<string | null>(null)
+
+  const labelFor = useCallback(
+    (provider: string, list: readonly LinkedIdentity[] | null = identities, offered = sso.providers): string => {
+      const matchedIdentity = list?.find((item) => item.provider === provider)
+      return resolveProviderDisplayName(provider, offered, matchedIdentity?.display_name)
+    },
+    [identities, sso.providers],
+  )
 
   const load = useCallback(async () => {
     try {
@@ -79,13 +58,8 @@ export function SignInMethodsCard() {
       setError(extractApiDetail(err) ?? 'Could not load your sign-in methods.')
       setStatus('failed')
     }
-    try {
-      const offered = await api.get<SsoProvidersResponse>('/api/auth/sso/providers')
-      setSso(browserSignIn(offered))
-    } catch {
-      // No SSO on this deployment is not an error worth showing.
-      setSso({ providers: [], cliOnly: false })
-    }
+    const offered = await fetchBrowserSignIn()
+    setSso(offered)
   }, [])
 
   useEffect(() => {
@@ -95,7 +69,7 @@ export function SignInMethodsCard() {
     const linked = params.get('sso_linked')
     const failed = params.get('sso_error')
     if (linked || failed) {
-      if (linked) setNotice(`${label(linked)} connected.`)
+      if (linked) setLinkedNoticeProvider(linked)
       if (failed) setError(ssoErrorMessage(failed, SSO_LINK_ERROR_FALLBACK))
       // The outcome is a one-shot notice: leaving it in the URL re-shows a stale
       // "connected" (or an old failure) on every refresh and back-navigation.
@@ -104,12 +78,14 @@ export function SignInMethodsCard() {
   }, [load])
 
   async function handleUnlink(provider: string) {
+    const displayLabel = labelFor(provider)
     setBusy(provider)
     setError('')
     setNotice('')
+    setLinkedNoticeProvider('')
     try {
       await api.delete(`/api/user/identities/${encodeURIComponent(provider)}`)
-      setNotice(`${label(provider)} disconnected.`)
+      setNotice(`${displayLabel} disconnected.`)
       await load()
     } catch (err) {
       setError(extractApiDetail(err) ?? 'That provider could not be disconnected.')
@@ -125,6 +101,8 @@ export function SignInMethodsCard() {
     status === 'ready'
       ? sso.providers.filter((provider) => !connected.has(provider.name))
       : []
+
+  const effectiveNotice = notice || (linkedNoticeProvider ? `${labelFor(linkedNoticeProvider)} connected.` : '')
 
   return (
     <Card className="mt-4">
@@ -156,7 +134,7 @@ export function SignInMethodsCard() {
               >
                 <div className="min-w-0">
                   <p className="text-sm text-text-primary">
-                    {identity.display_name || label(identity.provider)}
+                    {resolveProviderDisplayName(identity.provider, sso.providers, identity.display_name)}
                   </p>
                   {identity.email && (
                     <p className="truncate text-xs text-text-tertiary">
@@ -204,9 +182,6 @@ export function SignInMethodsCard() {
           </p>
         )}
 
-        {/* A deployment with no public origin answers the browser flow with 400
-            after the click, so the button is not offered at all — the CLI device
-            flow is the one way in there, and it is named in the message. */}
         {sso.cliOnly && canManage && (
           <p className="text-xs text-text-tertiary">
             Browser sign-in is turned off on this server, so a provider cannot be
@@ -231,14 +206,14 @@ export function SignInMethodsCard() {
           </div>
         )}
 
-        {notice && <p className="text-sm text-signal-green">{notice}</p>}
+        {effectiveNotice && <p className="text-sm text-signal-green">{effectiveNotice}</p>}
         {error && <p className="text-sm text-signal-red">{error}</p>}
 
         {confirmProvider !== null && (
           <ConfirmDialog
             open
             onOpenChange={(open) => { if (!open) setConfirmProvider(null) }}
-            title={`Disconnect ${label(confirmProvider)}?`}
+            title={`Disconnect ${labelFor(confirmProvider)}?`}
             description="This is your only connected SSO provider. After disconnecting, you will only be able to sign in with your RootCoz API key — make sure you have it saved (or rotate your key in Profile Settings first) so you don’t get locked out."
             confirmLabel="Disconnect"
             variant="destructive"

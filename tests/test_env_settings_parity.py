@@ -322,7 +322,9 @@ def test_sso_settings_carry_the_provider_that_owns_them(client):
     by_key = {item["key"]: item for item in response.json()}
 
     # Declared per provider class: collapsible sub-sections.
-    for provider in main.auth_sso.PROVIDER_CLASSES:
+    from rootcoz.auth import sso as auth_sso
+
+    for provider in auth_sso.PROVIDER_CLASSES:
         for field in provider.settings_fields:
             assert by_key[field]["section"] == provider.name, field
             assert by_key[field]["section_label"] == provider.display_name, field

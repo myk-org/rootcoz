@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from rootcoz import ai_client, main, storage
+from tests.conftest import principal_state
 
 
 @pytest.mark.asyncio
@@ -121,7 +122,7 @@ async def test_delete_recreate_user_revokes_same_generation_session(
         lambda: SimpleNamespace(delete_session=delete),
     )
     request = SimpleNamespace(
-        state=SimpleNamespace(username="admin", role="admin", is_admin=True)
+        state=principal_state(username="admin", role="admin", is_admin=True)
     )
     assert (await main.delete_user_endpoint(request, "alice"))["deleted"] == "alice"
     await storage.create_admin_user("alice")

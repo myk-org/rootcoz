@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hmac
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import Request, Response
@@ -27,16 +27,8 @@ from rootcoz.config import Settings
 SESSION_COOKIE = "rootcoz_session"
 
 #: Display-only cookie naming the user. It grants nothing — see the fallback in
-#: ``AuthMiddleware.dispatch``.
+#: :func:`rootcoz.auth.principal.authenticate_request`.
 USERNAME_COOKIE = "rootcoz_username"
-
-#: ``request.state`` attribute a strategy sets when it renewed the session in
-#: the DB, so the caller re-issues the cookie.
-RENEW_SESSION_TOKEN_ATTR = "renew_session_token"
-
-#: ``request.state`` attribute a strategy sets when a proxy identity should
-#: refresh the display cookie on the response.
-SET_PROXY_COOKIE_ATTR = "set_proxy_cookie"
 
 #: The bootstrap administrator's reserved username. It has no users row, so every
 #: path that resolves a name must refuse it: the proxy header, the display cookie,
@@ -214,6 +206,37 @@ def identity_from_session(
     )
 
 
+@dataclass(frozen=True)
+class ProxyProvisionedEvent:
+    """Fact recorded when the proxy strategy auto-provisioned a brand-new account."""
+
+    username: str
+    status: str
+    role: str
+
+
+@dataclass(frozen=True)
+class ProxyProvisionRefusedEvent:
+    """Fact recorded when the proxy strategy refused to provision an account."""
+
+    username: str
+    reason: str
+
+
+@dataclass
+class AuthSideEffects:
+    """Typed side effects emitted by strategies during request authentication.
+
+    Replaces untyped ``request.state.*`` side-channel attributes so the auth
+    layer returns every cookie refresh and provisioning audit signal cleanly.
+    """
+
+    renew_session_token: str | None = None
+    set_proxy_cookie: str | None = None
+    proxy_provisioned: ProxyProvisionedEvent | None = None
+    proxy_provision_refused: ProxyProvisionRefusedEvent | None = None
+
+
 @dataclass
 class AuthContext:
     """What a strategy may look at: the request and the settings it runs under.
@@ -222,10 +245,14 @@ class AuthContext:
         request: The request being authenticated.
         settings: Settings for this request, read at call time. Rootcoz reloads
             settings per request, so a strategy must never capture them.
+        side_effects: Typed side-effect collector populated by strategies
+            (session renewal token, proxy display cookie, proxy provisioning
+            outcomes).
     """
 
     request: Request
     settings: Settings
+    side_effects: AuthSideEffects = field(default_factory=AuthSideEffects)
 
 
 @dataclass

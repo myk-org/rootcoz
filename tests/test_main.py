@@ -22,6 +22,9 @@ from fastapi import BackgroundTasks, HTTPException
 from pydantic import SecretStr
 
 from rootcoz import storage, temp_paths
+from rootcoz.auth.approval import (
+    default_eligibility_check as _default_eligibility_check,
+)
 from rootcoz.config import Settings, clear_settings_cache, get_settings
 from rootcoz.encryption import encrypt_sensitive_fields
 from rootcoz.engine.core import AnalysisIncompleteError
@@ -41,6 +44,7 @@ from tests.conftest import (
     capture_main_logs,
     make_app_client,
     make_test_client,
+    principal_state,
 )
 from tests.test_auth import _assert_spa_page
 
@@ -19762,7 +19766,7 @@ class TestAiModelsListingStatus:
     @staticmethod
     def _request(*, is_admin: bool) -> SimpleNamespace:
         return SimpleNamespace(
-            state=SimpleNamespace(
+            state=principal_state(
                 username="alice",
                 role="admin" if is_admin else "reviewer",
                 is_admin=is_admin,
@@ -19898,7 +19902,7 @@ async def test_chat_send_validates_with_sender_credentials(
     )
 
     request = SimpleNamespace(
-        state=SimpleNamespace(
+        state=principal_state(
             username="alice", role="admin" if admin else "reviewer", is_admin=admin
         )
     )
@@ -19974,7 +19978,7 @@ async def test_admin_chat_init_uses_selected_source(monkeypatch, tmp_path):
         return "session"
 
     monkeypatch.setattr(chat, "init_admin_chat_session", init)
-    request = SimpleNamespace(state=SimpleNamespace(username="alice", is_admin=True))
+    request = SimpleNamespace(state=principal_state(username="alice", is_admin=True))
     original_user = ai_client.ai_username.set("previous")
     try:
         body = ChatInitRequest(ai_provider="openai", ai_model="test-model")
@@ -21304,9 +21308,15 @@ class TestLogStream:
 
         monkeypatch.setattr(main_module, "_read_log_tail", fake_tail)
 
+        from rootcoz.auth import principal as auth_principal
+
         request = AsyncMock()
-        request.state.is_admin = True
-        request.state.username = "admin"
+        auth_principal.attach_principal(
+            request,
+            auth_principal.Principal(
+                username="admin", role="admin", is_admin=True, authenticated=True
+            ),
+        )
         request.is_disconnected = AsyncMock(return_value=False)
 
         response = await main_module.stream_logs(request, lines=100, level="")
@@ -22974,7 +22984,7 @@ class TestUserLifecycleAndAdminSseRevocation:
     ) -> Any:
         cookies = {"rootcoz_session": session_token} if session_token else {}
         headers = {"authorization": f"Bearer {bearer_token}"} if bearer_token else {}
-        state = SimpleNamespace(
+        state = principal_state(
             username=username,
             is_admin=is_admin,
             role="admin" if is_admin else "reviewer",
@@ -23027,7 +23037,7 @@ class TestUserLifecycleAndAdminSseRevocation:
         colliding_name = f"user-{owner_id}"
         await storage.create_user(colliding_name, role="reviewer")
         request = SimpleNamespace(
-            state=SimpleNamespace(username="admin", role="admin", is_admin=True)
+            state=principal_state(username="admin", role="admin", is_admin=True)
         )
         await main_module.delete_user_endpoint(request, colliding_name)
         assert artifact_file.exists()
@@ -23075,7 +23085,7 @@ class TestUserLifecycleAndAdminSseRevocation:
             "<h1>old-secret</h1>", encoding="utf-8"
         )
         alice_req = SimpleNamespace(
-            state=SimpleNamespace(username="alice", role="admin", is_admin=True)
+            state=principal_state(username="alice", role="admin", is_admin=True)
         )
         with pytest.raises(HTTPException) as exc_info:
             await main_module.get_admin_chat_artifact(surviving_id, alice_req)
@@ -23378,17 +23388,26 @@ class TestUserLifecycleAndAdminSseRevocation:
         await storage.init_db()
         _, raw_key = await storage.create_admin_user("bearer-adm")
 
+        from rootcoz.auth import principal as auth_principal
+
         state = State()
-        state.username = "bearer-adm"
-        state.is_admin = True
-        state.role = "admin"
-        state.auth_session_token = ""
         req = SimpleNamespace(
             state=state,
             cookies={"rootcoz_session": "expired-or-non-admin-cookie"},
             headers={"authorization": f"Bearer {raw_key}"},
             client=None,
             is_disconnected=AsyncMock(return_value=False),
+        )
+        auth_principal.attach_principal(
+            req,
+            auth_principal.Principal(
+                username="bearer-adm",
+                role="admin",
+                is_admin=True,
+                authenticated=True,
+                auth_session_token="",
+                auth_strategy="api_key",
+            ),
         )
         assert await main_module._is_admin_sse_authorized(req) is True
 
@@ -23544,14 +23563,14 @@ class TestUserLifecycleAndAdminSseRevocation:
         # Ambiguous sanitized dir (`a..b` vs `a_b`) must never be assigned to a_b.
         await storage.change_user_role("a_b", "admin")
         ab_req = SimpleNamespace(
-            state=SimpleNamespace(username="a_b", role="admin", is_admin=True)
+            state=principal_state(username="a_b", role="admin", is_admin=True)
         )
         with pytest.raises(HTTPException) as ab_exc:
             await main_module.get_admin_chat_artifact(colliding_id, ab_req)
         assert ab_exc.value.status_code == 404
 
         adm_req = SimpleNamespace(
-            state=SimpleNamespace(username="existing-adm", role="admin", is_admin=True)
+            state=principal_state(username="existing-adm", role="admin", is_admin=True)
         )
         resp = await main_module.get_admin_chat_artifact(legacy_id, adm_req)
         assert resp.body == b"<h1>migrated</h1>"
@@ -23559,7 +23578,7 @@ class TestUserLifecycleAndAdminSseRevocation:
         # Demoted admin keeps migrated report when promoted back to admin.
         await storage.change_user_role("demoted-adm", "admin")
         demoted_req = SimpleNamespace(
-            state=SimpleNamespace(username="demoted-adm", role="admin", is_admin=True)
+            state=principal_state(username="demoted-adm", role="admin", is_admin=True)
         )
         demoted_resp = await main_module.get_admin_chat_artifact(
             demoted_id, demoted_req
@@ -23660,7 +23679,11 @@ async def test_a_viewer_reads_their_own_sign_in_methods(temp_db_path: Path) -> N
     for client in make_app_client(temp_db_path):
         await _sign_in_as(client, "vicky", role="viewer")
         await storage.add_user_identity(
-            "vicky", "google", "sub-v", email="vicky@example.com"
+            "vicky",
+            "google",
+            "sub-v",
+            email="vicky@example.com",
+            eligibility_check=_default_eligibility_check,
         )
 
         response = client.get("/api/user/identities")
@@ -23686,15 +23709,23 @@ async def test_only_a_reviewer_can_unlink_a_sign_in_method(
     """The writes stay reviewer-level: a viewer is refused, a reviewer proceeds."""
     for client in make_app_client(temp_db_path):
         await _sign_in_as(client, "vicky", role="viewer")
-        await storage.add_user_identity("vicky", "google", "sub-v")
-        await storage.add_user_identity("vicky", "github", "gh-v")
+        await storage.add_user_identity(
+            "vicky", "google", "sub-v", eligibility_check=_default_eligibility_check
+        )
+        await storage.add_user_identity(
+            "vicky", "github", "gh-v", eligibility_check=_default_eligibility_check
+        )
 
         assert client.delete("/api/user/identities/github").status_code == 403
         assert len(await storage.list_user_identities("vicky")) == 2
 
         await _sign_in_as(client, "ruthn")
-        await storage.add_user_identity("ruthn", "google", "sub-r")
-        await storage.add_user_identity("ruthn", "github", "gh-r")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-r", eligibility_check=_default_eligibility_check
+        )
+        await storage.add_user_identity(
+            "ruthn", "github", "gh-r", eligibility_check=_default_eligibility_check
+        )
 
         assert client.delete("/api/user/identities/github").status_code == 200
         assert [
@@ -23787,7 +23818,9 @@ async def test_the_last_method_refusal_names_remedies_that_work(
     """A keyless account cannot remove its sole SSO identity; remedies stay accurate."""
     for client in make_app_client(temp_db_path):
         await storage.create_keyless_user("alice", status="active", created_via="proxy")
-        await storage.add_user_identity("alice", "google", "sub-a")
+        await storage.add_user_identity(
+            "alice", "google", "sub-a", eligibility_check=_default_eligibility_check
+        )
         session = await storage.create_session("alice", role="reviewer")
         client.cookies.set("rootcoz_session", session)
 
@@ -23801,7 +23834,9 @@ async def test_the_last_method_refusal_names_remedies_that_work(
 
         # The admin route shares the sentence, so both name the same remedies.
         await storage.create_keyless_user("bob", status="active", created_via="proxy")
-        await storage.add_user_identity("bob", "google", "sub-b")
+        await storage.add_user_identity(
+            "bob", "google", "sub-b", eligibility_check=_default_eligibility_check
+        )
         admin_login(client)
         admin = client.delete("/api/admin/users/bob/identities/google")
 
@@ -23816,7 +23851,11 @@ async def test_one_account_never_sees_anothers_sign_in_methods(
     for client in make_app_client(temp_db_path):
         await _sign_in_as(client, "alice")
         await storage.add_user_identity(
-            "alice", "google", "sub-a", email="alice@example.com"
+            "alice",
+            "google",
+            "sub-a",
+            email="alice@example.com",
+            eligibility_check=_default_eligibility_check,
         )
         assert [
             identity["email"]

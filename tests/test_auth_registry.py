@@ -244,11 +244,11 @@ async def test_a_renewal_token_is_reissued_even_when_a_bearer_key_wins(
             cookies={"rootcoz_session": session_token},
             headers={"authorization": f"Bearer {api_key}"},
         )
-        identity = await registry.resolve_identity(request, get_settings())
+        resolution = await registry.resolve_auth(request, get_settings())
 
-        assert identity is not None
-        assert identity.strategy_name == "api_key"
-        assert request.state.renew_session_token == session_token
+        assert resolution.identity is not None
+        assert resolution.identity.strategy_name == "api_key"
+        assert resolution.side_effects.renew_session_token == session_token
 
 
 async def test_an_admin_session_is_final(temp_db_path: Path) -> None:

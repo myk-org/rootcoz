@@ -35,6 +35,7 @@ from tests.conftest import (
     MACHINE_GLOBAL_ARTIFACT_ROOT,
     AdvancingClock,
     capture_main_logs,
+    principal_state,
 )
 
 _TEST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
@@ -1953,7 +1954,7 @@ class TestTheNoticeRendersAboveTheAnswer:
             main, "_check_chat_session_choice", AsyncMock(return_value=("sid", "user"))
         )
         request = SimpleNamespace(
-            state=SimpleNamespace(username="alice", is_admin=admin, role="admin")
+            state=principal_state(username="alice", is_admin=admin, role="admin")
         )
         body = ChatMessageRequest(message="open a GitHub issue for this failure")
         sent = await (
@@ -2043,7 +2044,7 @@ class TestTheNoticeRendersAboveTheAnswer:
             "rootcoz.storage.get_user_tokens", AsyncMock(return_value=tokens)
         )
         request = SimpleNamespace(
-            state=SimpleNamespace(username="alice", is_admin=False, role="admin")
+            state=principal_state(username="alice", is_admin=False, role="admin")
         )
         body = ChatMessageRequest(message="please file a Jira issue for this failure")
         await main.send_chat_message("job", body, request, BackgroundTasks())
@@ -5647,7 +5648,7 @@ def _generic_sentence(status: int) -> str:
 
 def _chat_init_request():
     return SimpleNamespace(
-        state=SimpleNamespace(username="alice", is_admin=True, role="admin")
+        state=principal_state(username="alice", is_admin=True, role="admin")
     )
 
 
