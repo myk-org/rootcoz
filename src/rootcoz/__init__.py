@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 
-__version__ = "5.1.0"
+__version__ = "5.1.1"
 
 # The `rootcoz` parent logger is the single log-level authority: module
 # loggers are created NOTSET (see get_child_logger) and inherit this level
