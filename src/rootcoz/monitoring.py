@@ -356,11 +356,10 @@ _SIDECAR_DIR_CANDIDATES = (
     pathlib.Path(__file__).resolve().parents[2] / "sidecar-helper",
 )
 
-# npm package name -> key exposed under /api/health "components"
+# key -> npm package name exposed under /api/admin/component-versions "components"
 _SIDECAR_COMPONENT_PACKAGES = {
     "pi": "@earendil-works/pi-coding-agent",
     "pi_sidecar": "@myk-org/pi-sidecar",
-    "pi_orchestrator_config": "pi-orchestrator-config",
     "pi_vertex_claude": "@myk-org/pi-vertex-claude",
 }
 

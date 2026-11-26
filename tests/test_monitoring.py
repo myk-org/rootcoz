@@ -1511,6 +1511,45 @@ def test_compute_component_versions_handles_non_object_manifests(tmp_path, monke
     assert versions["pi_sidecar"] is None
     assert versions["pi"] == "1.2.3"
     assert "acpx" not in versions
+    assert "pi_orchestrator_config" not in versions
+
+
+def test_compute_component_versions_omits_pi_orchestrator_config(tmp_path, monkeypatch):
+    """Obsolete pi-orchestrator-config must never appear in sidecar inventory (#679)."""
+    from rootcoz import monitoring as monitoring_module
+
+    assert "pi_orchestrator_config" not in monitoring_module._SIDECAR_COMPONENT_PACKAGES
+    assert set(monitoring_module._SIDECAR_COMPONENT_PACKAGES) == {
+        "pi",
+        "pi_sidecar",
+        "pi_vertex_claude",
+    }
+
+    # Case 1: sidecar node_modules exists without pi-orchestrator-config
+    node_modules = tmp_path / "node_modules"
+    for pkg, ver in (
+        ("@earendil-works/pi-coding-agent", "1.5.0"),
+        ("@myk-org/pi-sidecar", "4.20.1"),
+        ("@myk-org/pi-vertex-claude", "2.1.0"),
+    ):
+        pkg_dir = node_modules / pkg
+        pkg_dir.mkdir(parents=True)
+        (pkg_dir / "package.json").write_text(f'{{"version": "{ver}"}}')
+
+    monkeypatch.setattr(monitoring_module, "_SIDECAR_DIR_CANDIDATES", (tmp_path,))
+    monkeypatch.setattr(monitoring_module, "_component_versions_cache", None)
+    versions = monitoring_module._compute_component_versions()
+    assert versions["pi"] == "1.5.0"
+    assert versions["pi_sidecar"] == "4.20.1"
+    assert versions["pi_vertex_claude"] == "2.1.0"
+    assert "pi_orchestrator_config" not in versions
+
+    # Case 2: sidecar node_modules absent (fallback dict.fromkeys path)
+    monkeypatch.setattr(monitoring_module, "_SIDECAR_DIR_CANDIDATES", ())
+    monkeypatch.setattr(monitoring_module, "_component_versions_cache", None)
+    fallback_versions = monitoring_module._compute_component_versions()
+    assert "pi_orchestrator_config" not in fallback_versions
+    assert {"pi", "pi_sidecar", "pi_vertex_claude", "node"} == set(fallback_versions)
 
 
 async def test_the_instantaneous_trigger_is_untouched(monkeypatch) -> None:
