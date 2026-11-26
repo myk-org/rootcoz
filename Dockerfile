@@ -43,8 +43,7 @@ RUN npm prune --omit=dev
 
 # Prune build-only artifacts and non-target-arch prebuilds before COPY into the
 # runtime stage, then set group-write permissions here to avoid a runtime CoW layer.
-# Keep onnxruntime-* untouched (tracked separately in myk-org/pi-config) and preserve
-# runtime .js/.mjs/.cjs/.json/.node/.wasm files and node_modules/.bin/{trail,pi}.
+# Preserve runtime .js/.mjs/.cjs/.json/.node/.wasm files and node_modules/.bin/{trail,pi}.
 RUN set -e \
     && ARCH="$(uname -m)" \
     && case "$ARCH" in \
@@ -52,14 +51,14 @@ RUN set -e \
         aarch64|arm64) NODE_PREBUILD="linux-arm64" ;; \
         *) NODE_PREBUILD="" ;; \
     esac \
-    && find /sidecar/node_modules -path '*/onnxruntime-*' -prune -o \
+    && find /sidecar/node_modules \
         -type f \( -name '*.map' -o -name '*.o' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' \) \
         -exec rm -f {} + \
-    && find /sidecar/node_modules -path '*/onnxruntime-*' -prune -o \
+    && find /sidecar/node_modules \
         -type d \( -name 'obj.target' -o -name '.deps' -o -name 'test' -o -name 'tests' -o -name '__tests__' -o -name 'docs' \) \
         -prune -exec rm -rf {} + \
     && if [ -n "$NODE_PREBUILD" ]; then \
-        find /sidecar/node_modules -path '*/onnxruntime-*' -prune -o \
+        find /sidecar/node_modules \
             -type d -name 'prebuilds' -exec sh -c ' \
                 keep="$1"; shift; \
                 for prebuild_dir in "$@"; do \

@@ -88,3 +88,15 @@ def test_sidecar_requirement_floor_has_the_events_route() -> None:
             f"{source} requires {requirement!r}, below the 4.20.1 floor that ships "
             "GET /sessions/:id/events"
         )
+
+
+def test_sidecar_requirement_floor_drops_orchestrator_config_bloat() -> None:
+    """Both manifests must require >=5.1.1 (slim sidecar without pi-orchestrator-config)."""
+    for requirement, source in (
+        (_npm_requirement(), "sidecar-helper/package.json"),
+        (_pypi_requirement(), "pyproject.toml"),
+    ):
+        assert _floor(requirement) >= (5, 1, 1), (
+            f"{source} requires {requirement!r}, below the 5.1.1 floor that drops "
+            "the pi-orchestrator-config / onnxruntime dependency chain"
+        )

@@ -11,15 +11,17 @@ Locks in the multi-stage layout that eliminates ~1.5+ GB of container bloat:
       `/app/.venv/bin/uvicorn` directly without shipping `uv` at runtime.
 - P5: `sidecar-builder` prunes `*.map`, `node-gyp` intermediates, non-target
       arch `prebuilds`, and package `test`/`tests`/`docs` directories before
-      `COPY` while leaving `onnxruntime-*`, `third_party/graft-LICENSE`, and
+      `COPY` while keeping `third_party/graft-LICENSE`, `yaml/dist/doc`, and
       `/app/sidecar-helper/bin/{trail,pi}` intact.
 """
 
+import json
 import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = REPO_ROOT / "Dockerfile"
+SIDECAR_LOCKFILE = REPO_ROOT / "sidecar-helper" / "package-lock.json"
 
 _FROM_RE = re.compile(
     r"^FROM\s+(?P<image>\S+)(?:\s+AS\s+(?P<name>\S+))?", re.IGNORECASE
@@ -125,7 +127,6 @@ def test_p5_sidecar_builder_prunes_build_bloat_and_preserves_runtime_assets() ->
     _, sidecar_body = _stage_by_name("sidecar-builder")
     active = _active_lines(sidecar_body)
     for token in (
-        "-path '*/onnxruntime-*' -prune",
         "-name '*.map'",
         "-name '*.o'",
         "-name 'obj.target'",
@@ -151,6 +152,28 @@ def test_p5_sidecar_builder_prunes_build_bloat_and_preserves_runtime_assets() ->
     )
     assert "/app/sidecar-helper/bin/trail" in final_active
     assert "/app/sidecar-helper/bin/pi" in final_active
+
+
+def test_sidecar_lockfile_excludes_dropped_heavy_transitive_deps() -> None:
+    """Slimmed @myk-org/pi-sidecar >=5.1.1 must not pull pi-orchestrator-config or onnxruntime."""
+    lock = json.loads(SIDECAR_LOCKFILE.read_text(encoding="utf-8"))
+    package_paths = set(lock.get("packages", {}))
+    forbidden = (
+        "pi-orchestrator-config",
+        "@huggingface/transformers",
+        "onnxruntime-node",
+        "onnxruntime-web",
+    )
+    for pkg in forbidden:
+        matches = [
+            p
+            for p in package_paths
+            if p == f"node_modules/{pkg}" or p.endswith(f"/node_modules/{pkg}")
+        ]
+        assert not matches, (
+            f"Forbidden heavy transitive dependency {pkg!r} reappeared in "
+            f"sidecar-helper/package-lock.json: {matches}"
+        )
 
 
 def test_build_identity_args_follow_last_run() -> None:
