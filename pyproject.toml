@@ -7,7 +7,7 @@ requires-python = ">=3.14,<3.15"
 dependencies = [
     "joserfc>=1.8",
   "aiosqlite",
-  "pi-sidecar-client>=4.20.1",
+  "pi-sidecar-client>=5.1.1",
   "cryptography>=46.0.5",
   "defusedxml>=0.7.1",
   "fastapi",

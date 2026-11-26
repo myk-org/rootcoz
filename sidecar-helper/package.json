@@ -8,7 +8,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@myk-org/pi-sidecar": ">=4.20.1",
+    "@myk-org/pi-sidecar": ">=5.1.1",
     "@trailhq/trail-code": "^0.28.1"
   },
   "devDependencies": {

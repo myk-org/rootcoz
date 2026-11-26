@@ -16,7 +16,11 @@ COPY frontend/ .
 # Build the frontend. `npm run build` is `tsc -b && vite build`: the type check is
 # part of this stage on purpose. Plain `vite build` strips types without checking
 # them, which is how six type errors once reached a branch uncaught.
-RUN npm run build
+# Apply group-write permissions here before COPY so the runtime stage needs no
+# post-COPY `chmod -R g+w /app` (which would copy-on-write duplicate /app).
+RUN npm run build \
+    && test -f /frontend/dist/favicon.svg && test ! -e /frontend/dist/icons.svg \
+    && find /frontend/dist -not -type l -exec chmod g+w {} +
 
 # Sidecar build stage
 FROM registry.access.redhat.com/ubi9/nodejs-22-minimal AS sidecar-builder
@@ -37,6 +41,43 @@ COPY sidecar-helper/ .
 RUN npx tsc
 RUN npm prune --omit=dev
 
+# Prune build-only artifacts and non-target-arch prebuilds before COPY into the
+# runtime stage, then set group-write permissions here to avoid a runtime CoW layer.
+# Preserve runtime .js/.mjs/.cjs/.json/.node/.wasm files and node_modules/.bin/{trail,pi}.
+RUN set -e \
+    && ARCH="$(uname -m)" \
+    && case "$ARCH" in \
+        x86_64) NODE_PREBUILD="linux-x64" ;; \
+        aarch64|arm64) NODE_PREBUILD="linux-arm64" ;; \
+        *) NODE_PREBUILD="" ;; \
+    esac \
+    && find /sidecar/node_modules \
+        -type f \( -name '*.map' -o -name '*.o' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' \) \
+        -exec rm -f {} + \
+    && find /sidecar/node_modules \
+        -type d \( -name 'obj.target' -o -name '.deps' -o -name 'test' -o -name 'tests' -o -name '__tests__' -o -name 'docs' \) \
+        -prune -exec rm -rf {} + \
+    && if [ -n "$NODE_PREBUILD" ]; then \
+        find /sidecar/node_modules \
+            -type d -name 'prebuilds' -exec sh -c ' \
+                keep="$1"; shift; \
+                for prebuild_dir in "$@"; do \
+                    for target in "$prebuild_dir"/*; do \
+                        [ -e "$target" ] || continue; \
+                        [ "$(basename "$target")" = "$keep" ] && continue; \
+                        rm -rf "$target"; \
+                    done; \
+                done' _ "$NODE_PREBUILD" {} +; \
+    fi \
+    && find /sidecar/dist /sidecar/node_modules /sidecar/package.json -not -type l -exec chmod g+w {} +
+
+# Node.js runtime stage — copy only the node binary and bundled npm (used in
+# DEV_MODE=true), omitting /usr/include/node headers, gnupg, corepack, and yarn.
+# Keep current: the Node 22.23.0 keep-alive regression
+# (nodejs/node#63989, broke google-auth-library/gaxios/node-fetch@2) was fixed
+# in 22.23.4 — stay on >=22.23.4.
+FROM node:22.23.4-bookworm-slim AS node-runtime
+
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS builder
 
 WORKDIR /app
@@ -50,73 +91,59 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml uv.lock ./
 COPY src/ src/
 
-# Create venv and install dependencies
-RUN uv sync --frozen --no-dev
+# Create venv, install dependencies, and apply group-write permissions before COPY
+RUN uv sync --frozen --no-dev \
+    && find /app/.venv /app/src -not -type l -exec chmod g+w {} +
 
-# Production stage
-FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+# Production stage — plain python:3.14-slim-bookworm without shipping uv at runtime
+FROM python:3.14-slim-bookworm
 
 WORKDIR /app
 
-# Install bash, git (runtime for gitpython), curl (for NodeSource setup and healthcheck)
+# Install bash, git (runtime for gitpython), curl (healthcheck), ca-certificates, tini
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     git \
     curl \
     ca-certificates \
-    gnupg \
     tini \
     && rm -rf /var/lib/apt/lists/*
 
-# Keep current: the Node 22.23.0 keep-alive regression
-# (nodejs/node#63989, broke google-auth-library/gaxios/node-fetch@2) was fixed
-# and shipped in later 22.x releases — track the latest 22.x again.
-ARG NODEJS_DEB_VERSION=22.23.4-1nodesource1
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-RUN set -e \
-    && NODESOURCE_FPR=6F71F525282841EEDAF851B42F59B5F99B1BE0B4 \
-    && export GNUPGHOME="$(mktemp -d)" \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /tmp/nodesource.key \
-    && gpg --show-keys --with-colons /tmp/nodesource.key | awk -F: '$1=="fpr"{print $10}' | grep -qx "$NODESOURCE_FPR" \
-    && gpg --no-default-keyring --keyring /tmp/nodesource-tmp.gpg --import /tmp/nodesource.key \
-    && gpg --no-default-keyring --keyring /tmp/nodesource-tmp.gpg --export "$NODESOURCE_FPR" > /tmp/nodesource-export.gpg \
-    && gpg --dearmor -o /usr/share/keyrings/nodesource.gpg /tmp/nodesource-export.gpg \
-    && rm -f /tmp/nodesource.key /tmp/nodesource-tmp.gpg /tmp/nodesource-tmp.gpg~ /tmp/nodesource-export.gpg \
-    && rm -rf "$GNUPGHOME" \
-    && echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
-        > /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends nodejs=${NODEJS_DEB_VERSION} \
-    && rm -f /etc/apt/sources.list.d/nodesource.list /usr/share/keyrings/nodesource.gpg \
-    && rm -rf /var/lib/apt/lists/* \
+# Copy Node.js runtime and bundled npm from official node:22.23.4-bookworm-slim
+# (no gnupg, no /usr/include/node headers, no redundant global npm upgrade layer).
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s /usr/local/bin/node /usr/local/bin/nodejs \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && node --version && npm --version
-# Node 22.x bundles npm 10.x — upgrade to the current npm major so the
-# runtime stays current (the "new major version of npm available" notice
-# is npm telling us we're behind; being current is the fix, not silencing).
-RUN npm install -g npm@12.2.1 && npm --version
-SHELL ["/bin/sh", "-c"]
 
-# Create non-root user, data directory, and set permissions
-# OpenShift runs containers as a random UID in the root group (GID 0)
+# Create non-root user, data/app directories, and set OpenShift GID-0 permissions.
+# OpenShift runs containers as a random UID in the root group (GID 0).
+# Pre-creating parent directories under /app with appuser:0 and g+w ensures every
+# path under /app is group-writable without a post-COPY `chmod -R g+w /app` pass
+# (which would copy-on-write duplicate ~1.17 GB).
+# Only chmod directories under /home/appuser (files are already group-readable).
 RUN useradd --create-home --shell /bin/bash -g 0 appuser \
-    && mkdir -p /data \
-    && chown appuser:0 /data \
-    && chmod -R g+w /data
+    && mkdir -p /data /app /app/.venv /app/src /app/frontend/dist \
+        /app/sidecar-helper/dist /app/sidecar-helper/node_modules \
+        /app/sidecar-helper/bin /app/third_party \
+    && chown appuser:0 /data /app /app/.venv /app/src /app/frontend /app/frontend/dist \
+        /app/sidecar-helper /app/sidecar-helper/dist /app/sidecar-helper/node_modules \
+        /app/sidecar-helper/bin /app/third_party \
+    && chmod g+w /data /app /app/.venv /app/src /app/frontend /app/frontend/dist \
+        /app/sidecar-helper /app/sidecar-helper/dist /app/sidecar-helper/node_modules \
+        /app/sidecar-helper/bin /app/third_party \
+    && find /home/appuser -type d -exec chmod g=u {} +
 
-# Copy the virtual environment from builder
+# Copy the virtual environment and source code from builder (already g+w)
 COPY --chown=appuser:0 --from=builder /app/.venv /app/.venv
-
-# Copy project files needed by uv
-COPY --chown=appuser:0 --from=builder /app/pyproject.toml /app/uv.lock ./
-
-# Copy source code
 COPY --chown=appuser:0 --from=builder /app/src /app/src
 
-# Copy built frontend assets from frontend builder
+# Copy built frontend assets from frontend builder (already g+w)
 COPY --chown=appuser:0 --from=frontend-builder /frontend/dist /app/frontend/dist
-RUN test -f /app/frontend/dist/favicon.svg && test ! -e /app/frontend/dist/icons.svg
 
-# Copy sidecar
+# Copy sidecar (already pruned and g+w)
 COPY --chown=appuser:0 --from=sidecar-builder /sidecar/dist /app/sidecar-helper/dist
 COPY --chown=appuser:0 --from=sidecar-builder /sidecar/node_modules /app/sidecar-helper/node_modules
 COPY --chown=appuser:0 --from=sidecar-builder /sidecar/package.json /app/sidecar-helper/package.json
@@ -125,29 +152,20 @@ COPY --chown=appuser:0 third_party/graft-LICENSE /app/third_party/graft-LICENSE
 # so transitive npm binaries (e.g. acpx) from node_modules/.bin are never on PATH.
 RUN test -x /app/sidecar-helper/node_modules/.bin/trail \
     && test -x /app/sidecar-helper/node_modules/.bin/pi \
-    && mkdir -p /app/sidecar-helper/bin \
     && ln -sf /app/sidecar-helper/node_modules/.bin/trail /app/sidecar-helper/bin/trail \
-    && ln -sf /app/sidecar-helper/node_modules/.bin/pi /app/sidecar-helper/bin/pi
+    && ln -sf /app/sidecar-helper/node_modules/.bin/pi /app/sidecar-helper/bin/pi \
+    && chown -h appuser:0 /app/sidecar-helper/bin/trail /app/sidecar-helper/bin/pi
 
-# Copy entrypoint script
+# Copy entrypoint script and set permissions on the two build-context files only
 COPY --chown=appuser:0 entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
-
-# Make /app group-writable for OpenShift compatibility
-RUN chmod -R g+w /app
-
-# Make appuser home accessible by OpenShift arbitrary UID
-# Only chmod directories (not files) — files are already group-readable by default.
-# Directories need group write+execute for OpenShift's arbitrary UID (in GID 0)
-# to create config/cache files at runtime.
-RUN find /home/appuser -type d -exec chmod g=u {} + \
-    && npm cache clean --force 2>/dev/null; \
-    rm -rf /home/appuser/.npm/_cacache
+RUN chmod g+w /app/third_party/graft-LICENSE \
+    && chmod +x,g+w /app/entrypoint.sh
 
 # Switch back to non-root user for runtime
 USER appuser
 
-# Ensure allowlisted sidecar tools (trail, pi) are in PATH
+# Put the virtualenv (rootcoz CLI, uvicorn) and allowlisted sidecar tools (trail, pi) on PATH
+ENV PATH="/app/.venv/bin:${PATH}"
 ENV PATH="/app/sidecar-helper/bin:${PATH}"
 # Set HOME for OpenShift compatibility (random UID has no passwd entry)
 ENV HOME="/home/appuser"
@@ -180,9 +198,6 @@ ENV ROOTCOZ_BUILD_COMMIT=${GIT_COMMIT} \
     ROOTCOZ_BUILD_REF=${GIT_REF} \
     ROOTCOZ_BUILD_BUILT_AT=${BUILT_AT}
 
-# Use uv run for uvicorn
-# --no-sync prevents uv from attempting to modify the venv at runtime.
-# This is required for OpenShift where containers run as an arbitrary UID
-# and may not have write access to the .venv directory.
+# Invoke uvicorn directly from the built virtualenv without shipping uv at runtime.
 ENTRYPOINT ["tini", "--", "/app/entrypoint.sh"]
-CMD ["uv", "run", "--no-sync", "uvicorn", "rootcoz.main:app", "--host", "0.0.0.0"]
+CMD ["/app/.venv/bin/uvicorn", "rootcoz.main:app", "--host", "0.0.0.0"]

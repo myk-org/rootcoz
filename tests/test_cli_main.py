@@ -5813,6 +5813,21 @@ class TestAdminComponentVersionsCommand:
         parsed = json.loads(result.output)
         assert parsed["components"] == {"pi": "1.0.0"}
 
+    def test_component_versions_omits_pi_orchestrator_config(self, mock_client):
+        mock_client.admin_component_versions.return_value = {
+            "components": {
+                "pi": "1.5.0",
+                "pi_sidecar": "4.20.1",
+                "pi_vertex_claude": "2.1.0",
+                "node": "22.23.4",
+            }
+        }
+        result = runner.invoke(app, ["admin", "component-versions"])
+        assert result.exit_code == 0
+        assert "pi_orchestrator_config" not in result.output
+        assert "not installed" not in result.output
+        assert "pi_sidecar: 4.20.1" in result.output
+
 
 class TestAdminServerStatusCommand:
     _PAYLOAD: ClassVar[dict] = {
