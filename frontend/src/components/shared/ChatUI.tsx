@@ -424,8 +424,18 @@ export function ChatUI({
     }
   }, [])
 
+  const resetScrollPin = useCallback(() => {
+    pinnedToBottomRef.current = true
+    programmaticScrollTopRef.current = null
+    lastScrollTopRef.current = 0
+  }, [])
+
   const applySession = useCallback((active: ChatHistory['active_session'], version?: string) => {
-    sessionVersionRef.current = active ? version ?? null : null
+    const nextVersion = active ? version ?? null : null
+    if (nextVersion !== sessionVersionRef.current) {
+      resetScrollPin()
+    }
+    sessionVersionRef.current = nextVersion
     if (!active) {
       confirmedInitRef.current = false
       setSessionChoice(null)
@@ -434,7 +444,7 @@ export function ChatUI({
       setSessionChoice({ provider: active.ai_provider, model: active.ai_model, credentialSource: active.credential_source })
       setSessionStarted(true)
     }
-  }, [])
+  }, [resetScrollPin])
 
   const clearStallWatchdog = useCallback(() => {
     if (stallWatchdogRef.current) {
@@ -791,12 +801,6 @@ export function ChatUI({
   }, [syncHistory])
 
   useSSE(sseTopic, chatEvents, { onReconnect: chatSseOnReconnect })
-
-  const resetScrollPin = useCallback(() => {
-    pinnedToBottomRef.current = true
-    programmaticScrollTopRef.current = null
-    lastScrollTopRef.current = 0
-  }, [])
 
   const scrollToBottom = useCallback(() => {
     const el = messagesContainerRef.current

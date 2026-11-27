@@ -1803,3 +1803,46 @@ it('auto-scrolls back to the bottom when the user explicitly submits a new messa
   await waitFor(() => expect(scroller.scrollTop).toBe(1650))
   expect(composer).toBeDisabled()
 })
+
+it('resets the scroll pin and scrolls to bottom when another tab replaces the active session', async () => {
+  setup()
+  let sessionVersion = 'session-v1'
+  let currentMessages = [
+    makeMessage(1, 'user', 'first session question'),
+    makeMessage(2, 'assistant', 'first session answer'),
+  ]
+  get.mockImplementation(async (path: string) => path.startsWith('/api/ai-models')
+    ? catalog
+    : {
+      messages: currentMessages,
+      total: currentMessages.length,
+      active_session: ACTIVE_SESSION,
+      active_session_version: sessionVersion,
+    })
+
+  render(page())
+  expect(await screen.findByText('first session answer')).toBeInTheDocument()
+  const scroller = screen.getByText('first session answer').closest('.overflow-y-auto') as HTMLElement
+  stubScrollMetrics(scroller, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+  fireEvent.scroll(scroller)
+
+  // Scroll up in session-v1; ordinary refresh in the same session stays put.
+  scroller.scrollTop = 300
+  fireEvent.scroll(scroller)
+  const sseCall = vi.mocked(useSSE).mock.lastCall!
+  await act(async () => { sseCall[1]['chat-changed']('') })
+  await waitFor(() => expect(get.mock.calls.filter(([p]) => p === '/api/chat/job')).toHaveLength(2))
+  expect(scroller.scrollTop).toBe(300)
+
+  // Another tab replaces the session (new active_session_version): scroll pin
+  // resets so the replacement conversation lands at the bottom.
+  sessionVersion = 'session-v2'
+  currentMessages = [
+    makeMessage(10, 'user', 'replacement session question'),
+    makeMessage(11, 'assistant', 'replacement session answer'),
+  ]
+  stubScrollMetrics(scroller, { scrollHeight: 2200, clientHeight: 500 })
+  await act(async () => { sseCall[1]['chat-changed']('') })
+  expect(await screen.findByText('replacement session answer')).toBeInTheDocument()
+  expect(scroller.scrollTop).toBe(1700)
+})
