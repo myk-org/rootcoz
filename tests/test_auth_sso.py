@@ -11,15 +11,19 @@ or create one), and a `(provider, subject)` link is the only thing that resolves
 a login automatically.
 """
 
+import asyncio
 import base64
 import contextlib
 import hashlib
 import inspect
 import json
+import os
 import sqlite3
 import time
+from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from typing import Any
+from unittest.mock import AsyncMock, patch
 from urllib.parse import unquote
 
 import pytest
@@ -30,7 +34,13 @@ from rootcoz.auth.approval import (
     default_eligibility_check as _default_eligibility_check,
 )
 from rootcoz.auth.sso import AuthError, ClaimSet, configured_providers, get_provider
+from rootcoz.auth.sso import oidc as oidc_module
 from rootcoz.auth.sso import state as sso_state
+from rootcoz.auth.sso.base import (
+    OAuthTokenBundle,
+    decrypt_oauth_tokens,
+    encrypt_oauth_tokens,
+)
 from rootcoz.auth.sso.google import GoogleProvider
 from rootcoz.auth.sso.oidc import OIDCProvider
 from rootcoz.auth.sso.redhat import RedHatSSOProvider
@@ -6686,3 +6696,837 @@ async def test_proxy_login_provisions_active_account_when_approval_not_required(
         ]
         assert len(provisioned) == 1
         assert provisioned[0]["details"]["status"] == "active"
+
+
+# ---------------------------------------------------------------------------
+# Browser-session OIDC tokens (#183 `sso` mode credential)
+# ---------------------------------------------------------------------------
+
+
+def _token_bundle(
+    access_token: str = "rh-access-token",
+    *,
+    refresh_token: str | None = "rh-refresh-token",
+    expires_at: float | None = None,
+    provider: str = "redhat",
+) -> OAuthTokenBundle:
+    return OAuthTokenBundle(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_at=expires_at,
+        provider=provider,
+    )
+
+
+def test_oauth_token_bundle_repr_never_shows_a_credential() -> None:
+    """A stray log line or exception must not print a usable token."""
+    bundle = _token_bundle(access_token="access-secret", refresh_token="refresh-secret")
+    rendered = repr(bundle)
+    assert "access-secret" not in rendered
+    assert "refresh-secret" not in rendered
+    assert "provider='redhat'" in rendered
+
+
+def test_oauth_tokens_round_trip_through_encryption() -> None:
+    bundle = _token_bundle(expires_at=time.time() + 300)
+    ciphertext = encrypt_oauth_tokens(bundle)
+
+    assert "rh-access-token" not in ciphertext
+    assert "rh-refresh-token" not in ciphertext
+    assert decrypt_oauth_tokens(ciphertext) == bundle
+
+
+@pytest.mark.parametrize(
+    ("raw", "seal"),
+    [
+        (None, False),
+        ("", False),
+        ("not-a-fernet-token", False),
+        ("not json", True),
+        (json.dumps({"refresh_token": "only-a-refresh-token"}), True),
+    ],
+    ids=[
+        "none",
+        "empty",
+        "not-a-fernet-token",
+        "sealed-not-json",
+        "sealed-missing-access-token",
+    ],
+)
+def test_unusable_oauth_token_blobs_decrypt_to_none(
+    raw: str | None, seal: bool
+) -> None:
+    """Corrupt or empty input is "no tokens", never a half-usable bundle."""
+    ciphertext = encrypt_value(raw) if seal and raw is not None else raw
+    assert decrypt_oauth_tokens(ciphertext) is None
+
+
+def test_plaintext_json_is_not_a_token_blob() -> None:
+    """An unsealed JSON blob must not be trusted as if the server sealed it.
+
+    The session column is attacker-reachable data; only ciphertext the server
+    produced can carry the caller's delegated credential.
+    """
+    assert decrypt_oauth_tokens('{"access_token": "plain-tok"}') is None
+
+
+async def test_oidc_exchange_keeps_tokens_out_of_the_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``oauth_tokens`` is a separate field: claims reach audit/ticket JSON."""
+    provider = RedHatSSOProvider(
+        client_id="cid", client_secret="sec", issuer=_REDHAT_REALM
+    )
+    token = {
+        "access_token": "access-token",
+        "refresh_token": "refresh-token",
+        "expires_in": 300,
+    }
+    monkeypatch.setattr(
+        provider,
+        "metadata",
+        AsyncMock(return_value={"token_endpoint": f"{_REDHAT_REALM}/token"}),
+    )
+    monkeypatch.setattr(provider, "_post_token", AsyncMock(return_value=token))
+    monkeypatch.setattr(
+        provider,
+        "_claims_from_token",
+        AsyncMock(
+            return_value={
+                "sub": "rh-1",
+                "email": "alice@redhat.com",
+                "preferred_username": "alice",
+            }
+        ),
+    )
+
+    claims = await provider.exchange(
+        code="c", redirect_uri="https://rootcoz.example/api/auth/sso/redhat/callback"
+    )
+
+    assert claims.oauth_tokens is not None
+    assert claims.oauth_tokens.access_token == "access-token"
+    assert claims.oauth_tokens.refresh_token == "refresh-token"
+    assert claims.oauth_tokens.provider == "redhat"
+    assert "access_token" not in claims.claims
+    assert "refresh_token" not in claims.claims
+
+
+async def test_refresh_access_token_keeps_the_old_refresh_token_when_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Some providers do not rotate the refresh token — keep the one we sent."""
+    provider = RedHatSSOProvider(
+        client_id="cid", client_secret="sec", issuer=_REDHAT_REALM
+    )
+    monkeypatch.setattr(
+        provider,
+        "metadata",
+        AsyncMock(return_value={"token_endpoint": f"{_REDHAT_REALM}/token"}),
+    )
+    seen: dict[str, Any] = {}
+
+    async def fake_request(method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        seen["method"] = method
+        return {"access_token": "refreshed-token", "expires_in": 300}
+
+    monkeypatch.setattr(oidc_module, "request_json", fake_request)
+
+    bundle = await provider.refresh_access_token("old-refresh-token")
+
+    assert bundle.access_token == "refreshed-token"
+    assert bundle.refresh_token == "old-refresh-token"
+    assert bundle.provider == "redhat"
+    assert bundle.expires_at is not None
+    assert seen["data"]["grant_type"] == "refresh_token"
+    assert seen["data"]["refresh_token"] == "old-refresh-token"
+    assert seen["data"]["client_id"] == "cid"
+
+
+async def test_refresh_access_token_reports_a_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = RedHatSSOProvider(
+        client_id="cid", client_secret="sec", issuer=_REDHAT_REALM
+    )
+    monkeypatch.setattr(
+        provider,
+        "metadata",
+        AsyncMock(return_value={"token_endpoint": f"{_REDHAT_REALM}/token"}),
+    )
+
+    async def failing_request(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AuthError("token_refresh_failed", "the IdP said no")
+
+    monkeypatch.setattr(oidc_module, "request_json", failing_request)
+
+    with pytest.raises(AuthError) as excinfo:
+        await provider.refresh_access_token("refresh-token")
+    assert excinfo.value.reason == "token_refresh_failed"
+
+
+async def test_exchange_token_for_audience_uses_rfc8693(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin every field of the token-exchange request — Keycloak needs them."""
+    provider = RedHatSSOProvider(
+        client_id="cid", client_secret="sec", issuer=_REDHAT_REALM
+    )
+    monkeypatch.setattr(
+        provider,
+        "metadata",
+        AsyncMock(return_value={"token_endpoint": f"{_REDHAT_REALM}/token"}),
+    )
+    seen: dict[str, Any] = {}
+
+    async def fake_request(method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        seen["method"] = method
+        return {"access_token": "audience-token", "expires_in": 300}
+
+    monkeypatch.setattr(oidc_module, "request_json", fake_request)
+
+    bundle = await provider.exchange_token_for_audience(
+        subject_token="subject-token", audience="resultsdb", scope="openid"
+    )
+
+    data = seen["data"]
+    assert seen["method"] == "POST"
+    assert data["grant_type"] == "urn:ietf:params:oauth:grant-type:token-exchange"
+    assert data["subject_token"] == "subject-token"
+    assert data["subject_token_type"] == (
+        "urn:ietf:params:oauth:token-type:access_token"
+    )
+    assert data["requested_token_type"] == (
+        "urn:ietf:params:oauth:token-type:access_token"
+    )
+    assert data["audience"] == "resultsdb"
+    assert data["scope"] == "openid"
+    assert data["client_id"] == "cid"
+    assert bundle.access_token == "audience-token"
+    assert bundle.provider == "redhat"
+
+
+async def test_exchange_token_for_audience_omits_an_unset_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = RedHatSSOProvider(
+        client_id="cid", client_secret="sec", issuer=_REDHAT_REALM
+    )
+    monkeypatch.setattr(
+        provider,
+        "metadata",
+        AsyncMock(return_value={"token_endpoint": f"{_REDHAT_REALM}/token"}),
+    )
+    seen: dict[str, Any] = {}
+
+    async def fake_request(_method: str, _url: str, **kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return {"access_token": "audience-token"}
+
+    monkeypatch.setattr(oidc_module, "request_json", fake_request)
+
+    await provider.exchange_token_for_audience(
+        subject_token="subject-token", audience="resultsdb"
+    )
+    assert "scope" not in seen["data"]
+
+
+async def test_exchange_token_for_audience_reports_a_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = RedHatSSOProvider(
+        client_id="cid", client_secret="sec", issuer=_REDHAT_REALM
+    )
+    monkeypatch.setattr(
+        provider,
+        "metadata",
+        AsyncMock(return_value={"token_endpoint": f"{_REDHAT_REALM}/token"}),
+    )
+
+    async def failing_request(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AuthError("token_exchange_failed", "the IdP said no")
+
+    monkeypatch.setattr(oidc_module, "request_json", failing_request)
+
+    with pytest.raises(AuthError) as excinfo:
+        await provider.exchange_token_for_audience(
+            subject_token="subject-token", audience="resultsdb"
+        )
+    assert excinfo.value.reason == "token_exchange_failed"
+
+
+def _redhat_claims(bundle: OAuthTokenBundle) -> ClaimSet:
+    return replace(
+        ClaimSet(
+            subject="rh-1",
+            username_hint="alice",
+            email="alice@redhat.com",
+            claims={"sub": "rh-1", "email": "alice@redhat.com"},
+        ),
+        oauth_tokens=bundle,
+    )
+
+
+async def test_a_redhat_browser_login_stores_the_encrypted_token_blob(
+    temp_db_path: Path,
+) -> None:
+    """A directly resolved (linked) login keeps the IdP tokens for delegated calls."""
+    bundle = _token_bundle(expires_at=time.time() + 300)
+    for client in make_app_client(temp_db_path, _REDHAT_ENV):
+        await storage.create_user("alice")
+        await storage.add_user_identity(
+            "alice", "redhat", "rh-1", eligibility_check=_default_eligibility_check
+        )
+        sealed, state = _sealed(provider="redhat")
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+        with patch.object(
+            RedHatSSOProvider,
+            "exchange",
+            return_value=_redhat_claims(bundle),
+            autospec=True,
+        ):
+            response = client.get(
+                f"/api/auth/sso/redhat/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303, response.text
+        session_token = client.cookies.get("rootcoz_session")
+        stored = await storage.get_session_sso_tokens(session_token)
+        assert stored
+        assert decrypt_oauth_tokens(stored) == bundle
+        # Encrypted at rest: neither credential appears in the column.
+        assert "rh-access-token" not in stored
+        assert "rh-refresh-token" not in stored
+
+
+@pytest.mark.parametrize("finish", ["create", "link"])
+async def test_a_first_login_ticket_carries_the_tokens_into_the_session(
+    temp_db_path: Path, finish: str
+) -> None:
+    """The choice screen must not drop the tokens the callback received."""
+    bundle = _token_bundle(expires_at=time.time() + 300)
+    for client in make_app_client(temp_db_path, _REDHAT_ENV):
+        api_key = ""
+        if finish == "link":
+            _, api_key = await storage.create_user("bob", role="reviewer")
+        sealed, state = _sealed(provider="redhat")
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+        with patch.object(
+            RedHatSSOProvider,
+            "exchange",
+            return_value=_redhat_claims(bundle),
+            autospec=True,
+        ):
+            response = client.get(
+                f"/api/auth/sso/redhat/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303, response.text
+        location = response.headers["location"]
+        ticket = unquote(location.split("sso_ticket=", 1)[1])
+        record = await storage.peek_sso_ticket(ticket)
+        assert record is not None
+        assert decrypt_oauth_tokens(record["sso_tokens_enc"]) == bundle
+
+        finished = (
+            client.post(
+                "/api/auth/sso/create",
+                json={"ticket": ticket, "username": "alice"},
+            )
+            if finish == "create"
+            else client.post(
+                "/api/auth/sso/link",
+                json={"ticket": ticket, "username": "bob", "api_key": api_key},
+            )
+        )
+
+        assert finished.status_code == 200, finished.text
+        session_token = client.cookies.get("rootcoz_session")
+        stored = await storage.get_session_sso_tokens(session_token)
+        assert decrypt_oauth_tokens(stored) == bundle
+
+
+async def test_a_google_browser_login_stores_no_token_blob(
+    temp_db_path: Path,
+) -> None:
+    """Only Red Hat SSO tokens are useful for delegated calls; others stay token-free."""
+    bundle = _token_bundle(provider="google")
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        await storage.add_user_identity(
+            "alice", "google", "sub-1", eligibility_check=_default_eligibility_check
+        )
+        sealed, state = _sealed()
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+        with patch.object(
+            GoogleProvider,
+            "exchange",
+            return_value=replace(_claims(), oauth_tokens=bundle),
+            autospec=True,
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303, response.text
+        session_token = client.cookies.get("rootcoz_session")
+        assert await storage.get_session_sso_tokens(session_token) is None
+
+
+# ---------------------------------------------------------------------------
+# Delegated Red Hat SSO tokens for a downstream service (Greenwave `sso` mode)
+# ---------------------------------------------------------------------------
+
+_RESULTSDB_URL = "https://resultsdb.example.com"
+
+
+def _delegated_settings(**kwargs: Any) -> Any:
+    """Settings with only the Red Hat SSO client configured (env cleared)."""
+    from pydantic import SecretStr
+
+    from rootcoz.config import Settings
+
+    base: dict[str, Any] = {
+        "greenwave_url": _RESULTSDB_URL,
+        "greenwave_auth_mode": "sso",
+        "sso_redhat_issuer": _REDHAT_REALM,
+        "sso_redhat_client_id": "rootcoz",
+        "sso_redhat_client_secret": SecretStr("sec"),  # pragma: allowlist secret
+    }
+    base.update(kwargs)
+    with patch.dict(os.environ, {}, clear=True):
+        return Settings(_env_file=None, **base)
+
+
+def _fake_redhat_provider() -> Any:
+    """A provider whose refresh/exchange calls the test controls."""
+    provider = AsyncMock()
+    provider.refresh_access_token = AsyncMock()
+    provider.exchange_token_for_audience = AsyncMock()
+    return provider
+
+
+class _SessionStore:
+    """A one-session store stand-in whose writes stick (unless told not to)."""
+
+    def __init__(
+        self, bundle: OAuthTokenBundle | None, *, update_lands: bool = True
+    ) -> None:
+        self.blob = encrypt_oauth_tokens(bundle) if bundle is not None else None
+        self.update_lands = update_lands
+        self.writes = 0
+
+    async def get_session_sso_tokens(self, _token: str) -> str | None:
+        return self.blob
+
+    async def update_session_sso_tokens(
+        self,
+        _token: str,
+        blob: str | None,
+        expected_sso_tokens_enc: str | None = None,
+    ) -> bool:
+        self.writes += 1
+        if not self.update_lands:
+            return False
+        # Compare-and-set, like the real store: a write that read an older
+        # ciphertext must not land on top of a newer (or revoked) one.
+        if expected_sso_tokens_enc is not None and expected_sso_tokens_enc != self.blob:
+            return False
+        self.blob = blob
+        return True
+
+
+@contextlib.contextmanager
+def _delegated_env(store: _SessionStore, provider: Any = None):
+    """Point the resolver at the in-memory store and a controllable provider."""
+    provider = provider if provider is not None else _fake_redhat_provider()
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(
+            patch.object(
+                storage, "get_session_sso_tokens", store.get_session_sso_tokens
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                storage, "update_session_sso_tokens", store.update_session_sso_tokens
+            )
+        )
+        stack.enter_context(
+            patch.object(RedHatSSOProvider, "from_settings", return_value=provider)
+        )
+        yield provider
+
+
+async def _resolve_delegated(
+    settings: Any,
+    store: _SessionStore,
+    provider: Any = None,
+    *,
+    auth_strategy: str = "session",
+    auth_provider: str | None = "redhat",
+    need_waiver_token: bool = False,
+) -> Any:
+    """Run the delegated resolver against the in-memory session store."""
+    from rootcoz.auth.sso import tokens as sso_tokens
+
+    with _delegated_env(store, provider):
+        return await sso_tokens.resolve_redhat_sso_tokens(
+            settings,
+            # One lock per session token: a unique token keeps this test's
+            # lock out of any other test's event loop.
+            session_token=f"sess-{id(store)}",
+            auth_strategy=auth_strategy,
+            auth_provider=auth_provider,
+            need_waiver_token=need_waiver_token,
+        )
+
+
+class TestResolveDelegatedRedHatTokens:
+    """Delegated tokens fail closed; only a browser Red Hat session works."""
+
+    @pytest.mark.parametrize(
+        ("auth_strategy", "auth_provider"),
+        [("api_key", None), ("proxy", None), ("session", "google")],
+    )
+    async def test_refuses_a_caller_without_a_browser_redhat_session(
+        self, auth_strategy: str, auth_provider: str | None
+    ) -> None:
+        from rootcoz.auth.sso.tokens import DelegatedTokenError
+
+        with pytest.raises(DelegatedTokenError) as excinfo:
+            await _resolve_delegated(
+                _delegated_settings(),
+                _SessionStore(_token_bundle()),
+                auth_strategy=auth_strategy,
+                auth_provider=auth_provider,
+            )
+        assert excinfo.value.status_code == 400
+
+    async def test_refuses_a_session_with_no_stored_tokens(self) -> None:
+        """A CLI device-flow session carries no OIDC bundle — 401, never a fallback."""
+        from rootcoz.auth.sso.tokens import DelegatedTokenError
+
+        with pytest.raises(DelegatedTokenError) as excinfo:
+            await _resolve_delegated(_delegated_settings(), _SessionStore(None))
+        assert excinfo.value.status_code == 401
+
+    async def test_refuses_a_bundle_from_another_provider(self) -> None:
+        from rootcoz.auth.sso.tokens import DelegatedTokenError
+
+        with pytest.raises(DelegatedTokenError) as excinfo:
+            await _resolve_delegated(
+                _delegated_settings(), _SessionStore(_token_bundle(provider="google"))
+            )
+        assert excinfo.value.status_code == 401
+
+    async def test_a_deployment_without_the_sso_client_refuses(self) -> None:
+        """No client to refresh/exchange with is a server config error (422)."""
+        from rootcoz.auth.sso.tokens import DelegatedTokenError
+        from rootcoz.config import Settings
+
+        with patch.dict(os.environ, {}, clear=True):
+            settings = Settings(
+                _env_file=None,
+                greenwave_url=_RESULTSDB_URL,
+                greenwave_auth_mode="sso",
+            )
+        from rootcoz.auth.sso import tokens as sso_tokens
+
+        # from_settings is NOT patched: this is the real "no client" answer.
+        store = _SessionStore(_token_bundle())
+        with (
+            patch.object(
+                storage, "get_session_sso_tokens", store.get_session_sso_tokens
+            ),
+            pytest.raises(DelegatedTokenError) as excinfo,
+        ):
+            await sso_tokens.resolve_redhat_sso_tokens(
+                settings,
+                session_token="sess",
+                auth_strategy="session",
+                auth_provider="redhat",
+            )
+        assert excinfo.value.status_code == 422
+
+    async def test_direct_token_mode_returns_the_session_access_token(self) -> None:
+        provider = _fake_redhat_provider()
+        tokens = await _resolve_delegated(
+            _delegated_settings(),
+            _SessionStore(_token_bundle(access_token="caller-access")),
+            provider,
+            need_waiver_token=True,
+        )
+        assert tokens.results_token == "caller-access"
+        assert tokens.waiver_token == "caller-access"
+        assert tokens.token_refreshed is False
+        provider.exchange_token_for_audience.assert_not_awaited()
+
+    async def test_expired_token_is_refreshed_and_persisted(self) -> None:
+        provider = _fake_redhat_provider()
+        provider.refresh_access_token.return_value = _token_bundle(
+            access_token="refreshed-access",
+            refresh_token="rotated-refresh",
+            expires_at=time.time() + 3600,
+        )
+        store = _SessionStore(
+            _token_bundle(
+                access_token="expired-access",
+                refresh_token="old-refresh",
+                expires_at=time.time() - 3600,
+            )
+        )
+
+        tokens = await _resolve_delegated(_delegated_settings(), store, provider)
+
+        assert tokens.results_token == "refreshed-access"
+        assert tokens.token_refreshed is True
+        provider.refresh_access_token.assert_awaited_once_with("old-refresh")
+        # The rotated bundle replaces the stored one, so the next push does not
+        # refresh again and the browser session keeps working.
+        persisted = decrypt_oauth_tokens(store.blob)
+        assert persisted is not None
+        assert persisted.access_token == "refreshed-access"
+        assert persisted.refresh_token == "rotated-refresh"
+
+    async def test_concurrent_requests_refresh_the_session_exactly_once(self) -> None:
+        """One expired session, many racing pushes: ONE refresh, one write.
+
+        Spending the same refresh token twice is what an IdP reads as token
+        reuse (and answers by revoking the grant), so the per-session lock plus
+        the re-read inside it must collapse the race.
+        """
+        refresh_calls: list[str] = []
+
+        async def _slow_refresh(refresh_token: str) -> OAuthTokenBundle:
+            refresh_calls.append(refresh_token)
+            # Yield while holding the lock, so every other caller queues on it.
+            await asyncio.sleep(0)
+            return _token_bundle(
+                access_token="refreshed-access",
+                refresh_token="rotated-refresh",
+                expires_at=time.time() + 3600,
+            )
+
+        provider = _fake_redhat_provider()
+        provider.refresh_access_token.side_effect = _slow_refresh
+        store = _SessionStore(_token_bundle(expires_at=time.time() - 3600))
+
+        from rootcoz.auth.sso import tokens as sso_tokens
+
+        with _delegated_env(store, provider):
+            resolved = await asyncio.gather(
+                *(
+                    sso_tokens.resolve_redhat_sso_tokens(
+                        _delegated_settings(),
+                        session_token=f"sess-{id(store)}",
+                        auth_strategy="session",
+                        auth_provider="redhat",
+                    )
+                    for _ in range(5)
+                )
+            )
+
+        assert refresh_calls == ["rh-refresh-token"]
+        assert store.writes == 1
+        assert [t.results_token for t in resolved] == ["refreshed-access"] * 5
+
+    async def test_a_session_revoked_mid_refresh_fails_closed(self) -> None:
+        """A refresh whose write does not land (logout/revoke) must not be used."""
+        from rootcoz.auth.sso.tokens import DelegatedTokenError
+
+        provider = _fake_redhat_provider()
+        provider.refresh_access_token.return_value = _token_bundle(
+            access_token="refreshed-access", expires_at=time.time() + 3600
+        )
+        store = _SessionStore(
+            _token_bundle(expires_at=time.time() - 3600), update_lands=False
+        )
+
+        with pytest.raises(DelegatedTokenError) as excinfo:
+            await _resolve_delegated(_delegated_settings(), store, provider)
+
+        assert excinfo.value.status_code == 401
+        provider.refresh_access_token.assert_awaited_once()
+
+    async def test_a_session_unlinked_mid_refresh_cannot_resurrect_the_blob(
+        self, temp_db_path: Path
+    ) -> None:
+        """A revocation that lands during the IdP call wins; the push gets 401.
+
+        The refresh read the bundle before the unlink and would persist the
+        rotated one afterwards, putting revoked IdP tokens back on the row.
+        Against the real store (temp SQLite) the compare-and-set must refuse
+        that write, so the blob stays NULL and the caller is refused.
+        """
+        from rootcoz.auth.sso import tokens as sso_tokens
+        from rootcoz.auth.sso.tokens import DelegatedTokenError
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.create_user("alice")
+            await storage.add_user_identity(
+                "alice",
+                "redhat",
+                "rh-sub-1",
+                eligibility_check=_default_eligibility_check,
+            )
+            session_token = await storage.create_session(
+                "alice",
+                auth_provider="redhat",
+                sso_tokens_enc=encrypt_oauth_tokens(
+                    _token_bundle(
+                        access_token="expired-access",
+                        refresh_token="old-refresh",
+                        expires_at=time.time() - 3600,
+                    )
+                ),
+            )
+
+            async def _unlink_mid_refresh(_refresh_token: str) -> OAuthTokenBundle:
+                # The browser unlinks Red Hat SSO while the IdP call is out.
+                assert (
+                    await storage.unlink_user_identity("alice", "redhat") == "deleted"
+                )
+                return _token_bundle(
+                    access_token="refreshed-access",
+                    refresh_token="rotated-refresh",
+                    expires_at=time.time() + 3600,
+                )
+
+            provider = _fake_redhat_provider()
+            provider.refresh_access_token.side_effect = _unlink_mid_refresh
+            with (
+                patch.object(RedHatSSOProvider, "from_settings", return_value=provider),
+                pytest.raises(DelegatedTokenError) as excinfo,
+            ):
+                await sso_tokens.resolve_redhat_sso_tokens(
+                    _delegated_settings(),
+                    session_token=session_token,
+                    auth_strategy="session",
+                    auth_provider="redhat",
+                )
+
+            assert excinfo.value.status_code == 401
+            provider.refresh_access_token.assert_awaited_once_with("old-refresh")
+            # The revoked blob is NEVER resurrected.
+            assert await storage.get_session_sso_tokens(session_token) is None
+
+    async def test_expired_token_without_a_refresh_token_is_refused(self) -> None:
+        from rootcoz.auth.sso.tokens import DelegatedTokenError
+
+        expired = _token_bundle(refresh_token=None, expires_at=time.time() - 3600)
+        with pytest.raises(DelegatedTokenError) as excinfo:
+            await _resolve_delegated(_delegated_settings(), _SessionStore(expired))
+        assert excinfo.value.status_code == 401
+
+    async def test_a_refused_refresh_is_a_401(self) -> None:
+        from rootcoz.auth.sso.tokens import DelegatedTokenError
+
+        provider = _fake_redhat_provider()
+        provider.refresh_access_token.side_effect = AuthError("token_refresh_failed")
+        expired = _token_bundle(expires_at=time.time() - 3600)
+        with pytest.raises(DelegatedTokenError) as excinfo:
+            await _resolve_delegated(
+                _delegated_settings(), _SessionStore(expired), provider
+            )
+        assert excinfo.value.status_code == 401
+
+    async def test_one_audience_is_exchanged_once_and_reused(self) -> None:
+        provider = _fake_redhat_provider()
+        provider.exchange_token_for_audience.return_value = _token_bundle(
+            "audience-token", refresh_token=None
+        )
+        tokens = await _resolve_delegated(
+            _delegated_settings(greenwave_sso_audience="resultsdb"),
+            _SessionStore(_token_bundle(access_token="session-access")),
+            provider,
+            need_waiver_token=True,
+        )
+        provider.exchange_token_for_audience.assert_awaited_once_with(
+            subject_token="session-access", audience="resultsdb"
+        )
+        assert tokens.results_token == "audience-token"
+        assert tokens.waiver_token == "audience-token"
+
+    async def test_distinct_waiver_audience_is_exchanged_separately(self) -> None:
+        provider = _fake_redhat_provider()
+        provider.exchange_token_for_audience.side_effect = [
+            _token_bundle("resultsdb-token", refresh_token=None),
+            _token_bundle("waiverdb-token", refresh_token=None),
+        ]
+        tokens = await _resolve_delegated(
+            _delegated_settings(
+                greenwave_sso_audience="resultsdb",
+                greenwave_sso_waiver_audience="waiverdb",
+            ),
+            _SessionStore(_token_bundle(access_token="session-access")),
+            provider,
+            need_waiver_token=True,
+        )
+        assert [
+            call.kwargs for call in provider.exchange_token_for_audience.await_args_list
+        ] == [
+            {"subject_token": "session-access", "audience": "resultsdb"},
+            {"subject_token": "session-access", "audience": "waiverdb"},
+        ]
+        assert tokens.results_token == "resultsdb-token"
+        assert tokens.waiver_token == "waiverdb-token"
+
+    @pytest.mark.parametrize(
+        ("need_waiver_token", "audiences", "side_effect", "message"),
+        [
+            (
+                False,
+                {"greenwave_sso_audience": "resultsdb"},
+                AuthError("token_exchange_failed"),
+                "ResultsDB",
+            ),
+            (
+                True,
+                {
+                    "greenwave_sso_audience": "resultsdb",
+                    "greenwave_sso_waiver_audience": "waiverdb",
+                },
+                [
+                    _token_bundle("resultsdb-token", refresh_token=None),
+                    AuthError("token_exchange_failed"),
+                ],
+                "WaiverDB",
+            ),
+        ],
+    )
+    async def test_a_refused_exchange_is_a_502(
+        self,
+        need_waiver_token: bool,
+        audiences: dict[str, str],
+        side_effect: Any,
+        message: str,
+    ) -> None:
+        from rootcoz.auth.sso.tokens import DelegatedTokenError
+
+        provider = _fake_redhat_provider()
+        provider.exchange_token_for_audience.side_effect = side_effect
+        with pytest.raises(DelegatedTokenError) as excinfo:
+            await _resolve_delegated(
+                _delegated_settings(**audiences),
+                _SessionStore(_token_bundle()),
+                provider,
+                need_waiver_token=need_waiver_token,
+            )
+        assert excinfo.value.status_code == 502
+        assert message in str(excinfo.value)
+
+    async def test_an_unusable_token_is_a_401(self) -> None:
+        from rootcoz.auth.sso.tokens import DelegatedTokenError
+
+        with pytest.raises(DelegatedTokenError) as excinfo:
+            await _resolve_delegated(
+                _delegated_settings(),
+                _SessionStore(_token_bundle(access_token="two words")),
+            )
+        assert excinfo.value.status_code == 401

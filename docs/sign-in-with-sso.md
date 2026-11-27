@@ -252,6 +252,16 @@ there signing out is local only.
 No `id_token_hint` is sent: the flow never stores the ID token. Keycloak accepts
 the call without it, which is why the client id is included in the URL.
 
+The ID token being discarded does not mean no token is stored. A Red Hat SSO
+browser login keeps the provider's **access and refresh tokens** in
+`sessions.sso_tokens_enc`, Fernet-encrypted at rest. They are used only for
+delegated calls made on the user's behalf (the Greenwave `sso` auth mode) and
+refreshed on demand when the access token expires. The pair is deleted with the
+session on sign-out, expiry, account disable, or account deletion; cleared
+immediately when Red Hat SSO is unlinked from the account; and rendered
+unreadable — so refused — if `ROOTCOZ_ENCRYPTION_KEY` is rotated. CLI device-flow
+sessions never store these tokens at all.
+
 ## Trusted proxy instead of SSO
 
 A deployment that already authenticates everyone at a proxy can let that proxy

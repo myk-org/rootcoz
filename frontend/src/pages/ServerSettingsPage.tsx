@@ -146,6 +146,7 @@ const TEST_INTEGRATIONS: Record<string, string> = {
   'GitHub issues': 'github',
   'Report Portal': 'reportportal',
   Datadog: 'datadog',
+  Greenwave: 'greenwave',
   Prow: 'prow',
 }
 
@@ -163,6 +164,21 @@ const JIRA_METHODS: { id: JiraMethod; label: string }[] = [
   { id: 'basic', label: 'Email + API token' },
   { id: 'pat', label: 'PAT (Bearer)' },
   { id: 'atst', label: 'Atlassian service account token (ATST, Bearer)' },
+]
+
+// Greenwave auth modes (exactly one is persisted as greenwave_auth_mode;
+// unset = exporter disabled, 'none' = enabled without credentials). Like Jira,
+// only the choices and labels live here: which field belongs to which mode
+// arrives as `visible_when` metadata from the API.
+type GreenwaveMethod = 'bearer' | 'oidc' | 'kerberos' | 'mtls' | 'basic' | 'none' | 'sso'
+const GREENWAVE_METHODS: { id: GreenwaveMethod; label: string }[] = [
+  { id: 'bearer', label: 'Bearer token' },
+  { id: 'oidc', label: 'OIDC (client credentials)' },
+  { id: 'kerberos', label: 'Kerberos (keytab)' },
+  { id: 'mtls', label: 'mTLS (client certificate)' },
+  { id: 'basic', label: 'Basic (user + password)' },
+  { id: 'none', label: 'None (unauthenticated)' },
+  { id: 'sso', label: 'Red Hat SSO (user OIDC token)' },
 ]
 
 const jiraMethodLabel = (id: JiraMethod) => JIRA_METHODS.find(m => m.id === id)!.label
@@ -206,9 +222,20 @@ function valueTrap(setting: ServerSetting, value: string): string | undefined {
 // How long a ?highlight= row stays marked after the audit link lands on it.
 const HIGHLIGHT_MS = 2500
 
-// Valid Jira auth method ids ('' / anything else = unset: Jira disabled).
+// A valid method id or null ('' / anything else = unset: integration disabled).
+function parseMethodId<T extends string>(ids: readonly T[], value?: string): T | null {
+  return ids.includes(value as T) ? (value as T) : null
+}
+
 function parseJiraMethod(value?: string): JiraMethod | null {
-  return value === 'oauth' || value === 'basic' || value === 'pat' || value === 'atst' ? value : null
+  return parseMethodId(['oauth', 'basic', 'pat', 'atst'] as const, value)
+}
+
+function parseGreenwaveMethod(value?: string): GreenwaveMethod | null {
+  return parseMethodId(
+    ['bearer', 'oidc', 'kerberos', 'mtls', 'basic', 'none', 'sso'] as const,
+    value,
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +824,7 @@ export function ServerSettingsPage() {
   // Jira auth method switch confirmation (target method, or 'none' = disable) + section-local save error
   const [pendingJiraSwitch, setPendingJiraSwitch] = useState<JiraMethod | 'none' | null>(null)
   const [jiraModeError, setJiraModeError] = useState<string | null>(null)
+  const [greenwaveModeError, setGreenwaveModeError] = useState<string | null>(null)
 
   // Test connection state
   const [testingCategory, setTestingCategory] = useState<string | null>(null)
@@ -1273,31 +1301,78 @@ export function ServerSettingsPage() {
     }
   }
 
-  async function applyJiraMode(method: JiraMethod | null) {
+  // Shared by the Jira and Greenwave auth pickers: both persist a mode key and
+  // must leave the admin on a working mode.
+  async function switchAuthMode({
+    modeKey,
+    method,
+    category,
+    onError,
+    shouldTest,
+  }: {
+    modeKey: 'jira_auth_mode' | 'greenwave_auth_mode'
+    method: string | null
+    category: string
+    onError: (err: string | null) => void
+    shouldTest: boolean
+  }) {
     // Cancel any open edit on a field the new method hides — otherwise the
-    // Jira test button stays disabled with no visible editor to save or cancel.
+    // test button stays disabled with no visible editor to save or cancel.
     // Re-checked after the save: keepEditor preserves the draft of a
     // still-visible field across the switch, but an editor opened mid-save on
     // a field the new method hides must still be cancelled (#346).
-    const cancelHiddenJiraEdit = () => {
+    const cancelHiddenEdit = () => {
       const key = editingKeyRef.current
       if (!key) return
       const setting = state.settings.find(s => s.key === key)
-      if (setting && !visibleWhenMet(setting, () => method ?? '')) {
+      const valueOf = (k: string) => (k === modeKey ? method ?? '' : settingValue(k))
+      if (setting && !visibleWhenMet(setting, valueOf)) {
         dispatch({ type: 'CANCEL_EDIT' })
       }
     }
-    cancelHiddenJiraEdit()
+    cancelHiddenEdit()
     // keepEditor: a switch must not discard the draft of a field that stays
     // visible under the new method (e.g. jira_project_key) — only fields the new
     // method hides are cancelled above (#346).
-    const error = await saveSettings({ jira_auth_mode: method ?? '' }, { keepEditor: true })
-    setJiraModeError(error)
-    if (!error) cancelHiddenJiraEdit()
+    const error = await saveSettings({ [modeKey]: method ?? '' }, { keepEditor: true })
+    onError(error)
+    if (!error) cancelHiddenEdit()
     // The admin must land on a WORKING method: after a successful switch to a
-    // real method, auto-run the existing Jira test for it. Disabling Jira never
-    // tests; the result is surfaced, the switch itself never reverts (#346).
-    if (method && !error) void handleTestConnection('Jira')
+    // real method, auto-run the existing test for it. Disabling an integration
+    // never tests; the result is surfaced, the switch itself never reverts (#346).
+    if (shouldTest && !error) void handleTestConnection(category)
+  }
+
+  async function applyJiraMode(method: JiraMethod | null) {
+    await switchAuthMode({
+      modeKey: 'jira_auth_mode',
+      method,
+      category: 'Jira',
+      onError: setJiraModeError,
+      shouldTest: Boolean(method),
+    })
+  }
+
+  // ---- Greenwave auth mode (explicit selection, persisted as greenwave_auth_mode) ----
+  // The picker state comes ONLY from the persisted greenwave_auth_mode setting;
+  // unset or 'none' disables the exporter, so no credential field renders then.
+  const greenwaveAuthSetting = state.settings.find(s => s.key === 'greenwave_auth_mode')
+  const persistedGreenwaveMethod = parseGreenwaveMethod(greenwaveAuthSetting?.value)
+
+  async function handleGreenwaveMethodChange(method: GreenwaveMethod) {
+    // 'none' never tests (no credentials to test), and neither does an
+    // explicitly DISABLED exporter: testing it would report a healthy
+    // connection for something the server excludes from every push, which reads
+    // as "greenwave works" when it does not. The manual button still tests on
+    // demand.
+    const greenwaveDisabled = settingValue('enable_greenwave').trim() === 'false'
+    await switchAuthMode({
+      modeKey: 'greenwave_auth_mode',
+      method,
+      category: 'Greenwave',
+      onError: setGreenwaveModeError,
+      shouldTest: method !== 'none' && !greenwaveDisabled,
+    })
   }
 
   // ---- Test connection helpers ----
@@ -1444,13 +1519,50 @@ export function ServerSettingsPage() {
       s.source === 'env' && !s.server_only && s.persistable !== false ? (
         <SaveToDbButton saving={persistingKey === s.key} onClick={() => handlePersistEnv(s.key)} />
       ) : null
-    // Search must be able to find every Jira field, so `visible_when` hiding
-    // only applies in the tab view. jira_auth_mode is edited by the card's
-    // selector, so it never gets a row of its own (E2E-F33). Hiding is
-    // rendering only: no hidden setting is ever reset or written back (#585).
-    const rowSettings = settings.filter(s => s.key !== 'jira_auth_mode' && (
-      Boolean(state.search) || visibleWhenMet(s, settingValue)
-    ))
+    // An auth-mode setting has no row of its own (E2E-F33): its label,
+    // source, env line, reset and history live in its method selector card.
+    const methodCardHeader = (setting: ServerSetting | undefined) => setting ? (
+      <SettingRowHeader setting={setting} saveToDbNode={saveToDbNode(setting)}>
+        {setting.source === 'db' && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => handleReset(setting.key)}
+            disabled={state.resettingKey === setting.key}
+            className="h-6 px-2 text-xs text-text-tertiary hover:text-signal-red"
+            aria-label={`Reset ${setting.label}`}
+          >
+            {state.resettingKey === setting.key ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <RotateCcw className="h-3 w-3" />
+            )}
+          </Button>
+        )}
+      </SettingRowHeader>
+    ) : undefined
+    const methodCardHistory = (setting: ServerSetting | undefined) =>
+      setting?.source === 'db' ? (
+        <HistoryToggle
+          settingKey={setting.key}
+          sensitive={setting.sensitive}
+          historyKey={state.historyKey}
+          history={state.history}
+          historyLoading={state.historyLoading}
+          onShowHistory={() => handleShowHistory(setting.key)}
+        />
+      ) : null
+    // Search must be able to find every field, so hiding only applies in the tab
+    // view. The auth-mode settings are edited by their cards' selectors, so they
+    // never get rows of their own (E2E-F33). Which field belongs to which mode
+    // comes from the server's `visible_when` metadata, for Jira and Greenwave
+    // alike. Hiding is rendering only: no hidden setting is ever reset or
+    // written back (#585).
+    const rowSettings = settings.filter(s =>
+      s.key !== 'jira_auth_mode' && s.key !== 'greenwave_auth_mode' && (
+        Boolean(state.search) || visibleWhenMet(s, settingValue)
+      )
+    )
     // One setting row; the map below supplies the shared key, data attribute and
     // match mark, so no branch can render an unaddressable row.
     const renderSettingRow = (setting: ServerSetting) => {
@@ -2021,38 +2133,22 @@ export function ServerSettingsPage() {
                   setPendingJiraSwitch(null)
                   if (target) void applyJiraMode(target === 'none' ? null : target)
                 }}
-                // jira_auth_mode has no row of its own (E2E-F33): its label,
-                // source, env line, reset and history live in this header.
-                header={jiraAuthSetting ? (
-                  <SettingRowHeader setting={jiraAuthSetting} saveToDbNode={saveToDbNode(jiraAuthSetting)}>
-                    {jiraAuthSetting.source === 'db' && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => handleReset(jiraAuthSetting.key)}
-                        disabled={state.resettingKey === jiraAuthSetting.key}
-                        className="h-6 px-2 text-xs text-text-tertiary hover:text-signal-red"
-                        aria-label={`Reset ${jiraAuthSetting.label}`}
-                      >
-                        {state.resettingKey === jiraAuthSetting.key ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <RotateCcw className="h-3 w-3" />
-                        )}
-                      </Button>
-                    )}
-                  </SettingRowHeader>
-                ) : undefined}
-                history={jiraAuthSetting?.source === 'db' ? (
-                  <HistoryToggle
-                    settingKey={jiraAuthSetting.key}
-                    sensitive={jiraAuthSetting.sensitive}
-                    historyKey={state.historyKey}
-                    history={state.history}
-                    historyLoading={state.historyLoading}
-                    onShowHistory={() => handleShowHistory(jiraAuthSetting.key)}
-                  />
-                ) : null}
+                header={methodCardHeader(jiraAuthSetting)}
+                history={methodCardHistory(jiraAuthSetting)}
+              />
+            )}
+            {category === 'Greenwave' && (
+              <AuthMethodSelectCard
+                label="Greenwave auth method"
+                methods={GREENWAVE_METHODS}
+                selected={persistedGreenwaveMethod}
+                saving={state.saving}
+                error={greenwaveModeError}
+                header={methodCardHeader(greenwaveAuthSetting)}
+                history={methodCardHistory(greenwaveAuthSetting)}
+                footer="Unset disables the exporter. None is an active mode: it sends no credentials (and is the only mode that may use a plain http:// URL)."
+                placeholder="Not set — exporter disabled"
+                onSelect={(value) => void handleGreenwaveMethodChange(value as GreenwaveMethod)}
               />
             )}
             {category === 'Jira' && (persistedJiraMethod === 'oauth' || persistedJiraMethod === 'atst') && (
@@ -3013,6 +3109,74 @@ function JiraOauthUrlRow({ cloudId }: { cloudId: string }) {
 // has no method, and the five real values are the ones it validates.
 const NO_JIRA_METHOD = 'none'
 
+// ---------------------------------------------------------------------------
+// Auth method selector card (shared by Jira and Greenwave): the searchable
+// picker, its save error and the one-line mode explanation — the first thing
+// an admin sees in the category.
+// ---------------------------------------------------------------------------
+
+interface AuthMethodSelectCardProps<M extends string> {
+  /** Picker label — also its accessible name ("Select <label>"). */
+  label: string
+  methods: { id: M; label: string }[]
+  /** Extra choice beyond the methods (Jira's None sentinel). */
+  noneChoice?: { value: string; label: string }
+  selected: M | null
+  saving: boolean
+  error: string | null
+  header?: React.ReactNode
+  history?: React.ReactNode
+  footer: string
+  placeholder?: string
+  /** Raw picker choice: a method id or the noneChoice sentinel. */
+  onSelect: (value: string) => void
+}
+
+function AuthMethodSelectCard<M extends string>({
+  label,
+  methods,
+  noneChoice,
+  selected,
+  saving,
+  error,
+  header,
+  history,
+  footer,
+  placeholder,
+  onSelect,
+}: AuthMethodSelectCardProps<M>) {
+  // Same searchable picker as every other enumerated setting (E2E-F32).
+  const choices = [
+    ...methods.map(m => ({ value: m.id, label: m.label })),
+    ...(noneChoice ? [noneChoice] : []),
+  ]
+  return (
+    <div className="mb-3 space-y-2 rounded-md border border-border-default bg-surface-elevated px-3 py-2.5">
+      {header ?? <span className="text-xs font-semibold text-text-secondary">Auth method</span>}
+      <SearchableMultiSelect
+        label={label}
+        className="max-w-md"
+        multiple={false}
+        // With a None sentinel, unset displays as that choice (Jira); without
+        // one, unset is an empty picker plus the placeholder (Greenwave).
+        values={selected ? [selected] : noneChoice ? [noneChoice.value] : []}
+        options={choices}
+        disabled={saving}
+        placeholder={placeholder}
+        onChange={(next) => onSelect(next[0])}
+      />
+      {error && (
+        <p role="alert" className="flex items-center gap-1.5 text-xs text-signal-red">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          {error}
+        </p>
+      )}
+      <p className="text-xs text-text-quaternary">{footer}</p>
+      {history}
+    </div>
+  )
+}
+
 function JiraAuthMethodControl({
   selected,
   saving,
@@ -3024,33 +3188,20 @@ function JiraAuthMethodControl({
   onCancelSwitch,
   onConfirmSwitch,
 }: JiraAuthMethodControlProps) {
-  // Same searchable picker as every other enumerated setting (E2E-F32).
-  const choices = [
-    ...JIRA_METHODS.map(m => ({ value: m.id, label: m.label })),
-    { value: NO_JIRA_METHOD, label: 'None — Jira disabled' },
-  ]
   return (
-    <div className="mb-3 space-y-2 rounded-md border border-border-default bg-surface-elevated px-3 py-2.5">
-      {header ?? <span className="text-xs font-semibold text-text-secondary">Auth method</span>}
-      <SearchableMultiSelect
+    <>
+      <AuthMethodSelectCard
         label="Jira auth method"
-        className="max-w-md"
-        multiple={false}
-        values={[selected ?? NO_JIRA_METHOD]}
-        options={choices}
-        disabled={saving}
-        onChange={(next) => onChange(next[0] === NO_JIRA_METHOD ? null : (next[0] as JiraMethod))}
+        methods={JIRA_METHODS}
+        noneChoice={{ value: NO_JIRA_METHOD, label: 'None — Jira disabled' }}
+        selected={selected}
+        saving={saving}
+        error={error}
+        header={header}
+        history={history}
+        footer="Exactly one method is active. Choose None to disable Jira."
+        onSelect={(value) => onChange(value === NO_JIRA_METHOD ? null : (value as JiraMethod))}
       />
-      {error && (
-        <p role="alert" className="flex items-center gap-1.5 text-xs text-signal-red">
-          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-          {error}
-        </p>
-      )}
-      <p className="text-xs text-text-quaternary">
-        Exactly one method is active. Choose None to disable Jira.
-      </p>
-      {history}
       <AlertDialog open={pendingSwitch !== null} onOpenChange={(open) => { if (!open) onCancelSwitch() }}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -3068,6 +3219,6 @@ function JiraAuthMethodControl({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </>
   )
 }

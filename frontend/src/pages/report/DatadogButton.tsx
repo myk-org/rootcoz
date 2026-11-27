@@ -13,16 +13,16 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { api } from '@/lib/api'
-import { pushScopeQuery } from '@/lib/pushScopes'
 import {
   isUnreviewedPushRejection,
   pushRejectionDetail,
   unreviewedPushRejectionMessage,
   unreviewedPushTooltip,
 } from '@/lib/pushGate'
+import { ExporterPushButton } from '@/components/shared/ExporterPushButton'
+import { pushToExporter } from './useExporterPush'
 import { useUnreviewedPushGate } from './pushGate'
-import { Upload, Loader2, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react'
+import { Upload, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react'
 import type { DatadogPushResult } from '@/types'
 
 interface DatadogPushMetadataProps {
@@ -95,8 +95,7 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
     setPushErrorDetail(null)
     setPushResult(null)
     try {
-      const qs = pushScopeQuery({ childJobName, childBuildNumber })
-      const result = await api.post<DatadogPushResult>(`/results/${jobId}/push/datadog${qs}`)
+      const result = await pushToExporter<DatadogPushResult>(jobId, 'datadog', { childJobName, childBuildNumber })
       setPushResult(result)
       setResultDialogOpen(true)
     } catch (err) {
@@ -129,35 +128,21 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
 
   return (
     <>
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="gap-1.5 text-xs"
-                onClick={() => setConfirmOpen(true)}
-                disabled={pushing || !hasFailures || gateBlocked}
-              >
-                {pushing ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Upload className="h-3.5 w-3.5" />
-                )}
-                {pushing ? 'Pushing...' : 'Push to Datadog'}
-              </Button>
-            </span>
-          </TooltipTrigger>
-          {!hasFailures ? (
-            <TooltipContent>No failures to push</TooltipContent>
-          ) : gateBlocked ? (
-            <TooltipContent data-testid="datadog-push-gate-tooltip">
-              {unreviewedPushTooltip(unreviewedCount, 'datadog')}
-            </TooltipContent>
-          ) : null}
-        </Tooltip>
-      </TooltipProvider>
+      <ExporterPushButton
+        label="Push to Datadog"
+        pushingLabel="Pushing..."
+        pushing={pushing}
+        disabled={!hasFailures || gateBlocked}
+        disabledHint={
+          !hasFailures
+            ? 'No failures to push'
+            : gateBlocked
+              ? unreviewedPushTooltip(unreviewedCount, 'datadog')
+              : undefined
+        }
+        tooltipTestId={gateBlocked ? 'datadog-push-gate-tooltip' : undefined}
+        onClick={() => setConfirmOpen(true)}
+      />
 
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent className="sm:max-w-[400px] bg-surface-card border-border-default">

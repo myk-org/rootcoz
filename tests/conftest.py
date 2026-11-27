@@ -2,11 +2,13 @@
 
 import asyncio
 import atexit
+import datetime
 import logging
 import os
 import shutil
 import sys
 import tempfile
+import types
 from collections.abc import Awaitable, Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -31,6 +33,10 @@ atexit.register(shutil.rmtree, _TEST_DATA_DIR, True)
 
 import httpx
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from fastapi.testclient import TestClient
 from pi_sidecar_client import AIResult
 
@@ -45,6 +51,58 @@ from rootcoz.models import (
     FailureAnalysis,
     ProductBugReport,
 )
+
+
+def write_mtls_credentials(directory: Path) -> tuple[Path, Path, Path]:
+    """Write a self-signed CA plus a client cert/key; return their paths.
+
+    Real files are needed because the mTLS strategy now builds an
+    ``ssl.SSLContext`` and loads the certificate chain itself.
+    """
+    now = datetime.datetime.now(datetime.UTC)
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "rootcoz test CA")])
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(ca_key, hashes.SHA256())
+    )
+    client_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    client_cert = (
+        x509.CertificateBuilder()
+        .subject_name(
+            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "rootcoz test client")])
+        )
+        .issuer_name(ca_name)
+        .public_key(client_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+            critical=False,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    ca_path = directory / "ca.pem"
+    cert_path = directory / "client.crt"
+    key_path = directory / "client.key"
+    ca_path.write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
+    cert_path.write_bytes(client_cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        client_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return ca_path, cert_path, key_path
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -82,6 +140,65 @@ CLI_TEST_BASE_URL = "http://localhost:8700"
 
 #: The product's machine-global admin-chat artifact root. No test may use it.
 MACHINE_GLOBAL_ARTIFACT_ROOT = Path("/tmp/rootcoz-admin-artifacts")
+
+
+class FakeSpnegoContext:
+    """Records step() calls; emits a deterministic client token.
+
+    Shared fake for the kerberos SPNEGO flow — no KDC exists in CI, so
+    every kerberos test (auth unit tests and connection-endpoint tests
+    alike) drives the real ``_KerberosAuth`` flow through this.
+    """
+
+    def __init__(self, record: dict[str, Any]) -> None:
+        self._record = record
+
+    def step(self, in_token: bytes | None) -> bytes:
+        self._record["steps"].append(in_token)
+        return b"client-token-" + (in_token or b"")
+
+
+def fresh_spnego_record() -> dict[str, Any]:
+    """A record dict shared by the fake spnego helpers."""
+    return {"client_kwargs": [], "contexts": [], "steps": [], "keytabs": []}
+
+
+def fake_spnego_module(record: dict[str, Any]) -> types.ModuleType:
+    """A fake ``spnego`` module recording every client() construction."""
+
+    class KerberosKeytab:
+        def __init__(self, keytab: str, principal: str | None) -> None:
+            record["keytabs"].append((keytab, principal))
+
+    module = types.ModuleType("spnego")
+
+    def client(**kwargs: Any) -> FakeSpnegoContext:
+        record["client_kwargs"].append(kwargs)
+        context = FakeSpnegoContext(record)
+        record["contexts"].append(context)
+        return context
+
+    module.KerberosKeytab = KerberosKeytab
+    module.client = client
+    return module
+
+
+def failing_spnego_module(exc: Exception) -> types.ModuleType:
+    """A fake ``spnego`` whose client() raises *exc* (e.g. keytab open)."""
+
+    class KerberosKeytab:
+        def __init__(self, keytab: str, principal: str | None) -> None:
+            pass
+
+    module = types.ModuleType("spnego")
+
+    def client(**kwargs: Any) -> FakeSpnegoContext:
+        raise exc
+
+    module.KerberosKeytab = KerberosKeytab
+    module.client = client
+    return module
+
 
 # The host variables the app-under-test may legitimately see. An allowlist, never
 # "real environment minus a denylist": a denylist leaks every credential the

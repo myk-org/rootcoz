@@ -38,8 +38,9 @@ export function collectPushScopes(
 
 /**
  * Query string (with leading '?' when non-empty) for the child-scoped push
- * endpoints (`/push-reportportal`, `/push/{plugin}`). Shared by the push
- * buttons and the all-reviewed prompt so every caller builds identical URLs.
+ * params. Used by `pushToExporter` (the single push-URL builder) and by the
+ * all-reviewed prompt as its per-scope dedupe key, so every caller derives
+ * identical scope strings.
  */
 export function pushScopeQuery({ childJobName, childBuildNumber }: PushScope): string {
   const params = new URLSearchParams()

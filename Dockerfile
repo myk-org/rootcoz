@@ -82,17 +82,24 @@ FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS builder
 
 WORKDIR /app
 
-# Install git (needed for gitpython dependency)
+# Install git (needed for gitpython dependency), plus the krb5 headers and
+# a C toolchain required to build python-gssapi for the kerberos auth-mode
+# extra (it has no wheels — it links against the system krb5 ABI).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    gcc \
+    libc6-dev \
+    libkrb5-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project files
 COPY pyproject.toml uv.lock ./
 COPY src/ src/
 
-# Create venv, install dependencies, and apply group-write permissions before COPY
-RUN uv sync --frozen --no-dev \
+# Create venv, install dependencies (kerberos extra: the Greenwave exporter's
+# kerberos auth mode must work in the shipped image), and apply group-write
+# permissions before COPY
+RUN uv sync --frozen --no-dev --extra kerberos \
     && find /app/.venv /app/src -not -type l -exec chmod g+w {} +
 
 # Production stage — plain python:3.14-slim-bookworm without shipping uv at runtime
@@ -100,13 +107,18 @@ FROM python:3.14-slim-bookworm
 
 WORKDIR /app
 
-# Install bash, git (runtime for gitpython), curl (healthcheck), ca-certificates, tini
+# Install bash, git (runtime for gitpython), curl (healthcheck), ca-certificates,
+# tini, and the krb5 runtime libraries the Greenwave kerberos auth mode links
+# against (libgssapi-krb5-2/libkrb5-3 are pulled in transitively by curl,
+# but the requirement is declared here so it cannot break on a base change)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     git \
     curl \
     ca-certificates \
     tini \
+    libgssapi-krb5-2 \
+    libkrb5-3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Node.js runtime and bundled npm from official node:22.23.4-bookworm-slim

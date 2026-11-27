@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from rootcoz import main, monitoring, settings_registry, storage, transcripts
 from rootcoz.config import (
+    GREENWAVE_AUTH_MODES,
+    GREENWAVE_KNOWN_CLASSIFICATIONS,
     JIRA_AUTH_MODES,
     RESULTS_RETENTION_DAYS_MAX,
     SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS,
@@ -20,6 +22,7 @@ from rootcoz.config import (
     clear_settings_cache,
     db_setting_is_set,
     get_settings,
+    greenwave_method_missing_fields,
     update_db_settings_cache,
 )
 from rootcoz.main import app
@@ -610,6 +613,473 @@ def test_persist_rejections(client, monkeypatch):
         "/api/admin/settings/db_path/persist", headers=_admin_headers()
     )
     assert server_only.status_code == 400
+
+
+# --- DB-only settings are never promoted from the environment (#346, #183) ---
+
+
+def test_greenwave_auth_mode_is_never_promoted_from_env(client, monkeypatch):
+    """A stray GREENWAVE_AUTH_MODE is ignored: the mode is DB-only."""
+    monkeypatch.setenv("GREENWAVE_AUTH_MODE", "bearer")
+    clear_settings_cache()
+    try:
+        response = client.post(
+            "/api/admin/settings/greenwave_auth_mode/persist",
+            headers=_admin_headers(),
+        )
+        assert response.status_code == 400
+        assert "no env value" in response.json()["detail"]
+        # The env var never became the effective mode either.
+        assert get_settings().greenwave_auth_mode != "bearer"
+    finally:
+        monkeypatch.delenv("GREENWAVE_AUTH_MODE")
+        clear_settings_cache()
+
+
+def test_persist_applies_the_same_cross_field_rules_as_put(client, monkeypatch):
+    """An env value the PUT path would refuse is not promoted either.
+
+    A waiver write gates releases, so its endpoint stays HTTPS-only in every
+    auth mode — an http:// value must not slip in through the env door.
+    """
+    monkeypatch.setenv("GREENWAVE_WAIVER_URL", "http://waiverdb.example.com")
+    clear_settings_cache()
+    try:
+        response = client.post(
+            "/api/admin/settings/greenwave_waiver_url/persist",
+            headers=_admin_headers(),
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "Invalid env value for 'greenwave_waiver_url'" in detail
+        assert "GREENWAVE_WAIVER_URL" in detail
+    finally:
+        monkeypatch.delenv("GREENWAVE_WAIVER_URL")
+        clear_settings_cache()
+
+
+def test_db_only_settings_are_not_advertised_as_persistable(client):
+    """Metadata states the same rule the persist endpoint enforces.
+
+    A DB-only setting has no env value to promote, so `persistable: true`
+    would promise a "Save to DB" action the endpoint answers with 400.
+    """
+    items = {
+        item["key"]: item
+        for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
+    }
+    for key in ("jira_auth_mode", "greenwave_auth_mode"):
+        assert items[key]["env_var"] == ""
+        assert items[key]["persistable"] is False
+
+
+def test_persist_judges_a_key_on_its_own_effective_pair(client, monkeypatch):
+    """Cross-field rules apply, and a valid value is still promoted.
+
+    The persist endpoint now runs the same validator as PUT, so a greenwave URL
+    is judged against the mode currently in effect — an https URL persists, an
+    http one is refused for a credential-bearing mode.
+    """
+    put = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_api_token": "not-a-real-token",  # pragma: allowlist secret
+            }
+        },
+    )
+    assert put.status_code == 200, put.text
+    try:
+        monkeypatch.setenv("GREENWAVE_URL", "https://resultsdb.example.com")
+        clear_settings_cache()
+        promoted = client.post(
+            "/api/admin/settings/greenwave_url/persist", headers=_admin_headers()
+        )
+        assert promoted.status_code == 200, promoted.text
+        assert promoted.json() == {"key": "greenwave_url", "source": "db"}
+        # The override survives losing the env var — that is the point of the
+        # env→DB promotion, and the cross-field rule must not stand in its way.
+        monkeypatch.delenv("GREENWAVE_URL")
+        clear_settings_cache()
+        assert get_settings().greenwave_url == "https://resultsdb.example.com"
+
+        monkeypatch.setenv("GREENWAVE_URL", "http://resultsdb.example.com")
+        clear_settings_cache()
+        refused = client.post(
+            "/api/admin/settings/greenwave_url/persist", headers=_admin_headers()
+        )
+        assert refused.status_code == 400
+        assert "GREENWAVE_URL" in refused.json()["detail"]
+    finally:
+        monkeypatch.delenv("GREENWAVE_URL", raising=False)
+        clear_settings_cache()
+
+
+def test_persist_names_the_setting_a_cross_field_refusal_came_from(client, monkeypatch):
+    """A refusal caused by another setting says so, and names it.
+
+    The cross-field rules judge the merged effective configuration, so
+    persisting one key can be blocked by a value the admin did not touch (an
+    http GREENWAVE_URL in the environment while the DB mode is bearer). The
+    message has to attribute that to the configuration — not to the value being
+    promoted — or a one-key env→DB migration looks like the wrong field failed.
+    """
+    put = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"greenwave_auth_mode": "bearer"}},
+    )
+    assert put.status_code == 200, put.text
+    try:
+        monkeypatch.setenv("GREENWAVE_URL", "http://resultsdb.example.com")
+        monkeypatch.setenv("GREENWAVE_WAIVER_URL", "https://waiverdb.example.com")
+        clear_settings_cache()
+        refused = client.post(
+            "/api/admin/settings/greenwave_waiver_url/persist",
+            headers=_admin_headers(),
+        )
+        assert refused.status_code == 400
+        detail = refused.json()["detail"]
+        # The offending setting is still named, and the blame is attributed.
+        assert "GREENWAVE_URL" in detail
+        assert "rejected by the current effective configuration" in detail
+    finally:
+        monkeypatch.delenv("GREENWAVE_URL", raising=False)
+        monkeypatch.delenv("GREENWAVE_WAIVER_URL", raising=False)
+        clear_settings_cache()
+
+
+def test_write_paths_refuse_a_token_the_transport_cannot_send(client, monkeypatch):
+    """A bearer token that cannot be a header is refused on every write path.
+
+    The scheme rule is enforced at save time so a stored configuration can
+    never guarantee a refusal on every push; the token-shape rule joins it
+    (PUT here, the env→DB promotion below).
+    """
+    put = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_api_token": "tok\nen",
+            }
+        },
+    )
+    assert put.status_code == 400, put.text
+    assert "GREENWAVE_API_TOKEN" in put.json()["detail"]
+
+    # The mode has to exist before the promotion is judged: with no mode the
+    # exporter is disabled and the token is inert (the same reason an
+    # incomplete mode is storable at all).
+    mode = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"greenwave_auth_mode": "bearer"}},
+    )
+    assert mode.status_code == 200, mode.text
+    monkeypatch.setenv("GREENWAVE_API_TOKEN", "tok\nen")
+    clear_settings_cache()
+    try:
+        promoted = client.post(
+            "/api/admin/settings/greenwave_api_token/persist",
+            headers=_admin_headers(),
+        )
+    finally:
+        monkeypatch.delenv("GREENWAVE_API_TOKEN", raising=False)
+        clear_settings_cache()
+    assert promoted.status_code == 400, promoted.text
+    assert "GREENWAVE_API_TOKEN" in promoted.json()["detail"]
+
+
+def test_padded_bearer_tokens_are_stripped_rather_than_refused(client, monkeypatch):
+    """Padding is a paste artefact, not a broken token.
+
+    Settings strips secret fields, so the write path judges — and stores — the
+    stripped value. Refusing ``"  tok-123  "`` would reject a token the push
+    would have sent just fine, and it is the wrapped token in a copied env
+    value (``"valid-token\\n"``) that makes this bite in practice.
+    """
+    put = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_api_token": "  tok-123  ",
+            }
+        },
+    )
+    assert put.status_code == 200, put.text
+    written = get_settings().greenwave_api_token
+    assert written is not None
+    assert written.get_secret_value() == "tok-123"
+
+    monkeypatch.setenv("GREENWAVE_API_TOKEN", "valid-token\n")
+    clear_settings_cache()
+    try:
+        promoted = client.post(
+            "/api/admin/settings/greenwave_api_token/persist",
+            headers=_admin_headers(),
+        )
+    finally:
+        monkeypatch.delenv("GREENWAVE_API_TOKEN", raising=False)
+        clear_settings_cache()
+    assert promoted.status_code == 200, promoted.text
+    # Read it back without the env var, so this proves what the DB stored.
+    promoted_value = get_settings().greenwave_api_token
+    assert promoted_value is not None
+    assert promoted_value.get_secret_value() == "valid-token"
+
+
+@pytest.mark.parametrize("mode", ["none", "basic"])
+def test_token_punctuation_is_accepted_and_internal_whitespace_is_not(client, mode):
+    """The shape rule is not a bearer-mode rule.
+
+    Punctuation is left to the token issuer (a JWT is dots, ``+`` and ``/``),
+    but a token saved while the mode is inert outlives the save, so internal
+    whitespace is refused in every mode — the push would mangle it later.
+    """
+    switch = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"greenwave_auth_mode": mode}},
+    )
+    assert switch.status_code == 200, switch.text
+
+    accepted = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"greenwave_api_token": "eyJhbGciOiJIUzI1NiJ9.a+b/c="}},
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    refused = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"greenwave_api_token": "bad tok"}},
+    )
+    assert refused.status_code == 400, refused.text
+    assert "cannot be sent in an HTTP header" in refused.json()["detail"]
+
+
+def test_a_mode_switch_stays_savable_with_an_unusable_token_in_place(
+    client, monkeypatch
+):
+    """A mode switch must not be blocked by a token it does not write.
+
+    The UI renders a mode's fields only once that mode is saved, so refusing
+    the switch would lock the admin out of the very field that fixes the token.
+    The exporter stays disabled meanwhile (`greenwave_enabled`), and the
+    connection test names the setting.
+    """
+    monkeypatch.setenv("GREENWAVE_API_TOKEN", "tok\nen")
+    monkeypatch.setenv("GREENWAVE_URL", "https://resultsdb.example.com")
+    clear_settings_cache()
+    try:
+        response = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {"greenwave_auth_mode": "bearer"}},
+        )
+        assert response.status_code == 200, response.text
+        # Stored and inert: not advertised as a usable exporter.
+        assert get_settings().greenwave_auth_mode == "bearer"
+        assert get_settings().greenwave_enabled is False
+    finally:
+        monkeypatch.delenv("GREENWAVE_API_TOKEN", raising=False)
+        monkeypatch.delenv("GREENWAVE_URL", raising=False)
+        clear_settings_cache()
+
+
+def test_persist_refuses_a_waiver_token_the_transport_cannot_send(client, monkeypatch):
+    """WaiverDB's token is a written bearer token too, so the same rule applies."""
+    put = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_push_waivers": True,
+            }
+        },
+    )
+    assert put.status_code == 200, put.text
+    monkeypatch.setenv("GREENWAVE_WAIVER_TOKEN", "waiver\ntok")
+    clear_settings_cache()
+    try:
+        promoted = client.post(
+            "/api/admin/settings/greenwave_waiver_token/persist",
+            headers=_admin_headers(),
+        )
+    finally:
+        monkeypatch.delenv("GREENWAVE_WAIVER_TOKEN", raising=False)
+        clear_settings_cache()
+    assert promoted.status_code == 400, promoted.text
+    assert "GREENWAVE_WAIVER_TOKEN" in promoted.json()["detail"]
+
+
+def test_an_explicitly_written_waiver_token_is_judged_even_with_waivers_off(
+    client,
+):
+    """Only an INHERITED inactive token is inert; an explicit write is not.
+
+    Waiver writes being disabled must not make the save path accept a value
+    that can never be sent: the admin is storing garbage for later. The
+    readiness rule still ignores the token while waivers are off, so clearing
+    it (the only way out) must keep succeeding.
+    """
+    mode = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_push_waivers": False,
+            }
+        },
+    )
+    assert mode.status_code == 200, mode.text
+
+    refused = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"greenwave_waiver_token": "waiver\ntok"}},
+    )
+    assert refused.status_code == 400, refused.text
+    assert "GREENWAVE_WAIVER_TOKEN" in refused.json()["detail"]
+
+    cleared = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"greenwave_waiver_token": ""}},
+    )
+    assert cleared.status_code == 200, cleared.text
+
+
+def test_writing_one_token_is_not_refused_over_an_inherited_bad_one(
+    client, monkeypatch
+):
+    """The shape rule judges the tokens THIS save writes, not the others.
+
+    A save that writes one token must not be vetoed by the other, merely
+    inherited one: that token is inert until someone replaces it, and the
+    exporter is disabled meanwhile. Otherwise a half-broken pair leaves the
+    admin unable to save the half that is fine.
+    """
+    put = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_push_waivers": True,
+            }
+        },
+    )
+    assert put.status_code == 200, put.text
+    monkeypatch.setenv("GREENWAVE_WAIVER_TOKEN", "waiver tok en")
+    clear_settings_cache()
+    try:
+        # Writes only the ResultsDB token: the inherited WaiverDB token is not
+        # this save's business.
+        saved = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {"greenwave_api_token": "brand-new-good-token"}},
+        )
+        assert saved.status_code == 200, saved.text
+    finally:
+        monkeypatch.delenv("GREENWAVE_WAIVER_TOKEN", raising=False)
+        clear_settings_cache()
+
+
+def test_switching_to_oidc_is_not_blocked_by_an_inherited_http_token_url(
+    client, monkeypatch
+):
+    """An inherited http token endpoint must not lock the admin out of oidc.
+
+    ``greenwave_oidc_token_url`` only renders in oidc mode, so refusing the
+    switch would leave the admin unable to reach the field that fixes the
+    URL. The inherited value stays inert until oidc is actually in effect;
+    writing it directly is still refused, which is the moment the scheme
+    rule has to fire.
+    """
+    monkeypatch.setenv("GREENWAVE_URL", "https://resultsdb.example.com")
+    monkeypatch.setenv("GREENWAVE_OIDC_TOKEN_URL", "http://sso.example.com/token")
+    clear_settings_cache()
+    try:
+        switched = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {"greenwave_auth_mode": "oidc"}},
+        )
+        assert switched.status_code == 200, switched.text
+        assert get_settings().greenwave_auth_mode == "oidc"
+
+        written = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={
+                "settings": {"greenwave_oidc_token_url": "http://sso.example.com/token"}
+            },
+        )
+        assert written.status_code == 400, written.text
+        assert "GREENWAVE_OIDC_TOKEN_URL" in written.json()["detail"]
+    finally:
+        monkeypatch.delenv("GREENWAVE_URL", raising=False)
+        monkeypatch.delenv("GREENWAVE_OIDC_TOKEN_URL", raising=False)
+        clear_settings_cache()
+
+
+def test_inactive_http_urls_do_not_disable_or_block_greenwave(client, monkeypatch):
+    """An http URL no mode uses is inert: it disables and blocks nothing.
+
+    With waivers off the waiver URL is never written, and in bearer mode the
+    OIDC token endpoint is never called — neither can carry a credential, so
+    neither may disable an otherwise complete exporter nor veto an unrelated
+    auth save.
+    """
+    monkeypatch.setenv("GREENWAVE_URL", "https://resultsdb.example.com")
+    monkeypatch.setenv("GREENWAVE_WAIVER_URL", "http://waiverdb.example.com")
+    monkeypatch.setenv("GREENWAVE_OIDC_TOKEN_URL", "http://sso.example.com/token")
+    monkeypatch.delenv("GREENWAVE_PUSH_WAIVERS", raising=False)
+    clear_settings_cache()
+    try:
+        saved = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "bearer",
+                    "greenwave_api_token": "rdb-token",  # pragma: allowlist secret
+                }
+            },
+        )
+        assert saved.status_code == 200, saved.text
+        settings = get_settings()
+        assert settings.greenwave_auth_mode == "bearer"
+        assert settings.greenwave_push_waivers is False
+        assert settings.greenwave_enabled is True
+
+        # An unrelated auth save is not vetoed by the inherited http values.
+        again = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={
+                "settings": {
+                    "greenwave_api_token": "rdb-token-2",  # pragma: allowlist secret
+                }
+            },
+        )
+        assert again.status_code == 200, again.text
+    finally:
+        monkeypatch.delenv("GREENWAVE_URL", raising=False)
+        monkeypatch.delenv("GREENWAVE_WAIVER_URL", raising=False)
+        monkeypatch.delenv("GREENWAVE_OIDC_TOKEN_URL", raising=False)
+        clear_settings_cache()
 
 
 # --- ADMIN_KEY stays a server-only bootstrap secret (#347 review) ---
@@ -1602,6 +2072,34 @@ _EXPECTED_CATEGORIES: dict[str, set[str]] = {
         "dd_push_tracker_links",
         "dd_allow_unreviewed_push",
     },
+    "Greenwave": {
+        "greenwave_auth_mode",
+        "greenwave_url",
+        "greenwave_api_token",
+        "greenwave_oidc_token_url",
+        "greenwave_oidc_client_id",
+        "greenwave_oidc_client_secret",
+        "greenwave_keytab_path",
+        "greenwave_keytab_principal",
+        "greenwave_krb5_realm",
+        "greenwave_krb5_service",
+        "greenwave_client_cert",
+        "greenwave_client_key",
+        "greenwave_ca_bundle",
+        "greenwave_basic_user",
+        "greenwave_basic_password",
+        "greenwave_sso_audience",
+        "greenwave_sso_waiver_audience",
+        "greenwave_waiver_url",
+        "greenwave_waiver_token",
+        "greenwave_push_waivers",
+        "greenwave_waivable_classifications",
+        "greenwave_outcome_map",
+        "greenwave_subject_type",
+        "greenwave_product_version",
+        "greenwave_verify_ssl",
+        "enable_greenwave",
+    },
     "Auth & Security": {
         "admin_key",
         "secure_cookies",
@@ -1709,9 +2207,43 @@ _JIRA_ALWAYS_VISIBLE = {
     "jira_max_results",
 }
 
+# The fields only the selected Greenwave auth mode shows (#183). The shared
+# rows below stay visible whatever the mode is.
+_GREENWAVE_VISIBLE_WHEN: dict[str, list[str]] = {
+    "greenwave_api_token": ["bearer"],
+    "greenwave_waiver_token": ["bearer"],
+    "greenwave_oidc_token_url": ["oidc"],
+    "greenwave_oidc_client_id": ["oidc"],
+    "greenwave_oidc_client_secret": ["oidc"],
+    "greenwave_keytab_path": ["kerberos"],
+    "greenwave_keytab_principal": ["kerberos"],
+    "greenwave_krb5_realm": ["kerberos"],
+    "greenwave_krb5_service": ["kerberos"],
+    "greenwave_client_cert": ["mtls"],
+    "greenwave_client_key": ["mtls"],
+    "greenwave_ca_bundle": ["mtls"],
+    "greenwave_basic_user": ["basic"],
+    "greenwave_basic_password": ["basic"],
+    "greenwave_sso_audience": ["sso"],
+    "greenwave_sso_waiver_audience": ["sso"],
+}
+
+_GREENWAVE_ALWAYS_VISIBLE = {
+    "enable_greenwave",
+    "greenwave_auth_mode",
+    "greenwave_url",
+    "greenwave_waiver_url",
+    "greenwave_push_waivers",
+    "greenwave_product_version",
+    "greenwave_subject_type",
+    "greenwave_waivable_classifications",
+    "greenwave_outcome_map",
+    "greenwave_verify_ssl",
+}
+
 
 def test_settings_categories_match_the_agreed_tabs():
-    """Every one of the 135 settings sits in its agreed tab (#585, #622)."""
+    """Every one of the 162 settings sits in its agreed tab (#585, #622)."""
     actual = {
         cat: set(fields)
         for cat, fields in settings_registry.SETTINGS_CATEGORIES.items()
@@ -1729,7 +2261,7 @@ def test_settings_categories_match_the_agreed_tabs():
     placed = [key for fields in _EXPECTED_CATEGORIES.values() for key in fields]
     assert len(placed) == len(set(placed)), "a setting sits in two tabs"
     assert set(placed) == set(Settings.model_fields)
-    assert len(placed) == 136
+    assert len(placed) == 162
 
 
 def test_every_setting_has_a_description():
@@ -1753,6 +2285,20 @@ def test_jira_visible_when_shape():
     assert not _JIRA_ALWAYS_VISIBLE & set(settings_registry.SETTING_VISIBLE_WHEN)
 
 
+def test_greenwave_visible_when_shape():
+    """The rule sits beside the setting, keyed on greenwave_auth_mode (#183)."""
+    for key, modes in _GREENWAVE_VISIBLE_WHEN.items():
+        assert settings_registry.SETTING_VISIBLE_WHEN[key] == {
+            "key": "greenwave_auth_mode",
+            "in": modes,
+        }, key
+    greenwave_fields = set(settings_registry.SETTINGS_CATEGORIES["Greenwave"])
+    assert greenwave_fields - _GREENWAVE_ALWAYS_VISIBLE == set(_GREENWAVE_VISIBLE_WHEN)
+    assert len(_GREENWAVE_ALWAYS_VISIBLE) == 10
+    # The shared rows never hide: no visible_when to render (or to lose).
+    assert not _GREENWAVE_ALWAYS_VISIBLE & set(settings_registry.SETTING_VISIBLE_WHEN)
+
+
 def test_jira_visible_when_is_emitted_only_where_declared(client):
     response = client.get("/api/admin/settings", headers=_admin_headers())
     assert response.status_code == 200
@@ -1763,8 +2309,9 @@ def test_jira_visible_when_is_emitted_only_where_declared(client):
             "in": modes,
         }, key
     # Most settings carry no such key at all — never a null to render.
+    declared = set(_JIRA_VISIBLE_WHEN) | set(_GREENWAVE_VISIBLE_WHEN)
     for key, item in by_key.items():
-        if key not in _JIRA_VISIBLE_WHEN:
+        if key not in declared:
             assert "visible_when" not in item, key
 
 
@@ -1776,12 +2323,80 @@ def test_every_conditional_jira_field_declares_a_mode():
 
 def test_every_jira_mode_surfaces_at_least_one_field():
     """Every selectable mode shows something (#585)."""
+    jira_fields = set(settings_registry.SETTINGS_CATEGORIES["Jira"])
     surfaced = {
         mode
-        for rule in settings_registry.SETTING_VISIBLE_WHEN.values()
+        for key, rule in settings_registry.SETTING_VISIBLE_WHEN.items()
+        if key in jira_fields
         for mode in rule["in"]
     }
     assert surfaced == set(JIRA_AUTH_MODES)
+
+
+def test_every_required_greenwave_mode_setting_is_reachable_in_the_ui():
+    """A required mode field can never be hidden by its own mode rule (#183).
+
+    ``greenwave_method_missing_fields`` names what a mode needs, while the UI
+    renders a row only when its ``visible_when`` matches the selected mode. A
+    required field conditional on a DIFFERENT mode would be unreachable: the
+    mode would report it missing forever with no way to fix it from Server
+    Settings. Cross-checking the two tables is what keeps "incomplete"
+    diagnosable.
+    """
+    with patch.dict(os.environ, {}, clear=True):
+        for mode in GREENWAVE_AUTH_MODES:
+            required = greenwave_method_missing_fields(
+                Settings(_env_file=None, greenwave_auth_mode=mode)
+            )
+            # Every mode needs at least the ResultsDB URL; an empty set would
+            # make this test pass while checking nothing.
+            assert required, mode
+            for field in required:
+                rule = settings_registry.SETTING_VISIBLE_WHEN.get(field)
+                if rule is None:
+                    continue  # always visible — nothing can hide it
+                assert rule["key"] == "greenwave_auth_mode", field
+                assert mode in rule["in"], (
+                    f"{field} is required by mode {mode!r} but visible only in "
+                    f"{rule['in']!r} — the UI could never reveal it"
+                )
+
+
+def test_setting_choices_include_greenwave_waivable_classifications(client):
+    """The pickers' source of truth is pinned, including the multi-select.
+
+    ``greenwave_waivable_classifications`` is a comma-separated list of the
+    known rootcoz classifications — listed as one picker with custom values
+    allowed, because a deployment may classify failures its own way.
+    """
+    assert set(settings_registry.SETTING_CHOICES) == {
+        "default_user_role",
+        "jira_auth_mode",
+        "greenwave_auth_mode",
+        "log_level",
+        "datadog_site",
+        "auto_push_exporters",
+        "ambient_auth_providers",
+        "allowed_users",
+        "greenwave_waivable_classifications",
+    }
+    expected = {
+        "options": sorted(GREENWAVE_KNOWN_CLASSIFICATIONS),
+        "multiple": True,
+        "allow_custom": True,
+    }
+    assert (
+        settings_registry.SETTING_CHOICES["greenwave_waivable_classifications"]
+        == expected
+    )
+    by_key = {
+        item["key"]: item
+        for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
+    }
+    entry = by_key["greenwave_waivable_classifications"]
+    assert entry["options"] == expected["options"]
+    assert entry["multiple"] is True
+    assert entry["allow_custom"] is True
 
 
 def test_switching_jira_auth_mode_keeps_the_other_modes_secret(client):

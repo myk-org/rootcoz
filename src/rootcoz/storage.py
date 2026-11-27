@@ -2466,6 +2466,11 @@ async def init_db() -> None:
         # knows which IdP to end (NULL = username/API-key login).
         await _migrate_add_column(db, "sessions", "auth_provider", "TEXT")
 
+        # Browser-session OIDC tokens for delegated calls (Red Hat SSO). Encrypted
+        # at rest and attached to the session row, so deleting the row (logout,
+        # revocation, expiry) wipes them with it.
+        await _migrate_add_column(db, "sessions", "sso_tokens_enc", "TEXT")
+
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_username ON sessions (username)"
         )
@@ -2571,6 +2576,9 @@ async def init_db() -> None:
         # the browser that started the login, so the two halves only work
         # together. Rows from before this column keep NULL and are refused.
         await _migrate_add_column(db, "sso_link_tickets", "binding_hash", "TEXT")
+        # Opaque encrypted browser-session tokens carried across the first-login
+        # choice screen; ``claims_json`` stays token-free.
+        await _migrate_add_column(db, "sso_link_tickets", "sso_tokens_enc", "TEXT")
 
         # Job metadata table for filtering and organization
         await db.execute("""
@@ -10121,6 +10129,7 @@ async def _insert_session_in_tx(
     auth_provider: str | None,
     ttl_hours: int,
     is_ai_session: bool = False,
+    sso_tokens_enc: str | None = None,
 ) -> str:
     """Write one sessions row inside the caller's transaction.
 
@@ -10136,6 +10145,8 @@ async def _insert_session_in_tx(
         ttl_hours: Lifetime in hours.
         is_ai_session: Whether the session is minted for server-initiated AI
             work, which is what lets a caller claim ``source='ai'`` (#618).
+        sso_tokens_enc: Encrypted browser-session OIDC tokens, when the login
+            carried any. Never set by the CLI device flow.
 
     Returns:
         The raw session token; only its hash is stored.
@@ -10145,8 +10156,8 @@ async def _insert_session_in_tx(
     await db.execute(
         "INSERT INTO sessions"
         " (token, username, is_admin, expires_at, role, is_ai_session,"
-        " auth_provider)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        " auth_provider, sso_tokens_enc)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             _hash_session_token(token),
             username,
@@ -10155,6 +10166,7 @@ async def _insert_session_in_tx(
             role,
             1 if is_ai_session else 0,
             auth_provider,
+            sso_tokens_enc,
         ),
     )
     return token
@@ -10167,6 +10179,7 @@ async def create_session(
     role: str = "reviewer",
     is_ai_session: bool = False,
     auth_provider: str | None = None,
+    sso_tokens_enc: str | None = None,
 ) -> str:
     """Create an opaque session token. Returns raw token.
 
@@ -10180,6 +10193,8 @@ async def create_session(
         auth_provider: Authentication provider that issued the session
             (``google`` / ``github`` / ...). ``None`` means a username and API
             key login; a provider name lets logout end the IdP session too.
+        sso_tokens_enc: Encrypted browser-session OIDC tokens, when the login
+            carried any. Kept off ``get_session`` so auth checks never read it.
     """
     if ttl_hours is None:
         ttl_hours = current_session_ttl_hours()
@@ -10194,6 +10209,7 @@ async def create_session(
                 auth_provider=auth_provider,
                 ttl_hours=ttl_hours,
                 is_ai_session=is_ai_session,
+                sso_tokens_enc=sso_tokens_enc,
             )
             await db.commit()
             return token
@@ -10241,6 +10257,66 @@ async def renew_session(token: str) -> bool:
         )
         await db.commit()
         return cursor.rowcount > 0
+
+
+async def get_session_sso_tokens(token: str) -> str | None:
+    """Return a live session's encrypted token blob, or ``None``.
+
+    Deliberately separate from :func:`get_session`: normal auth checks must never
+    carry the token blob, and only the delegated-call path needs it.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT sso_tokens_enc FROM sessions"
+            " WHERE token = ? AND expires_at > datetime('now')",
+            (_hash_session_token(token),),
+        )
+        row = await cursor.fetchone()
+    return row["sso_tokens_enc"] if row else None
+
+
+async def update_session_sso_tokens(
+    token: str,
+    sso_tokens_enc: str | None,
+    *,
+    expected_sso_tokens_enc: str | None = None,
+) -> bool:
+    """Replace a live session's encrypted token blob. Returns whether it landed.
+
+    ``expected_sso_tokens_enc`` makes the write compare-and-swap: it lands only
+    while the stored blob is still that ciphertext, so a rotation computed from
+    a bundle the session has since lost (logout, revocation) is never written
+    back over the cleared value.
+    """
+    token_hash = _hash_session_token(token)
+    if expected_sso_tokens_enc is not None:
+        sql = (
+            "UPDATE sessions SET sso_tokens_enc = ?"
+            " WHERE token = ? AND expires_at > datetime('now')"
+            " AND sso_tokens_enc = ?"
+        )
+        params: tuple[str | None, ...] = (
+            sso_tokens_enc,
+            token_hash,
+            expected_sso_tokens_enc,
+        )
+    else:
+        sql = (
+            "UPDATE sessions SET sso_tokens_enc = ?"
+            " WHERE token = ? AND expires_at > datetime('now')"
+        )
+        params = (sso_tokens_enc, token_hash)
+
+    async def _update() -> bool:
+        async with _connect_db() as db:
+            cursor = await db.execute(sql, params)
+            await db.commit()
+            return cursor.rowcount > 0
+
+    # Retried like ``create_session``: a rotated refresh token lost to a
+    # momentary lock would leave the browser session holding a token the IdP
+    # has already invalidated.
+    return await _retry_contended(_update)
 
 
 #: The columns a logout needs: who the session belongs to, and which provider

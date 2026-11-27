@@ -1,11 +1,13 @@
 """Tests for FastAPI main application."""
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
 import os
 import socket
+import sys
 import threading
 import time
 from contextlib import contextmanager, nullcontext, suppress
@@ -25,6 +27,11 @@ from rootcoz import storage, temp_paths
 from rootcoz.auth.approval import (
     default_eligibility_check as _default_eligibility_check,
 )
+from rootcoz.auth.sso.base import (
+    OAuthTokenBundle,
+    decrypt_oauth_tokens,
+    encrypt_oauth_tokens,
+)
 from rootcoz.config import Settings, clear_settings_cache, get_settings
 from rootcoz.encryption import encrypt_sensitive_fields
 from rootcoz.engine.core import AnalysisIncompleteError
@@ -42,6 +49,8 @@ from tests.conftest import (
     admin_login,
     build_test_env,
     capture_main_logs,
+    fake_spnego_module,
+    fresh_spnego_record,
     make_app_client,
     make_test_client,
     principal_state,
@@ -16963,6 +16972,291 @@ class TestAdminSettingsEndpoints:
             assert db_setting_is_set("sso_device_poll_interval_seconds") is False
             assert db_setting_is_set("sso_device_code_ttl_seconds") is False
 
+    def test_put_settings_invalid_greenwave_url(self, test_client) -> None:
+        """PUT rejects an http ResultsDB URL once a credential mode is set.
+
+        http is tolerated only while the exporter is inert (no mode selected
+        — the mode is DB-only, so a startup with env config cannot have one)
+        or in the credential-less 'none' mode. Asserted here with a mode
+        selected, which is the case that would leak a token in clear text.
+        """
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "bearer",
+                    "greenwave_api_token": "a-token",  # pragma: allowlist secret
+                    "greenwave_url": "http://resultsdb.example.com",
+                }
+            },
+        )
+        assert response.status_code == 400
+        assert "GREENWAVE_URL" in response.json()["detail"]
+
+    def test_put_settings_rejects_http_oidc_token_url(self, test_client) -> None:
+        """The OIDC token endpoint carries the client secret — HTTPS only."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "oidc",
+                    "greenwave_oidc_token_url": "http://sso.example.com/token",
+                }
+            },
+        )
+        assert response.status_code == 400
+        assert "GREENWAVE_OIDC_TOKEN_URL" in response.json()["detail"]
+
+    def test_put_settings_greenwave_url_with_credentials_rejected(
+        self, test_client
+    ) -> None:
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_url": "https://user:pass@resultsdb.example.com",  # pragma: allowlist secret
+                }
+            },
+        )
+        assert response.status_code == 400
+        assert "GREENWAVE_URL" in response.json()["detail"]
+
+    def test_put_settings_invalid_greenwave_waiver_url(self, test_client) -> None:
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"greenwave_waiver_url": "not-a-url"}},
+        )
+        assert response.status_code == 400
+        assert "GREENWAVE_WAIVER_URL" in response.json()["detail"]
+
+    def test_put_settings_invalid_greenwave_outcome_map(self, test_client) -> None:
+        """PUT rejects outcome maps with invalid ResultsDB outcomes."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"greenwave_outcome_map": "PRODUCT BUG:BOGUS"}},
+        )
+        assert response.status_code == 400
+        assert "outcome" in response.json()["detail"].lower()
+
+    def test_put_settings_valid_greenwave_url_accepted(self, test_client) -> None:
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {"greenwave_url": "https://resultsdb.example.com/api/v2.0"}
+            },
+        )
+        assert response.status_code == 200
+        assert "greenwave_url" in response.json()["updated"]
+
+    def test_put_settings_invalid_greenwave_auth_mode(self, test_client) -> None:
+        """An unknown mode value is rejected with the accepted list."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"greenwave_auth_mode": "oauth"}},
+        )
+        assert response.status_code == 400
+        assert "greenwave_auth_mode" in response.json()["detail"]
+        assert "bearer" in response.json()["detail"]
+
+    def test_put_settings_mode_with_missing_fields_is_accepted(
+        self, test_client
+    ) -> None:
+        """An incomplete mode must be storable, or its fields are unreachable.
+
+        The Server Settings UI renders a mode's fields only once that mode is
+        persisted, so rejecting the switch dead-ends the admin: every mode
+        but the current one would be unselectable. Jira behaves the same way —
+        an incomplete method is allowed and the gap is reported by the
+        connection test and by the exporter availability instead.
+        """
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"greenwave_auth_mode": "bearer"}},
+        )
+        assert response.status_code == 200, response.text
+        # The exporter is disabled by the incomplete mode, never half-enabled.
+        with patch(
+            "rootcoz.main.get_settings",
+            return_value=Settings(
+                _env_file=None,
+                greenwave_auth_mode="bearer",
+                greenwave_url=None,
+            ),
+        ):
+            listing = test_client.get("/api/exporters")
+        assert listing.status_code == 200
+        greenwave = next(item for item in listing.json() if item["name"] == "greenwave")
+        assert greenwave["enabled"] is False
+
+    def test_greenwave_test_connection_names_missing_mode_fields(
+        self, test_client
+    ) -> None:
+        """The gap is reported where the admin can act on it: the test button."""
+        settings = Settings(
+            _env_file=None,
+            greenwave_auth_mode="bearer",
+            greenwave_url=None,
+        )
+        with patch("rootcoz.main.get_settings", return_value=settings):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "greenwave_url" in data["message"]
+        assert "greenwave_api_token" in data["message"]
+
+    def test_put_settings_complete_mode_accepted(self, test_client) -> None:
+        """A mode saved together with all its fields is storable."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "bearer",
+                    "greenwave_url": "https://resultsdb.example.com",
+                    "greenwave_api_token": "rdb-token",  # pragma: allowlist secret
+                }
+            },
+        )
+        assert response.status_code == 200
+        assert "greenwave_auth_mode" in response.json()["updated"]
+
+    def test_put_settings_http_url_rejected_outside_none_mode(
+        self, test_client
+    ) -> None:
+        """Plain HTTP is storable only together with the none mode."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "bearer",
+                    "greenwave_url": "http://resultsdb.example.com",
+                }
+            },
+        )
+        assert response.status_code == 400
+        assert "GREENWAVE_URL" in response.json()["detail"]
+
+    def test_put_settings_http_url_accepted_with_none_mode(self, test_client) -> None:
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "none",
+                    "greenwave_url": "http://resultsdb.example.com",
+                }
+            },
+        )
+        assert response.status_code == 200
+        assert "greenwave_auth_mode" in response.json()["updated"]
+
+    def test_put_settings_clearing_mode_accepts_inert_http_url(
+        self, test_client
+    ) -> None:
+        """An explicit CLEAR of the mode is judged on the cleared value.
+
+        Regression (Qodo 18): clearing ``greenwave_auth_mode`` in the same
+        batch as an http URL was validated against the OLD mode — so an
+        admin disabling the exporter and pointing it at a public plain-HTTP
+        ResultsDB in one save was wrongly rejected. The batch must be
+        judged on the effective PROPOSED values, not ``or``-fallbacks to
+        the pre-batch state.
+        """
+        put = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "bearer",
+                    "greenwave_url": "https://resultsdb.example.com",
+                    "greenwave_api_token": "rdb-token",  # pragma: allowlist secret
+                }
+            },
+        )
+        assert put.status_code == 200
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "",
+                    "greenwave_url": "http://resultsdb.example.com",
+                }
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert "greenwave_auth_mode" in response.json()["updated"]
+
+    def test_put_settings_clearing_url_with_mode_pick_accepted(
+        self, test_client
+    ) -> None:
+        """A batch clearing the URL while picking a mode uses the new values.
+
+        Regression (Qodo 49): the cleared URL fell back to the pre-batch DB
+        value, so an admin replacing an old http URL (empty → reset) in the
+        same batch as the mode pick was refused over a URL the batch had
+        just removed. The genuinely-bad combination (credentials + http)
+        is still rejected — see test_put_settings_http_url_rejected_outside_none_mode.
+        """
+        put = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "none",
+                    "greenwave_url": "http://old-resultsdb.example.com",
+                }
+            },
+        )
+        assert put.status_code == 200
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "bearer",
+                    "greenwave_url": "",
+                    "greenwave_api_token": "rdb-token",  # pragma: allowlist secret
+                }
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert "greenwave_auth_mode" in response.json()["updated"]
+
+    def test_put_settings_clearing_mode_field_disables_the_exporter(
+        self, test_client
+    ) -> None:
+        """Resetting a required field is allowed and leaves the exporter off.
+
+        Clearing a credential must be storable — an admin needs to be able to
+        remove one, and a save is never blocked on completeness (Jira behaves
+        the same way). The exporter goes disabled, so the incomplete state can
+        never be used by a push.
+        """
+        put = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "bearer",
+                    "greenwave_url": "https://resultsdb.example.com",
+                    "greenwave_api_token": "rdb-token",  # pragma: allowlist secret
+                }
+            },
+        )
+        assert put.status_code == 200
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"greenwave_api_token": ""}},
+        )
+        assert response.status_code == 200, response.text
+
+        with patch(
+            "rootcoz.main.get_settings",
+            return_value=Settings(
+                _env_file=None,
+                greenwave_auth_mode="bearer",
+                greenwave_url="https://resultsdb.example.com",
+            ),
+        ):
+            listing = test_client.get("/api/exporters")
+        greenwave = next(item for item in listing.json() if item["name"] == "greenwave")
+        assert greenwave["enabled"] is False
+
     def test_put_settings_prow_url_with_credentials_rejected(self, test_client) -> None:
         response = test_client.put(
             "/api/admin/settings",
@@ -17586,6 +17880,103 @@ class TestEnumeratedSettings:
         assert key.upper() in response.json()["detail"].upper()
         # Nothing was written — the import is validated before any DB write
         assert _settings_item(test_client, key)["source"] != "db"
+
+
+class TestAutoPushAutoReviewSettingValidation:
+    """Auto-push requires auto-review — enforced on the write path (#183).
+
+    The Settings model only warns about the inert combination (raising
+    there would wipe DB overrides via the get_settings() fallback), so
+    _validate_settings_updates — shared by PUT and settings import —
+    rejects it against the EFFECTIVE proposed values.
+    """
+
+    @staticmethod
+    async def _validate(env: dict[str, str], updates: dict[str, Any]) -> list[str]:
+        from rootcoz.settings_registry import (
+            validate_settings_updates as _validate_settings_updates,
+        )
+
+        with patch.dict(os.environ, env, clear=True):
+            return await _validate_settings_updates(updates)
+
+    async def test_rejects_turning_auto_review_off_while_auto_push_configured(
+        self,
+    ) -> None:
+        """Disabling auto-review while auto-push is configured is rejected."""
+        errors = await self._validate(
+            build_test_env(AUTO_PUSH_EXPORTERS="reportportal"),
+            {"enable_auto_review": "false"},
+        )
+        assert any(
+            "auto_push_exporters requires enable_auto_review" in e for e in errors
+        )
+
+    async def test_rejects_saving_auto_push_while_auto_review_off(self) -> None:
+        """Configuring auto-push while auto-review is off is rejected."""
+        errors = await self._validate(
+            build_test_env(ENABLE_AUTO_REVIEW="false"),
+            {"auto_push_exporters": "reportportal"},
+        )
+        assert any(
+            "auto_push_exporters requires enable_auto_review" in e for e in errors
+        )
+
+    async def test_uses_effective_settings_not_raw_env(self) -> None:
+        """A DB-configured auto-push is caught even when env has neither key."""
+        from rootcoz.config import update_db_settings_cache
+
+        update_db_settings_cache({"auto_push_exporters": "reportportal"})
+        try:
+            errors = await self._validate(
+                build_test_env(), {"enable_auto_review": "false"}
+            )
+        finally:
+            from rootcoz.config import remove_from_db_settings_cache
+
+            remove_from_db_settings_cache(["auto_push_exporters"])
+        assert any(
+            "auto_push_exporters requires enable_auto_review" in e for e in errors
+        )
+
+    async def test_unrelated_update_passes_on_invalid_preexisting_combination(
+        self,
+    ) -> None:
+        """A server already carrying the inert combination can still save.
+
+        The cross-field rule is scoped to updates that touch one of the
+        two keys — otherwise every unrelated batch (a Jenkins URL, a
+        token) would be rejected for a combination the admin is not
+        touching.
+        """
+        errors = await self._validate(
+            build_test_env(
+                AUTO_PUSH_EXPORTERS="reportportal", ENABLE_AUTO_REVIEW="false"
+            ),
+            {"jenkins_url": "https://jenkins.example.com"},
+        )
+        assert not errors
+
+    async def test_accepts_valid_combinations(self) -> None:
+        """Enabling auto-review, clearing auto-push, or neither — all fine."""
+        # Turning auto-review ON while auto-push is configured
+        errors = await self._validate(
+            build_test_env(AUTO_PUSH_EXPORTERS="reportportal"),
+            {"enable_auto_review": "true"},
+        )
+        assert not errors
+        # Clearing auto-push while auto-review is off
+        errors = await self._validate(
+            build_test_env(ENABLE_AUTO_REVIEW="false"),
+            {"auto_push_exporters": ""},
+        )
+        assert not errors
+        # Both keys in one update, resolving to a valid combination
+        errors = await self._validate(
+            build_test_env(),
+            {"auto_push_exporters": "reportportal", "enable_auto_review": "true"},
+        )
+        assert not errors
 
 
 class TestAdminSettingsExportImport:
@@ -19199,6 +19590,331 @@ class TestIntegrationConnectionEndpoints:
         assert data["ok"] is False
         assert "not listable" in data["message"]
 
+    @staticmethod
+    def _greenwave_transport_client(handler) -> Any:
+        """Patch target: real httpx.AsyncClient backed by a MockTransport.
+
+        Running the real client (instead of an AsyncMock) is the point —
+        the selected auth mode's ``httpx.Auth`` flow executes against the
+        transport, so the test proves the exact code path a push uses.
+        """
+        real_client = httpx.AsyncClient
+
+        def factory(**kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_client(**kwargs)
+
+        return patch("rootcoz.main.httpx.AsyncClient", factory)
+
+    def test_greenwave_success(self, test_client) -> None:
+        """Greenwave test exercises the bearer mode end-to-end."""
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_api_token=SecretStr("not-a-real-token"),
+            greenwave_auth_mode="bearer",
+            greenwave_push_waivers=True,
+            greenwave_waiver_url="https://waiverdb.example.com",
+            greenwave_waiver_token=SecretStr("not-a-real-waiver-token"),
+            greenwave_product_version="el9",
+        )
+        seen: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["authorization"] = request.headers.get("Authorization", "")
+            return httpx.Response(200, json={"results": []})
+
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._greenwave_transport_client(handler),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert "resultsdb.example.com" in data["message"]
+        assert data["details"]["auth_mode"] == "bearer"
+        assert data["details"]["subject_type"] == "koji_build"
+        assert "satisfied" in data["details"]["waivers"]
+        assert seen["url"] == "https://resultsdb.example.com/results?limit=1"
+        assert seen["authorization"] == "Bearer not-a-real-token"
+        assert "not-a-real-token" not in json.dumps(data)
+
+    def test_greenwave_basic_mode_authenticated_request(self, test_client) -> None:
+        """A non-bearer mode: the basic strategy authenticates the probe."""
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_auth_mode="basic",
+            greenwave_basic_user="svc-rootcoz",
+            greenwave_basic_password=SecretStr("not-a-real-password"),
+        )
+        seen: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["authorization"] = request.headers.get("Authorization", "")
+            return httpx.Response(200, json={"results": []})
+
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._greenwave_transport_client(handler),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"]["auth_mode"] == "basic"
+        expected = base64.b64encode(b"svc-rootcoz:not-a-real-password").decode()
+        assert seen["authorization"] == f"Basic {expected}"
+        assert "not-a-real-password" not in json.dumps(data)
+
+    def test_greenwave_no_mode_makes_no_http_call(self, test_client) -> None:
+        """An unselected mode fails fast without any HTTP request."""
+        settings = Settings(greenwave_url="https://resultsdb.example.com")
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "No Greenwave auth method selected" in data["message"]
+        MockClient.assert_not_called()
+
+    def test_greenwave_missing_mode_fields_makes_no_http_call(
+        self, test_client
+    ) -> None:
+        """A selected mode with missing fields fails fast, naming the gaps."""
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_auth_mode="bearer",
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "greenwave_api_token" in data["message"]
+        MockClient.assert_not_called()
+
+    def test_greenwave_missing_waiver_settings(self, test_client) -> None:
+        """Waivers enabled but waiver settings missing names the gaps."""
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_api_token=SecretStr("not-a-real-token"),
+            greenwave_auth_mode="bearer",
+            greenwave_push_waivers=True,
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        for name in (
+            "GREENWAVE_WAIVER_URL",
+            "GREENWAVE_WAIVER_TOKEN",
+            "GREENWAVE_PRODUCT_VERSION",
+        ):
+            assert name in data["message"]
+        MockClient.assert_not_called()
+
+    def test_greenwave_kerberos_spnego_completed_message(self, test_client) -> None:
+        """A completed Negotiate exchange is reported as authenticated.
+
+        Regression: the success message always claimed the keytab was not
+        exercised, even when the SPNEGO dance completed — misleading for an
+        admin verifying kerberos setup.
+        """
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_auth_mode="kerberos",
+            greenwave_keytab_path="/secrets/rootcoz.keytab",
+            greenwave_keytab_principal="rootcoz@EXAMPLE.COM",
+        )
+        server_token = base64.b64encode(b"server-challenge").decode()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.headers.get("Authorization"):
+                return httpx.Response(
+                    401, headers={"WWW-Authenticate": f"Negotiate {server_token}"}
+                )
+            return httpx.Response(200, json={"results": []})
+
+        fake = fake_spnego_module(fresh_spnego_record())
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            patch.dict(sys.modules, {"spnego": fake}),
+            self._greenwave_transport_client(handler),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"]["auth_mode"] == "kerberos"
+        assert "SPNEGO exchange completed" in data["message"]
+        assert "not exercised" not in data["message"]
+
+    def test_greenwave_kerberos_no_negotiate_message(self, test_client) -> None:
+        """No 401 challenge: reachable, but the keytab was never exercised."""
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_auth_mode="kerberos",
+            greenwave_keytab_path="/secrets/rootcoz.keytab",
+            greenwave_keytab_principal="rootcoz@EXAMPLE.COM",
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"results": []})
+
+        fake = fake_spnego_module(fresh_spnego_record())
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            patch.dict(sys.modules, {"spnego": fake}),
+            self._greenwave_transport_client(handler),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"]["auth_mode"] == "kerberos"
+        assert "did not request Negotiate" in data["message"]
+        assert "keytab was not exercised" in data["message"]
+
+    @pytest.mark.parametrize(
+        ("failure", "message_fragment"),
+        [
+            # An HTTP refusal from ResultsDB itself.
+            ("http-403", "ResultsDB connection failed: HTTP 403"),
+            # A transport outage: the shared transport turns every
+            # httpx.HTTPError into _IntegrationTestError, which is the branch
+            # that used to be unreachable and let the failure read as a crash.
+            ("connect-error", "ConnectError"),
+        ],
+    )
+    def test_greenwave_connection_failure(
+        self, test_client, failure: str, message_fragment: str
+    ) -> None:
+        """A failed ResultsDB exchange yields ok:false with the mode reported."""
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_api_token=SecretStr("not-a-real-token"),
+            greenwave_auth_mode="bearer",
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if failure == "connect-error":
+                raise httpx.ConnectError("nodename nor servname provided")
+            return httpx.Response(403, json={"error": "forbidden"})
+
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._greenwave_transport_client(handler),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert data["message"].startswith("ResultsDB connection failed: ")
+        assert message_fragment in data["message"]
+        assert data["details"]["auth_mode"] == "bearer"
+        # Neither shape is reported as an unexpected crash.
+        assert "unexpected" not in data["message"]
+
+    @pytest.mark.parametrize("error_cls", [FileNotFoundError, OSError])
+    def test_greenwave_unreadable_mtls_file_is_reported_and_scrubbed(
+        self, test_client, tmp_path, error_cls
+    ) -> None:
+        """An unreadable mTLS cert/key is a failed test, with the path scrubbed.
+
+        The strategy loads the configured cert/key/CA files into an
+        ``ssl.SSLContext`` while the connection test configures its client, so
+        a missing file surfaces as an ``OSError`` raised by
+        ``auth.client_kwargs()`` inside the connection test's ``try``. It must
+        not read as an unexpected crash: the admin needs the selected auth
+        mode and an actionable message — and the raw credential path must not
+        reach the API response.
+        """
+        cert = str(tmp_path / "client.crt")
+        key = str(tmp_path / "client.key")
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_auth_mode="mtls",
+            greenwave_client_cert=cert,
+            greenwave_client_key=key,
+            greenwave_ca_bundle=str(tmp_path / "ca.pem"),
+        )
+
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            patch(
+                "rootcoz.exporters.greenwave_auth._build_mtls_ssl_context",
+                side_effect=error_cls(2, "No such file or directory", cert),
+            ),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert data["details"]["auth_mode"] == "mtls"
+        assert "ResultsDB connection failed" in data["message"]
+        rendered = json.dumps(data)
+        assert cert not in rendered
+        assert key not in rendered
+        assert "<client-cert>" in rendered
+        assert "unexpected" not in data["message"]
+
+    def test_greenwave_malformed_waiver_token_is_not_reported_satisfied(
+        self, test_client
+    ) -> None:
+        """A token the transport would refuse is not "prerequisites satisfied".
+
+        The waiver prerequisite check is presence-only and the ResultsDB
+        strategy never reads the waiver token, so without building the waiver
+        strategy too, this config answered ok:true while every push was
+        guaranteed to refuse.
+        """
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_api_token=SecretStr("not-a-real-token"),
+            greenwave_auth_mode="bearer",
+            greenwave_push_waivers=True,
+            greenwave_waiver_url="https://waiverdb.example.com",
+            greenwave_waiver_token=SecretStr("waiver\ntoken"),
+            greenwave_product_version="1.0",
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"results": []})
+
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._greenwave_transport_client(handler),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "GREENWAVE_WAIVER_TOKEN" in data["message"]
+        # The claim the old code made lives in `details`, not in the message.
+        assert "satisfied" not in json.dumps(data.get("details", {}))
+
+    @pytest.mark.parametrize("push_waivers", [True, False])
+    def test_capabilities_include_greenwave_waivers(self, push_waivers: bool) -> None:
+        """capabilities.greenwave_waivers mirrors GREENWAVE_PUSH_WAIVERS."""
+        from rootcoz import main as main_module
+
+        caps = main_module._build_capabilities(
+            Settings(greenwave_push_waivers=push_waivers)
+        )
+        assert caps["greenwave_waivers"] is push_waivers
+        assert "exporters" in caps
+
 
 class TestUserTokenTestEndpoint:
     """Tests for POST /api/user/tokens/test/{integration} (#537).
@@ -19674,8 +20390,8 @@ class TestSubmitterAutoTag:
         assert "re-analyze" in new_result["tags"]  # system tag preserved
 
 
-class TestSanitizeControlChars:
-    """Tests for _sanitize_control_chars."""
+class TestStripControlChars:
+    """Tests for rootcoz.utils.strip_control_chars and main's local helper."""
 
     @pytest.mark.parametrize(
         "input_val, expected",
@@ -19700,9 +20416,11 @@ class TestSanitizeControlChars:
             "mixed_control",
         ],
     )
-    def test_sanitize_control_chars(self, input_val: str, expected: str) -> None:
+    def test_strip_control_chars(self, input_val: str, expected: str) -> None:
         from rootcoz.main import _sanitize_control_chars
+        from rootcoz.utils import strip_control_chars
 
+        assert strip_control_chars(input_val) == expected
         assert _sanitize_control_chars(input_val) == expected
 
 
@@ -24088,3 +24806,477 @@ async def test_link_start_refuses_an_http_page_on_the_same_host(
 
         assert response.status_code == 303
         assert response.headers["location"] == "/settings?sso_error=link_cross_site"
+
+
+# ---------------------------------------------------------------------------
+# Greenwave 'sso' mode: the caller's browser Red Hat SSO session (#183)
+# ---------------------------------------------------------------------------
+
+_SSO_GREENWAVE_ENV = {
+    "SSO_REDHAT_ISSUER": "https://sso.redhat.com/auth/realms/redhat-external",
+    "SSO_REDHAT_CLIENT_ID": "redhat-client",
+    "SSO_REDHAT_CLIENT_SECRET": "redhat-secret",  # pragma: allowlist secret
+    "GREENWAVE_URL": "https://resultsdb.example.com",
+}
+
+
+def _greenwave_sso_settings(**overrides: Any) -> Settings:
+    base: dict[str, Any] = {
+        "greenwave_url": "https://resultsdb.example.com",
+        "greenwave_auth_mode": "sso",
+        "sso_redhat_issuer": _SSO_GREENWAVE_ENV["SSO_REDHAT_ISSUER"],
+        "sso_redhat_client_id": "redhat-client",
+        "sso_redhat_client_secret": SecretStr(
+            "redhat-secret"
+        ),  # pragma: allowlist secret
+    }
+    base.update(overrides)
+    return Settings(_env_file=None, **base)
+
+
+def _session_token_bundle(
+    access_token: str = "redhat-session-access",
+    *,
+    refresh_token: str | None = "redhat-session-refresh",
+    expires_at: float | None = None,
+) -> OAuthTokenBundle:
+    return OAuthTokenBundle(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_at=expires_at,
+        provider="redhat",
+    )
+
+
+class TestGreenwaveSsoModePush:
+    """POST /push/greenwave authenticates as the calling human, never the server."""
+
+    @pytest.fixture(autouse=True)
+    def _init_db(self, temp_db_path: Path):
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(storage.init_db())
+            yield
+
+    @staticmethod
+    def _set_sso_mode(client) -> None:
+        response = client.put(
+            "/api/admin/settings",
+            headers=_ADMIN_AUTH_HEADERS,
+            json={"settings": {"greenwave_auth_mode": "sso"}},
+        )
+        assert response.status_code == 200, response.text
+
+    @staticmethod
+    def _operator_session(bundle: OAuthTokenBundle | None) -> str:
+        """Create an operator account and a browser Red Hat SSO session."""
+
+        async def _create() -> str:
+            await storage.create_user("operator", role="operator")
+            return await storage.create_session(
+                "operator",
+                role="operator",
+                auth_provider="redhat",
+                sso_tokens_enc=(
+                    encrypt_oauth_tokens(bundle) if bundle is not None else None
+                ),
+            )
+
+        return asyncio.run(_create())
+
+    @staticmethod
+    def _export_context() -> Any:
+        from rootcoz.exporters.base import ExportContext
+
+        return ExportContext(
+            job_id="job-1",
+            job_name="test-job",
+            build_number="1",
+            jenkins_url="https://jenkins.example.com/job/test-job/1/",
+            failures=[
+                {
+                    "test_name": "t",
+                    "error": "boom",
+                    "analysis": {"classification": "PRODUCT BUG", "details": ""},
+                }
+            ],
+            report_url="https://rootcoz.example.com/results/job-1",
+            subject_identifier="pkg-1.0-1.el10",
+        )
+
+    @staticmethod
+    def _exporter() -> Any:
+        from rootcoz.exporters.base import ExporterResult
+
+        exporter = MagicMock()
+        exporter.push = AsyncMock(
+            return_value=ExporterResult(
+                success=True,
+                message="Pushed 1 result(s) to ResultsDB",
+                details={"pushed": 1, "errors": [], "details": {"resultsdb_ids": [1]}},
+            )
+        )
+        exporter.__enter__ = MagicMock(return_value=exporter)
+        exporter.__exit__ = MagicMock(return_value=False)
+        return exporter
+
+    @staticmethod
+    def _audit_rows() -> list[dict[str, Any]]:
+        async def _read() -> list[dict[str, Any]]:
+            page = await storage.list_audit_events(limit=50)
+            return page["events"] if isinstance(page, dict) else page
+
+        return asyncio.run(_read())
+
+    def _push(self, client, headers: dict[str, str] | None = None):
+        with (
+            patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+            patch(
+                "rootcoz.main._unreviewed_failure_count",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch(
+                "rootcoz.main._build_export_context",
+                new_callable=AsyncMock,
+                return_value=self._export_context(),
+            ),
+            patch("rootcoz.main._create_exporter") as create,
+        ):
+            mock_get.return_value = {"result": {"failures": [{"test_name": "t"}]}}
+            exporter = self._exporter()
+            create.return_value = exporter
+            response = client.post(
+                "/results/job-1/push/greenwave", headers=headers or {}
+            )
+        return response, create
+
+    def test_a_browser_session_pushes_with_the_callers_token(
+        self, temp_db_path: Path
+    ) -> None:
+        import rootcoz.main as main_module
+        from rootcoz.exporters.greenwave_exporter import GreenwaveExporter
+
+        real_create = main_module._create_exporter
+        created: dict[str, Any] = {}
+
+        def capture(plugin_name: str, settings: Settings, **kwargs: Any) -> Any:
+            created["tokens"] = kwargs.get("user_sso_tokens")
+            return real_create(plugin_name, settings, **kwargs)
+
+        def resultsdb_response(payload: dict[str, Any]) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json=payload,
+                request=httpx.Request("POST", "https://resultsdb.example.com"),
+            )
+
+        for client in make_app_client(temp_db_path, _SSO_GREENWAVE_ENV):
+            self._set_sso_mode(client)
+            session = self._operator_session(_session_token_bundle())
+            client.cookies.set("rootcoz_session", session)
+
+            post = AsyncMock(
+                side_effect=[
+                    resultsdb_response(
+                        {"uuid": "550e8400-e29b-41d4-a716-446655440000"}
+                    ),
+                    resultsdb_response({"id": 101}),
+                ]
+            )
+            with (
+                patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+                patch(
+                    "rootcoz.main._unreviewed_failure_count",
+                    new_callable=AsyncMock,
+                    return_value=0,
+                ),
+                patch(
+                    "rootcoz.main._build_export_context",
+                    new_callable=AsyncMock,
+                    return_value=self._export_context(),
+                ),
+                patch("rootcoz.main._create_exporter", side_effect=capture),
+                patch.object(GreenwaveExporter, "_post", post),
+            ):
+                mock_get.return_value = {"result": {"failures": [{"test_name": "t"}]}}
+                response = client.post("/results/job-1/push/greenwave")
+
+            assert response.status_code == 200, response.text
+            tokens = created["tokens"]
+            assert tokens is not None
+            assert tokens.results_token == "redhat-session-access"
+            # The real exporter sent the caller's Bearer on every ResultsDB write.
+            assert post.await_count == 2
+            for http_call in post.call_args_list:
+                request = httpx.Request("POST", http_call.args[1])
+                rendered = next(
+                    http_call.kwargs["auth"].sync_auth_flow(request)
+                ).headers["Authorization"]
+                assert rendered == "Bearer redhat-session-access"
+            # The push is audited under the human, not the deployment.
+            rows = [row for row in self._audit_rows() if row["action"] == "export.push"]
+            assert rows
+            assert rows[0]["actor"] == "operator"
+            assert rows[0]["outcome"] == "success"
+
+    @pytest.mark.parametrize("caller", ["admin_key", "user_api_key"])
+    def test_an_api_key_caller_is_refused_with_no_server_fallback(
+        self, temp_db_path: Path, caller: str
+    ) -> None:
+        """An API key has no delegated Red Hat token, so the push fails closed."""
+        for client in make_app_client(temp_db_path, _SSO_GREENWAVE_ENV):
+            self._set_sso_mode(client)
+            if caller == "admin_key":
+                headers = _ADMIN_AUTH_HEADERS
+            else:
+
+                async def _operator_key() -> str:
+                    _, key = await storage.create_user("apiuser", role="operator")
+                    return key
+
+                headers = {"Authorization": f"Bearer {asyncio.run(_operator_key())}"}
+
+            response, create = self._push(client, headers)
+
+            assert response.status_code == 400, response.text
+            assert "Red Hat SSO browser session" in response.json()["detail"]
+            create.assert_not_called()
+            rows = [row for row in self._audit_rows() if row["action"] == "export.push"]
+            assert rows
+            assert rows[0]["outcome"] == "failure"
+            assert rows[0]["details"]["reason"] == "invalid_request"
+
+    def test_a_disabled_integration_refuses_before_resolving_sso(
+        self, temp_db_path: Path
+    ) -> None:
+        """Greenwave off is a configuration refusal, not an SSO-session one.
+
+        With the integration disabled the push must not touch the caller's
+        Red Hat SSO session at all: an expired session used to answer 401 (or
+        a wrong "sign in via SSO" 400) for a deployment that simply turned
+        Greenwave off.
+        """
+        for client in make_app_client(temp_db_path, _SSO_GREENWAVE_ENV):
+            response = client.put(
+                "/api/admin/settings",
+                headers=_ADMIN_AUTH_HEADERS,
+                json={
+                    "settings": {
+                        "greenwave_auth_mode": "sso",
+                        "enable_greenwave": False,
+                    }
+                },
+            )
+            assert response.status_code == 200, response.text
+            session = self._operator_session(
+                _session_token_bundle(refresh_token=None, expires_at=time.time() - 3600)
+            )
+            client.cookies.set("rootcoz_session", session)
+
+            with (
+                patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+                patch(
+                    "rootcoz.main._unreviewed_failure_count",
+                    new_callable=AsyncMock,
+                    return_value=0,
+                ),
+                patch(
+                    "rootcoz.main._build_export_context",
+                    new_callable=AsyncMock,
+                    return_value=self._export_context(),
+                ),
+                patch(
+                    "rootcoz.main.auth_sso_tokens.resolve_redhat_sso_tokens",
+                    new_callable=AsyncMock,
+                ) as resolve,
+            ):
+                mock_get.return_value = {"result": {"failures": [{"test_name": "t"}]}}
+                response = client.post("/results/job-1/push/greenwave")
+
+            assert response.status_code == 400, response.text
+            assert "Greenwave integration is disabled" in response.json()["detail"]
+            resolve.assert_not_awaited()
+
+    def test_an_expired_unrefreshable_session_is_refused_with_401(
+        self, temp_db_path: Path
+    ) -> None:
+        for client in make_app_client(temp_db_path, _SSO_GREENWAVE_ENV):
+            self._set_sso_mode(client)
+            expired = _session_token_bundle(
+                refresh_token=None, expires_at=time.time() - 3600
+            )
+            session = self._operator_session(expired)
+            client.cookies.set("rootcoz_session", session)
+
+            response, create = self._push(client)
+
+            assert response.status_code == 401, response.text
+            assert "expired" in response.json()["detail"]
+            create.assert_not_called()
+            rows = [row for row in self._audit_rows() if row["action"] == "export.push"]
+            assert rows
+            assert rows[0]["outcome"] == "denied"
+            assert rows[0]["details"]["reason"] == "unauthenticated"
+
+    def test_a_refreshed_session_token_is_recorded_in_the_push_audit(
+        self, temp_db_path: Path
+    ) -> None:
+        """An expired bundle is refreshed once and the audit says so.
+
+        Only the fact of the rotation is recorded — never the tokens.
+        """
+        provider = MagicMock()
+        provider.refresh_access_token = AsyncMock(
+            return_value=_session_token_bundle(
+                access_token="refreshed-access", expires_at=time.time() + 3600
+            )
+        )
+        for client in make_app_client(temp_db_path, _SSO_GREENWAVE_ENV):
+            self._set_sso_mode(client)
+            session = self._operator_session(
+                _session_token_bundle(expires_at=time.time() - 3600)
+            )
+            client.cookies.set("rootcoz_session", session)
+
+            with patch(
+                "rootcoz.auth.sso.tokens.RedHatSSOProvider.from_settings",
+                return_value=provider,
+            ):
+                response, _ = self._push(client)
+
+            assert response.status_code == 200, response.text
+            provider.refresh_access_token.assert_awaited_once_with(
+                "redhat-session-refresh"
+            )
+            # The rotated bundle replaces the session's, so the browser session
+            # (and the next push) keeps working.
+            stored = decrypt_oauth_tokens(
+                asyncio.run(storage.get_session_sso_tokens(session))
+            )
+            assert stored is not None
+            assert stored.access_token == "refreshed-access"
+            rows = [row for row in self._audit_rows() if row["action"] == "export.push"]
+            assert rows
+            assert rows[0]["details"]["sso_token_refreshed"] is True
+            assert "refreshed-access" not in json.dumps(rows[0])
+
+
+class TestGreenwaveSsoModeConnectionTest:
+    """The admin test button probes as the calling admin in sso mode."""
+
+    def test_admin_key_gets_a_clear_sso_refusal(self, test_client) -> None:
+        settings = _greenwave_sso_settings()
+        with patch("rootcoz.main.get_settings", return_value=settings):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["ok"] is False
+        assert data["details"]["auth_mode"] == "sso"
+        assert "Red Hat SSO browser session" in data["message"]
+
+    def test_waivers_enabled_exercises_the_waiverdb_audience_exchange(
+        self, temp_db_path: Path
+    ) -> None:
+        """With waivers on, the probe must also mint the WaiverDB token.
+
+        A failing WaiverDB RFC 8693 exchange is reported as a failed test in
+        ``sso`` mode — never as a green light on the results token alone.
+        """
+        from rootcoz.auth.sso import AuthError
+
+        exchange = AsyncMock(
+            side_effect=[
+                _session_token_bundle(
+                    access_token="resultsdb-token", refresh_token=None
+                ),
+                AuthError("token_exchange_failed"),
+            ]
+        )
+        settings = _greenwave_sso_settings(
+            greenwave_push_waivers=True,
+            greenwave_waiver_url="https://waiverdb.example.com",
+            greenwave_product_version="el9",
+            greenwave_sso_audience="resultsdb",
+            greenwave_sso_waiver_audience="waiverdb",
+        )
+        for client in make_app_client(temp_db_path, _SSO_GREENWAVE_ENV):
+
+            async def _create_admin_session() -> str:
+                await storage.create_admin_user("boss")
+                return await storage.create_session(
+                    "boss",
+                    is_admin=True,
+                    role="admin",
+                    auth_provider="redhat",
+                    sso_tokens_enc=encrypt_oauth_tokens(_session_token_bundle()),
+                )
+
+            session = asyncio.run(_create_admin_session())
+            client.cookies.set("rootcoz_session", session)
+
+            with (
+                patch("rootcoz.main.get_settings", return_value=settings),
+                patch(
+                    "rootcoz.auth.sso.tokens.RedHatSSOProvider"
+                    ".exchange_token_for_audience",
+                    exchange,
+                ),
+                TestIntegrationConnectionEndpoints._greenwave_transport_client(
+                    lambda request: httpx.Response(200, json={"results": []})
+                ),
+            ):
+                response = client.post("/api/admin/settings/test/greenwave")
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["ok"] is False
+        assert data["details"]["auth_mode"] == "sso"
+        assert "WaiverDB" in data["message"]
+        assert [call.kwargs["audience"] for call in exchange.await_args_list] == [
+            "resultsdb",
+            "waiverdb",
+        ]
+        assert "resultsdb-token" not in json.dumps(data)
+
+    def test_a_redhat_browser_session_probes_with_the_admins_token(
+        self, temp_db_path: Path
+    ) -> None:
+        seen: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["authorization"] = request.headers.get("Authorization", "")
+            return httpx.Response(200, json={"results": []})
+
+        for client in make_app_client(temp_db_path, _SSO_GREENWAVE_ENV):
+
+            async def _create_admin_session() -> str:
+                await storage.create_admin_user("boss")
+                return await storage.create_session(
+                    "boss",
+                    is_admin=True,
+                    role="admin",
+                    auth_provider="redhat",
+                    sso_tokens_enc=encrypt_oauth_tokens(_session_token_bundle()),
+                )
+
+            session = asyncio.run(_create_admin_session())
+            client.cookies.set("rootcoz_session", session)
+
+            with (
+                patch(
+                    "rootcoz.main.get_settings",
+                    return_value=_greenwave_sso_settings(),
+                ),
+                TestIntegrationConnectionEndpoints._greenwave_transport_client(handler),
+            ):
+                response = client.post("/api/admin/settings/test/greenwave")
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"]["auth_mode"] == "sso"
+        assert seen["url"] == "https://resultsdb.example.com/results?limit=1"
+        assert seen["authorization"] == "Bearer redhat-session-access"
+        assert "redhat-session-access" not in json.dumps(data)

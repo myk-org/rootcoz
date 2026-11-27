@@ -29,12 +29,13 @@ from __future__ import annotations
 import hmac
 import math
 import time
+from dataclasses import replace
 from typing import Any, ClassVar
 
 import httpx
 
 from rootcoz import get_child_logger
-from rootcoz.auth.sso.base import AuthError, ClaimSet, SSOProvider
+from rootcoz.auth.sso.base import AuthError, ClaimSet, OAuthTokenBundle, SSOProvider
 from rootcoz.auth.sso.http import request_json
 from rootcoz.config import Settings, issuer_is_secure
 from rootcoz.url_utils import is_safe_navigation_url, origin_of
@@ -351,13 +352,111 @@ class OIDCProvider(SSOProvider):
             AuthError: When the exchange, verification, or claim parsing fails.
         """
         document = await self.metadata()
-        token = await self._post_token(document, code, code_verifier, redirect_uri)
+        token = await self._post_token(code, code_verifier, redirect_uri)
         claims = await self._claims_from_token(document, token, nonce)
-        return self._normalise(claims)
+        claim_set = self._normalise(claims)
+        access_token = token.get("access_token")
+        if not isinstance(access_token, str) or not access_token:
+            return claim_set
+        return replace(claim_set, oauth_tokens=self._parse_token_bundle(token))
+
+    def _parse_token_bundle(
+        self, token: dict[str, Any], *, fallback_refresh_token: str | None = None
+    ) -> OAuthTokenBundle:
+        """Read one token response into an :class:`OAuthTokenBundle`.
+
+        Args:
+            token: The token endpoint response.
+            fallback_refresh_token: Refresh token to keep when the response does
+                not rotate it (some providers omit it on refresh).
+
+        Returns:
+            The bundle for this provider.
+
+        Raises:
+            AuthError: ``token_exchange_failed`` when the response carries no
+                usable access token.
+        """
+        access_token = token.get("access_token")
+        if not isinstance(access_token, str) or not access_token:
+            raise AuthError(
+                "token_exchange_failed", "token response carried no access token"
+            )
+        refresh_token = token.get("refresh_token")
+        if not isinstance(refresh_token, str) or not refresh_token:
+            refresh_token = fallback_refresh_token
+        expires_in = token.get("expires_in")
+        expires_at = None
+        if (
+            isinstance(expires_in, int | float)
+            and not isinstance(expires_in, bool)
+            and expires_in > 0
+        ):
+            expires_at = time.time() + float(expires_in)
+        return OAuthTokenBundle(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+            provider=self.name,
+        )
+
+    async def refresh_access_token(self, refresh_token: str) -> OAuthTokenBundle:
+        """Exchange a refresh token for a fresh browser-session token bundle."""
+        token = await self._token_endpoint_request(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+            },
+            reason="token_refresh_failed",
+        )
+        return self._parse_token_bundle(token, fallback_refresh_token=refresh_token)
+
+    async def exchange_token_for_audience(
+        self, *, subject_token: str, audience: str, scope: str | None = None
+    ) -> OAuthTokenBundle:
+        """RFC 8693 token exchange: mint a token for another audience."""
+        data = {
+            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+            "subject_token": subject_token,
+            "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "audience": audience,
+            "client_id": self._client_id,
+            "client_secret": self._client_secret,
+        }
+        if scope:
+            data["scope"] = scope
+        token = await self._token_endpoint_request(data, reason="token_exchange_failed")
+        return self._parse_token_bundle(token)
+
+    async def _token_endpoint_request(
+        self, data: dict[str, Any], *, reason: str
+    ) -> dict[str, Any]:
+        """POST *data* to the discovered token endpoint.
+
+        One place for the discovery-then-POST shape every token grant shares
+        (code exchange, refresh, audience exchange), so the endpoint lookup and
+        the error-reason wiring cannot drift between them.
+
+        Args:
+            data: The form body of the grant.
+            reason: Stable audit code for a refusal.
+
+        Returns:
+            The token endpoint response.
+
+        Raises:
+            AuthError: When discovery or the grant fails.
+        """
+        document = await self.metadata()
+        return await request_json(
+            "POST", str(document["token_endpoint"]), reason=reason, data=data
+        )
 
     async def _post_token(
         self,
-        document: dict[str, Any],
         code: str,
         code_verifier: str,
         redirect_uri: str,
@@ -365,7 +464,6 @@ class OIDCProvider(SSOProvider):
         """POST the code to the token endpoint.
 
         Args:
-            document: The discovery document.
             code: Authorization code.
             code_verifier: PKCE verifier.
             redirect_uri: Callback URL used for the login.
@@ -384,12 +482,7 @@ class OIDCProvider(SSOProvider):
             "client_secret": self._client_secret,
             "code_verifier": code_verifier,
         }
-        return await request_json(
-            "POST",
-            str(document["token_endpoint"]),
-            reason="exchange_failed",
-            data=data,
-        )
+        return await self._token_endpoint_request(data, reason="exchange_failed")
 
     async def _claims_from_token(
         self, document: dict[str, Any], token: dict[str, Any], nonce: str

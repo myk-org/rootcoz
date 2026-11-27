@@ -526,6 +526,15 @@ async def unlink_user_identity(username: str, provider: str) -> str:
                     "DELETE FROM user_identities WHERE provider = ? AND user_id = ?",
                     (provider, user_row["id"]),
                 )
+                # Delegated OIDC tokens come from the identity just unlinked:
+                # revoke them on every session of that account in the same
+                # transaction. The sessions themselves survive — a user signed
+                # in with a local password must not be logged out by an unlink.
+                await db.execute(
+                    "UPDATE sessions SET sso_tokens_enc = NULL"
+                    " WHERE username = ? AND auth_provider = ?",
+                    (username, provider),
+                )
                 await db.commit()
             except Exception:
                 await db.rollback()
@@ -962,8 +971,14 @@ async def create_sso_ticket(
     binding: str,
     next_path: str = "/",
     ttl_seconds: int = SSO_TICKET_TTL_SECONDS,
+    sso_tokens_enc: str | None = None,
 ) -> str:
-    """Mint a one-time ticket for the first-login choice screen."""
+    """Mint a one-time ticket for the first-login choice screen.
+
+    ``sso_tokens_enc`` is an already-encrypted browser-session token blob; it is
+    carried separately from the identity fields so no token ever enters
+    ``raw_claims_json`` or an audit row.
+    """
     _validate_sso_provider(provider)
     _validate_identity_subject(subject)
     ticket = secrets.token_urlsafe(32)
@@ -976,8 +991,9 @@ async def create_sso_ticket(
             await db.execute(
                 "INSERT INTO sso_link_tickets"
                 " (ticket_hash, provider, subject, email, suggested_username,"
-                " next_path, expires_at, created_at, binding_hash)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " next_path, expires_at, created_at, binding_hash,"
+                " sso_tokens_enc)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     _storage._hash_session_token(ticket),
                     provider,
@@ -988,6 +1004,7 @@ async def create_sso_ticket(
                     expires_str,
                     created_at,
                     _storage._hash_session_token(binding),
+                    sso_tokens_enc,
                 ),
             )
             await db.commit()
@@ -1017,11 +1034,13 @@ def _ticket_view(row: Any) -> dict[str, Any]:
         "suggested_username": row["suggested_username"],
         "next_path": row["next_path"],
         "expires_at": row["expires_at"],
+        "sso_tokens_enc": row["sso_tokens_enc"],
     }
 
 
 _TICKET_SELECT = (
-    "SELECT provider, subject, email, suggested_username, next_path, expires_at"
+    "SELECT provider, subject, email, suggested_username, next_path, expires_at,"
+    " sso_tokens_enc"
     " FROM sso_link_tickets"
 )
 
