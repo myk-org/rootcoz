@@ -21,8 +21,8 @@ unfinished migration:
   `/user/emails`, which is the only place a GitHub account exists.
 - An OpenShift cluster's built-in OAuth server is **not** an OIDC provider. It
   publishes OAuth 2.0 metadata (no JWKS, no ID token, no `userinfo_endpoint`) and
-  issues **opaque** tokens; the account — its name, its identities and its email —
-  lives on the cluster API server, reachable with that token and nowhere else.
+  issues **opaque** tokens; the account lives on the cluster API server,
+  reachable with that token and nowhere else.
   Demanding OIDC of it would not harden the login, it would remove the provider.
 
 ## Before you start
@@ -59,36 +59,283 @@ Enterprise Server installation serves its own endpoints and is not supported yet
 
 ### OpenShift
 
-Create an OAuth client on the cluster (`oauthclients.oauth.openshift.io`) and set
-two origins. `SSO_OPENSHIFT_ISSUER` is the cluster's **OAuth server**
+Create a cluster-scoped `OAuthClient` (`oauthclients.oauth.openshift.io`) and
+set two origins. `SSO_OPENSHIFT_ISSUER` is the cluster's **OAuth server**
 (`https://oauth-openshift.apps.<cluster>`): it is asked for exactly two things,
 `/oauth/authorize` and `/oauth/token`, so it is the code exchange and nothing
 else. It must be `https` with no path, no query and no `/.well-known/…`; `http` is
 accepted only for a loopback development server.
 
 `SSO_OPENSHIFT_API_URL` is the cluster **API server** (`https://api.<cluster>:6443`),
-and it is where the account, its identities and its email are read — with the
-opaque access token the OAuth server just issued. That is why both settings are
-required: with only the OAuth origin set, nothing can name the account, and every
-login fails at the account lookup. The API URL is held to the same shape as the
-origin — `https`, no path, `http` only for a loopback server.
+and it is where the account is read — with the opaque access token the OAuth
+server just issued. That is why both settings are required: with only the OAuth
+origin set, nothing can name the account, and every login fails at the account
+lookup. The API URL is held to the same shape as the origin — `https`, no path,
+no query, `http` only for a loopback server.
 
-Neither value is an OIDC issuer, so there is no `iss` claim to match: a cluster's
-OAuth server issues opaque access tokens and never mints an ID token. It publishes
-no `email_verified` claim either, so if you use the domain allow-list the address
-itself decides: an identity object is written by the cluster admin (or by the IdP
-mapping the admin configured), never by the end user, so the address it carries
-is authoritative and admitted on its domain alone.
+Neither value is an OIDC issuer, so there is no `iss` claim to match: a
+cluster's OAuth server issues opaque access tokens and never mints an ID token.
+It publishes no `email_verified` claim either (an admin- or IdP-written cluster
+identity email is treated as authoritative), and because RootCoz requests only
+the `user:info` scope, `identities` lookups return `403` and no email arrives —
+see **Scope limitation: email and `SSO_ALLOWED_DOMAINS`** below.
 
-> **RBAC limitation — email and `SSO_ALLOWED_DOMAINS`:** The `user:info` scope
-> grants `get` on `users/~` but typically does **not** grant cluster-scoped `get`
-> on `identities` resources. When the user's access token lacks that permission,
-> the identity lookup returns a 403, no email address is available, and
-> `SSO_ALLOWED_DOMAINS` will refuse every OpenShift login with
-> `domain_not_allowed`. To use a domain allow-list with OpenShift, either grant
-> read access to `identities` for authenticated users on the cluster, leave
-> `SSO_ALLOWED_DOMAINS` empty, or use an OIDC provider (Red Hat SSO or Google)
-> that returns the email in the ID token.
+#### Create a cluster-scoped OAuthClient
+
+Creating an `OAuthClient` requires cluster-admin privileges. OpenShift does not
+auto-generate a secret for an `OAuthClient`, so generate one explicitly. RootCoz
+posts `grant_type=authorization_code` with `client_id` and `client_secret` to
+`/oauth/token`; do not use a namespace-scoped `ServiceAccount` OAuth client — it
+has no standalone generated OAuth client secret (it authenticates with a
+ServiceAccount token, which OpenShift 4.11+ stopped auto-generating, and fails
+at `/oauth/token` with `unauthorized_client` when given an arbitrary secret),
+cannot use `grantMethod: auto`, and reuses a Kubernetes ServiceAccount
+credential. Use a dedicated cluster-scoped `OAuthClient` with explicit
+`scopeRestrictions` instead.
+
+Generate a secret and create the `OAuthClient` resource (replacing
+`https://rootcoz.example.com` with your `PUBLIC_BASE_URL` so any path prefix or
+non-default port is preserved):
+
+```bash
+(
+  set -eu
+  SECRET=$(openssl rand -hex 32)
+  oc create -f - <<EOF
+apiVersion: oauth.openshift.io/v1
+kind: OAuthClient
+metadata:
+  name: rootcoz
+secret: "${SECRET}"
+grantMethod: auto
+scopeRestrictions:
+  - literals:
+      - user:info
+redirectURIs: ["https://rootcoz.example.com/api/auth/sso/openshift/callback"]
+EOF
+)
+```
+
+`scopeRestrictions` restricts this client to the single read-only `user:info`
+literal scope that RootCoz requests, which is why `grantMethod: auto` is safe
+for this first-party client. Using `oc create` fails safely with `AlreadyExists`
+if re-run (preventing accidental secret rotation) and does not store a plaintext
+copy of `secret` in `kubectl.kubernetes.io/last-applied-configuration`, while
+the subshell avoids leaving `SECRET` set in your interactive shell.
+
+To copy the secret into RootCoz Server Settings without printing it to terminal
+scrollback, pipe it directly to your clipboard (for example with `pbcopy`,
+`wl-copy`, or `xclip -selection clipboard`):
+
+```bash
+oc get oauthclient rootcoz -o jsonpath='{.secret}' | pbcopy
+```
+
+Or print it explicitly with a trailing newline and clear your terminal
+afterward:
+
+```bash
+oc get oauthclient rootcoz -o jsonpath='{.secret}{"\n"}'
+```
+
+> **Secret rotation:** If you ever rotate `.secret` on the `OAuthClient`, update
+> `SSO_OPENSHIFT_CLIENT_SECRET` in RootCoz at the same time (otherwise logins
+> fail with `exchange_failed`).
+
+`OAuthClient` resources are cluster-scoped. If you run separate RootCoz
+deployments against the same cluster (for example, production and development),
+create a separate `OAuthClient` with a distinct `metadata.name` and a separate
+secret for each deployment.
+
+#### Configure RootCoz
+
+Open **Server Settings → Auth & Security → OpenShift** and fill in all four
+settings (see [Configuration Reference](configuration-reference.html) for full
+details):
+
+| Setting | Value |
+| --- | --- |
+| `SSO_OPENSHIFT_CLIENT_ID` | `OAuthClient` `metadata.name` (for example `rootcoz`) |
+| `SSO_OPENSHIFT_CLIENT_SECRET` | The `OAuthClient` `secret` value |
+| `SSO_OPENSHIFT_ISSUER` | `https://oauth-openshift.apps.<cluster>` |
+| `SSO_OPENSHIFT_API_URL` | `https://api.<cluster>:6443` |
+
+Saving these values in Server Settings takes effect immediately with no pod
+restart.
+
+#### Trust the cluster CAs
+
+On self-managed and default OpenShift clusters (unless the cluster API server is
+configured with a publicly signed custom serving certificate, as on managed
+offerings such as ROSA, OSD, or ARO), the API server's serving certificate is
+signed by the cluster's own CA (never in the container's Mozilla/`certifi`
+roots), so any deployment connecting to `https://api.<cluster>:6443` needs the
+cluster's kube-apiserver CA in its trust store — even when the
+`*.apps.<cluster>` ingress route uses a publicly signed certificate.
+
+OpenShift SSO fails with two distinct error codes depending on which CA is
+missing:
+
+- **Untrusted OAuth route / ingress CA:** fails at `POST /oauth/token` with
+  `exchange_failed` ("Could not complete the sign-in with the provider. Please
+  try again.").
+- **Trusted ingress CA + untrusted kube-apiserver CA:** passes `/oauth/token`
+  and fails at `/apis/user.openshift.io/v1/users/~` with `userinfo_failed`
+  ("Could not read your profile from the provider. Please try again.").
+
+> **Do not point `SSL_CERT_FILE` at the cluster CA alone:** doing so replaces
+> the system trust store and breaks connections to public CAs such as Google
+> and GitHub. Always build a **combined** bundle starting from the container's
+> immutable system CA bundle (`/etc/ssl/certs/ca-certificates.crt`) and append
+> the cluster CAs to it.
+
+1. Build `ca-bundle.crt` starting from the container's immutable system CA
+   bundle (`/etc/ssl/certs/ca-certificates.crt`, which — like `/app/.venv`'s
+   `certifi` bundle — carries Mozilla roots), then append the cluster
+   kube-apiserver CA from the namespace's standard `kube-root-ca.crt` ConfigMap
+   and the cluster ingress CA from `default-ingress-cert`. Reading
+   `kube-root-ca.crt` works even when the pod sets
+   `automountServiceAccountToken: false` (the Helm chart default, where
+   `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` is not mounted), and
+   starting from `/etc/ssl/certs/ca-certificates.crt` rather than
+   `${SSL_CERT_FILE:-...}` keeps rebuilds idempotent without duplicating
+   certificates or retaining revoked CAs. Building into a temporary file,
+   setting mode `0644` (clearing mktemp's 0600 mode so the bundle stays
+   readable wherever it is later mounted), and moving it into
+   place only on success ensures a failed `oc` command never leaves a partial
+   `ca-bundle.crt` for step 2:
+
+   ```bash
+   (
+     set -eu
+     out=$(mktemp)
+     trap 'rm -f "$out"' EXIT
+     oc -n <namespace> exec deployment/<deployment> -- \
+       cat /etc/ssl/certs/ca-certificates.crt > "$out"
+     printf '\n' >> "$out"
+     oc -n <namespace> get configmap kube-root-ca.crt \
+       -o jsonpath='{.data.ca\.crt}' >> "$out"
+     printf '\n' >> "$out"
+     oc -n openshift-config-managed get configmap default-ingress-cert \
+       -o jsonpath='{.data.ca-bundle\.crt}' >> "$out"
+     printf '\n' >> "$out"
+     chmod 0644 "$out"
+     mv "$out" ca-bundle.crt
+     trap - EXIT
+   )
+   ```
+
+   If your OAuth route (`https://oauth-openshift.apps.<cluster>`) already uses
+   a publicly signed certificate, omit the `default-ingress-cert` command from
+   the subshell; if you lack read access to `openshift-config-managed`, replace
+   it inside the same subshell with `cat /path/to/ingress-ca.pem >> "$out"`
+   (keeping the `printf '\n' >> "$out"` separator before `chmod 0644 "$out"`
+   and `mv "$out" ca-bundle.crt`). Do the same for any custom API load-balancer
+   CA (if not in `kube-root-ca.crt`) or corporate root CA, or append an extra
+   PEM file to `ca-bundle.crt` before step 2 with explicit newline boundaries:
+
+   ```bash
+   (
+     set -eu
+     printf '\n' >> ca-bundle.crt
+     cat /path/to/extra-ca.pem >> ca-bundle.crt
+     printf '\n' >> ca-bundle.crt
+   )
+   ```
+
+2. Save the combined bundle to a ConfigMap (`rootcoz-extra-ca`) and remove the
+   local file once the apply succeeds:
+
+   ```bash
+   oc -n <namespace> create configmap rootcoz-extra-ca \
+     --from-file=ca-certificates.crt=ca-bundle.crt \
+     --dry-run=client -o yaml \
+     | oc -n <namespace> apply --server-side --force-conflicts -f - \
+     && rm -f ca-bundle.crt
+   ```
+
+   `--server-side` is used because the combined CA bundle approaches
+   Kubernetes' 256 KiB `last-applied-configuration` annotation limit. Treat
+   `rootcoz-extra-ca` (and `SSL_CERT_FILE`) as a security-sensitive trust store:
+   restrict write RBAC and review changes, since adding an untrusted CA enables
+   intercepting outbound TLS traffic (including OAuth token exchanges).
+
+3. Mount the ConfigMap read-only at `/etc/ssl/extra` and set `SSL_CERT_FILE`.
+   Because the RootCoz Deployment uses `replicas: 1` with `strategy: Recreate`,
+   pause before applying both changes so only a single rollout happens, pass
+   `--overwrite` to `oc set volume` so re-running this step is idempotent, then
+   resume and wait for the rollout to finish before step 4:
+
+   ```bash
+   oc -n <namespace> rollout pause deployment/<deployment>
+   oc -n <namespace> set volume deployment/<deployment> \
+     --add --overwrite --name=extra-ca \
+     --type=configmap --configmap-name=rootcoz-extra-ca \
+     --mount-path=/etc/ssl/extra --read-only
+   oc -n <namespace> set env deployment/<deployment> \
+     SSL_CERT_FILE=/etc/ssl/extra/ca-certificates.crt
+   oc -n <namespace> rollout resume deployment/<deployment>
+   oc -n <namespace> rollout status deployment/<deployment>
+   ```
+
+   Once the ConfigMap is mounted and `SSL_CERT_FILE` is set, later updates to
+   `rootcoz-extra-ca` refresh automatically via kubelet in roughly 30–60 seconds
+   without restarting the pod. Rebuild `rootcoz-extra-ca` after upgrading the
+   RootCoz image or rotating cluster CAs, because the ConfigMap snapshots the
+   image's CA store rather than refreshing from it automatically.
+
+   > **Helm-managed deployments:** The official Helm chart (see
+   > [Deploying RootCoz](deploy-rootcoz.html)) does not currently expose extra CA
+   > volume or `SSL_CERT_FILE` values, so `helm upgrade` will revert imperative
+   > `oc set volume` and `oc set env` patches. Re-apply these patches after
+   > upgrades, or inject the volume, mount, and `SSL_CERT_FILE` environment
+   > variable with a Helm post-renderer or manifest overlay. For non-Kubernetes
+   > deployments such as Docker Compose, extract the base bundle from the
+   > RootCoz image (for example
+   > `docker run --rm --entrypoint cat ghcr.io/myk-org/rootcoz:latest /etc/ssl/certs/ca-certificates.crt`),
+   > append the cluster CAs, keep the combined file mode `0644` (the container
+   > runs as non-root `appuser`), mount it read-only into the container, and
+   > set `SSL_CERT_FILE` to its container path.
+
+4. Verify TLS from inside the pod against the API server, the OAuth server, and
+   a public HTTPS endpoint:
+
+   ```bash
+   oc -n <namespace> exec deployment/<deployment> -- /app/.venv/bin/python -c '
+   import httpx
+   for url in (
+       "https://api.<cluster>:6443/apis/user.openshift.io/v1/users/~",
+       "https://oauth-openshift.apps.<cluster>/healthz",
+       "https://accounts.google.com/.well-known/openid-configuration",
+   ):
+       try:
+           print(httpx.get(url, timeout=10).status_code, url)
+       except Exception as exc:
+           print("ERROR", url, exc)
+   '
+   ```
+
+   Expect `403` or `401` from `users/~` (depending on whether anonymous
+   authentication is enabled on the cluster — either confirms TLS verification
+   succeeded against the kube-apiserver CA), `200` from the OAuth server's
+   `/healthz` endpoint, and `200` from the public endpoint confirming public
+   CAs remain intact.
+
+#### Scope limitation: email and `SSO_ALLOWED_DOMAINS`
+
+RootCoz requests only OpenShift's `user:info` OAuth scope, which OpenShift
+scopes strictly to `get` on `users/~` (and not `identities`) regardless of
+cluster RBAC — OpenShift intersects token scopes with RBAC, so even a
+`cluster-admin` user's token receives `403` on `identities` lookups. Because no
+email address is returned, setting `SSO_ALLOWED_DOMAINS` refuses OpenShift
+logins with `domain_not_allowed`:
+
+- If you need OpenShift SSO, leave `SSO_ALLOWED_DOMAINS` empty (note that it is
+  deployment-wide across all enabled SSO providers, so pair it with
+  `REQUIRE_APPROVAL` to gate new accounts and `ALLOWED_USERS` to bound
+  registration and who may create or modify data).
+- Use **Red Hat SSO** or **Google** (or **GitHub**, whose accounts must have a
+  verified email address) when domain allow-listing is required.
 
 ### Red Hat SSO (Keycloak)
 
@@ -159,11 +406,12 @@ It is checked on **every** SSO sign-in, before any account is looked up, so
 removing a domain also cuts off an account that is already linked — on its next
 sign-in. An address is admitted only when it is **positively verified** (the
 provider asserts `email_verified` as `true`) or **authoritative** (only the
-deployment's IdP or cluster admin can write it — which is how an OpenShift
-identity is admitted, since its cluster publishes no `email_verified` claim); a
-login whose address is missing or neither of those is refused. It never applies
-to username + API key logins or to `ADMIN_KEY`, so an administrator cannot lock
-themselves out with it.
+deployment's IdP or cluster admin can write it); a login whose address is
+missing or neither of those is refused. For OpenShift, RootCoz's `user:info`
+scope cannot read `identities`, so no email is returned and OpenShift logins are
+refused while `SSO_ALLOWED_DOMAINS` is set (see **Scope limitation: email and
+`SSO_ALLOWED_DOMAINS`** above). It never applies to username + API key logins or
+to `ADMIN_KEY`, so an administrator cannot lock themselves out with it.
 
 The domain list decides *who may sign in*; `REQUIRE_APPROVAL` decides *when they
 may act*. Pair them when the provider's tenant is wider than your team.
@@ -280,3 +528,9 @@ nowhere — the login page is served — when the resource is blocked (`disabled
 question provisioning does, so a name that will never get an account cannot be
 sent to a page that refuses it and bounced back here forever; the refusal is
 audited as `auth.proxy_provision_refused`.
+
+## Related Pages
+
+- [Deploying RootCoz](deploy-rootcoz.html)
+- [Configuration Reference](configuration-reference.html)
+- [Managing Users and Server Settings](manage-users-and-server-settings.html)
