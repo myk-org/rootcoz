@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, type FormEvent, type KeyboardEvent } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, type FormEvent, type KeyboardEvent, type WheelEvent } from 'react'
 import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { useSSE } from '@/lib/useSSE'
 import { Button } from '@/components/ui/button'
@@ -34,6 +34,11 @@ const POLL_MAX_DURATION_MS = 30 * 60 * 1000
 // Require consecutive clean 200 snapshots with no lock-holding pending turn
 // before concluding a 5xx/dropped POST never reached the server.
 const SEND_RECOVERY_CLEAN_CHECKS = 2
+// Distance from the bottom edge within which new messages/deltas keep auto-scrolling.
+const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 50
+// Minimum distance away from the bottom to treat a decreasing scrollTop as
+// user scroll-up rather than sub-pixel rounding or container height clamping.
+const SCROLL_UP_EPSILON_PX = 4
 
 const GATEWAY_TURN_SYNC_NOTICE =
   'Connection interrupted while waiting for the reply — reconnecting automatically. Your turn is still running on the server; no need to resend.'
@@ -245,7 +250,10 @@ export function ChatUI({
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
   const [copiedAll, setCopiedAll] = useState(false)
 
-  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
+  const pinnedToBottomRef = useRef(true)
+  const lastScrollTopRef = useRef(0)
+  const programmaticScrollTopRef = useRef<number | null>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pollActiveRef = useRef(false)
@@ -784,11 +792,65 @@ export function ChatUI({
 
   useSSE(sseTopic, chatEvents, { onReconnect: chatSseOnReconnect })
 
-  // Auto-scroll — `sending` and `recoveringSend` are in the deps because transient
-  // busy rows are rendered from those flags, not from `messages`.
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, sending, recoveringSend])
+  const resetScrollPin = useCallback(() => {
+    pinnedToBottomRef.current = true
+    programmaticScrollTopRef.current = null
+    lastScrollTopRef.current = 0
+  }, [])
+
+  const scrollToBottom = useCallback(() => {
+    const el = messagesContainerRef.current
+    if (!el) return
+    const target = Math.max(0, el.scrollHeight - el.clientHeight)
+    if (Math.abs(el.scrollTop - target) > 1) {
+      programmaticScrollTopRef.current = target
+      el.scrollTop = target
+    }
+    lastScrollTopRef.current = el.scrollTop
+  }, [])
+
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesContainerRef.current
+    if (!el) return
+    const currentTop = el.scrollTop
+    if (programmaticScrollTopRef.current !== null) {
+      const expectedTop = programmaticScrollTopRef.current
+      programmaticScrollTopRef.current = null
+      if (Math.abs(currentTop - expectedTop) <= 1) {
+        lastScrollTopRef.current = currentTop
+        return
+      }
+    }
+    const distanceFromBottom = el.scrollHeight - currentTop - el.clientHeight
+    const scrolledUp = currentTop < lastScrollTopRef.current
+    lastScrollTopRef.current = currentTop
+    if (scrolledUp && distanceFromBottom > SCROLL_UP_EPSILON_PX) {
+      pinnedToBottomRef.current = false
+    } else {
+      pinnedToBottomRef.current = distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX
+    }
+  }, [])
+
+  const handleMessagesWheel = useCallback((e: WheelEvent<HTMLDivElement>) => {
+    const el = messagesContainerRef.current
+    if (!el) return
+    if (e.deltaY < 0 && el.scrollHeight > el.clientHeight) {
+      // Unpin immediately so an animation-frame streaming delta cannot snap
+      // back down before the browser dispatches the corresponding scroll event.
+      pinnedToBottomRef.current = false
+    }
+  }, [])
+
+  useLayoutEffect(() => {
+    resetScrollPin()
+  }, [apiBasePath, resetScrollPin])
+
+  // Sticky-bottom auto-scroll: follow initial load, explicit user sends,
+  // transient busy rows, and streamed deltas only while pinned at the bottom.
+  useLayoutEffect(() => {
+    if (!pinnedToBottomRef.current) return
+    scrollToBottom()
+  }, [messages, sending, recoveringSend, streamTexts, loadingHistory, scrollToBottom])
 
   const handleSend = useCallback(async (e?: FormEvent) => {
     e?.preventDefault()
@@ -801,6 +863,7 @@ export function ChatUI({
     // optimistic row; invalidate it so its late arrival cannot drop the row and
     // re-enable the composer mid-turn.
     historyGenerationRef.current++
+    pinnedToBottomRef.current = true
     setSending(true)
     console.info('[ChatUI] Sending message')
     setError('')
@@ -943,6 +1006,7 @@ export function ChatUI({
       setSessionStarted(false)
       setSessionChoice(null)
       sessionVersionRef.current = null
+      resetScrollPin()
       setMessages([])
       console.info('[ChatUI] Chat session cleared')
     } catch (err) {
@@ -960,7 +1024,7 @@ export function ChatUI({
       setClearing(false)
       if (resync && mountedRef.current) syncHistory()
     }
-  }, [apiBasePath, cancelPoll, clearing, fetchMessages, sessionStarted, sessionChoice, applySession, syncHistory])
+  }, [apiBasePath, cancelPoll, clearing, fetchMessages, sessionStarted, sessionChoice, applySession, syncHistory, resetScrollPin])
 
   const handleAbort = useCallback(async () => {
     try {
@@ -1069,7 +1133,12 @@ export function ChatUI({
         </span>
 
         {/* Messages area */}
-        <div className="flex-1 flex flex-col overflow-y-auto px-6 py-4 space-y-4">
+        <div
+          ref={messagesContainerRef}
+          onScroll={handleMessagesScroll}
+          onWheel={handleMessagesWheel}
+          className="flex-1 flex flex-col overflow-y-auto px-6 py-4 space-y-4"
+        >
           {loadingHistory && <p className="text-sm text-text-tertiary">Loading chat history...</p>}
           {!loadingHistory && messages.length === 0 && !sending && !recoveringSend && (
             <div className="flex flex-col items-center justify-center flex-1 text-text-tertiary">
@@ -1166,8 +1235,8 @@ export function ChatUI({
               )}
             </div>
           ))}
-          {/* Below the thread, right above the sentinel. Rendering here does not by
-              itself keep it visible: the auto-scroll effect keys on `sending` and `recoveringSend` too. */}
+          {/* Below the thread. Rendering here does not by itself keep it visible:
+              the sticky-bottom scroll effect keys on `sending` and `recoveringSend` too. */}
           {sending && !hasPending && <ChatBusyRow label="Sending..." canStop={false} onStop={handleAbort} />}
           {recoveringSend && !sending && !hasPending && (
             <ChatBusyRow
@@ -1177,7 +1246,6 @@ export function ChatUI({
               onStop={handleAbort}
             />
           )}
-          <div ref={messagesEndRef} />
         </div>
 
         {/* Transient gateway notice — calm status while reconnecting on an active turn */}

@@ -766,20 +766,18 @@ it('scrolls the transient Sending row into view in an already bottom-scrolled th
     active_session: ACTIVE_SESSION,
   })
   post.mockImplementation((path: string) => path === '/api/chat/job' ? new Promise(() => {}) : Promise.resolve({}))
-  // The global stub is inert; this spy records which element got scrolled.
-  const scrolled: HTMLElement[] = []
-  const scrollSpy = vi.spyOn(HTMLElement.prototype, 'scrollIntoView')
-    .mockImplementation(function (this: HTMLElement) { scrolled.push(this) })
   render(page())
   const composer = await readyComposer()
-  const sentinel = screen.getByText('earlier question').closest('.overflow-y-auto')!.lastElementChild
-  scrolled.length = 0
+  const scroller = screen.getByText('earlier question').closest('.overflow-y-auto') as HTMLElement
+  stubScrollMetrics(scroller, { scrollHeight: 1500, clientHeight: 500, scrollTop: 1000 })
+  fireEvent.scroll(scroller)
+  // Simulate the transient Sending row increasing the container height.
+  stubScrollMetrics(scroller, { scrollHeight: 1620, clientHeight: 500 })
   fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
   // `messages` does not change when the row appears — only `sending` flips.
   expect(screen.getByText('Sending...')).toBeInTheDocument()
-  await waitFor(() => expect(scrolled).toContain(sentinel))
+  await waitFor(() => expect(scroller.scrollTop).toBe(1120))
   expect(composer).toBeDisabled()
-  scrollSpy.mockRestore()
 })
 
 it('ignores a history fetch that started before the send so the reply stays pending', async () => {
@@ -1621,4 +1619,187 @@ it.each([
   if (misparsedLocal !== expectedLocal) {
     expect(screen.queryByText(misparsedLocal)).not.toBeInTheDocument()
   }
+})
+
+// ---------------------------------------------------------------------------
+// Sticky-bottom auto-scroll (issue #682)
+// ---------------------------------------------------------------------------
+
+function stubScrollMetrics(
+  el: HTMLElement,
+  metrics: { scrollHeight: number; clientHeight: number; scrollTop?: number },
+) {
+  Object.defineProperty(el, 'scrollHeight', { value: metrics.scrollHeight, configurable: true })
+  Object.defineProperty(el, 'clientHeight', { value: metrics.clientHeight, configurable: true })
+  if (metrics.scrollTop !== undefined) el.scrollTop = metrics.scrollTop
+}
+
+function makeMessage(id: number, role: 'user' | 'assistant', content: string, status = 'completed') {
+  return {
+    id,
+    job_id: 'job',
+    role,
+    content,
+    username: 'alice',
+    ai_provider: role === 'assistant' ? 'openai' : '',
+    ai_model: role === 'assistant' ? 'gpt' : '',
+    status,
+    created_at: '2026-01-01T00:00:00Z',
+  }
+}
+
+it('auto-scrolls to the bottom on initial load of a scrollable conversation', async () => {
+  setup()
+  let finishHistory!: (value: unknown) => void
+  get.mockImplementation((path: string) => path.startsWith('/api/ai-models')
+    ? Promise.resolve(catalog)
+    : new Promise(resolve => { finishHistory = resolve }))
+  render(page())
+  const scroller = screen.getByText('Loading chat history...').closest('.overflow-y-auto') as HTMLElement
+  stubScrollMetrics(scroller, { scrollHeight: 2400, clientHeight: 600, scrollTop: 0 })
+
+  await act(async () => {
+    finishHistory({
+      messages: [makeMessage(1, 'user', 'first msg'), makeMessage(2, 'assistant', 'latest reply')],
+      total: 2,
+      active_session: ACTIVE_SESSION,
+      active_session_version: 'session-version',
+    })
+  })
+  expect(await screen.findByText('latest reply')).toBeInTheDocument()
+  expect(scroller.scrollTop).toBe(1800)
+})
+
+it.each([
+  { label: 'job chat', role: 'reviewer', apiBasePath: '/api/chat/job', sseTopic: 'chat:job' },
+  { label: 'admin chat', role: 'admin', apiBasePath: '/api/admin/chat', sseTopic: 'admin-chat' },
+])('stays at the user scroll position when scrolled up across SSE refresh, reconnect, and new messages ($label)', async ({ label, role, apiBasePath, sseTopic }) => {
+  currentRole = role
+  setup()
+  const initialMessages = [
+    makeMessage(1, 'user', 'older question'),
+    makeMessage(2, 'assistant', 'older answer'),
+  ]
+  let currentMessages = initialMessages
+  get.mockImplementation(async (path: string) => path.startsWith('/api/ai-models')
+    ? catalog
+    : { messages: currentMessages, total: currentMessages.length, active_session: ACTIVE_SESSION, active_session_version: 'session-version' })
+
+  render(<ChatUI apiBasePath={apiBasePath} sseTopic={sseTopic} header={<h1>{label}</h1>} defaultProvider="openai" defaultModel="gpt" />)
+  expect(await screen.findByText('older answer')).toBeInTheDocument()
+  const scroller = screen.getByText('older answer').closest('.overflow-y-auto') as HTMLElement
+  // Simulate being pinned at the bottom, then scrolling up to read earlier messages.
+  stubScrollMetrics(scroller, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+  fireEvent.scroll(scroller)
+  scroller.scrollTop = 350
+  fireEvent.scroll(scroller)
+
+  // 1) SSE reconnect returning the same history must not jump back down.
+  const sseCall = vi.mocked(useSSE).mock.lastCall!
+  await act(async () => { sseCall[2]?.onReconnect?.() })
+  await waitFor(() => expect(get).toHaveBeenCalledWith(apiBasePath))
+  expect(scroller.scrollTop).toBe(350)
+
+  // 2) SSE chat-changed delivering a brand new message must not jump back down.
+  currentMessages = [...initialMessages, makeMessage(3, 'assistant', 'new incoming reply')]
+  stubScrollMetrics(scroller, { scrollHeight: 2400, clientHeight: 500 })
+  await act(async () => { sseCall[1]['chat-changed']('') })
+  expect(await screen.findByText('new incoming reply')).toBeInTheDocument()
+  expect(scroller.scrollTop).toBe(350)
+})
+
+it('does not jump back to the bottom on streaming deltas or completion after scrolling up, and resumes when re-pinned', async () => {
+  MockEventSource.reset()
+  setup()
+  const base = [makeMessage(1, 'user', 'question'), pendingRow('2026-01-01T00:00:00Z')]
+  let currentMessages = base
+  get.mockImplementation(async (path: string) => path.startsWith('/api/ai-models')
+    ? catalog
+    : { messages: currentMessages, total: currentMessages.length, active_session: ACTIVE_SESSION, active_session_version: 'session-version' })
+
+  render(page())
+  const source = await openDeltaStream()
+  const scroller = screen.getByText('question').closest('.overflow-y-auto') as HTMLElement
+  stubScrollMetrics(scroller, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+  fireEvent.scroll(scroller)
+
+  // While pinned at bottom, incoming deltas auto-scroll with growing height.
+  stubScrollMetrics(scroller, { scrollHeight: 2150, clientHeight: 500 })
+  act(() => source.emit('chat-delta', JSON.stringify({ id: 3, delta: 'First chunk. ' })))
+  expect(await screen.findByText(/First chunk\./)).toBeInTheDocument()
+  expect(scroller.scrollTop).toBe(1650)
+
+  // User scrolls up away from the bottom (wheel + scroll).
+  fireEvent.wheel(scroller, { deltaY: -120 })
+  scroller.scrollTop = 420
+  fireEvent.scroll(scroller)
+
+  // Further streaming deltas must leave the user's scroll position untouched.
+  stubScrollMetrics(scroller, { scrollHeight: 2500, clientHeight: 500 })
+  act(() => source.emit('chat-delta', JSON.stringify({ id: 3, delta: 'Second chunk growing taller.' })))
+  expect(await screen.findByText(/Second chunk growing taller\./)).toBeInTheDocument()
+  expect(scroller.scrollTop).toBe(420)
+
+  // Reply completion via SSE chat-changed must still leave scrollTop untouched.
+  currentMessages = [
+    makeMessage(1, 'user', 'question'),
+    makeMessage(3, 'assistant', 'First chunk. Second chunk growing taller.'),
+  ]
+  stubScrollMetrics(scroller, { scrollHeight: 2600, clientHeight: 500 })
+  const sseCall = vi.mocked(useSSE).mock.lastCall!
+  await act(async () => { sseCall[1]['chat-changed']('') })
+  expect(await screen.findByText('First chunk. Second chunk growing taller.')).toBeInTheDocument()
+  expect(scroller.scrollTop).toBe(420)
+
+  // Scrolling back near the bottom re-pins auto-scroll for subsequent messages.
+  scroller.scrollTop = 2070 // distanceFromBottom = 30 <= 50
+  fireEvent.scroll(scroller)
+  currentMessages = [...currentMessages, makeMessage(4, 'assistant', 'Follow-up after re-pin')]
+  stubScrollMetrics(scroller, { scrollHeight: 2900, clientHeight: 500 })
+  await act(async () => { sseCall[1]['chat-changed']('') })
+  expect(await screen.findByText('Follow-up after re-pin')).toBeInTheDocument()
+  expect(scroller.scrollTop).toBe(2400)
+})
+
+it('unpins immediately on upward wheel before a scroll event fires so rapid deltas cannot pull back down', async () => {
+  MockEventSource.reset()
+  setup({ messages: [makeMessage(1, 'user', 'question'), pendingRow('2026-01-01T00:00:00Z')], total: 2, active_session: ACTIVE_SESSION })
+  render(page())
+  const source = await openDeltaStream()
+  const scroller = screen.getByText('question').closest('.overflow-y-auto') as HTMLElement
+  stubScrollMetrics(scroller, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+  fireEvent.scroll(scroller)
+
+  // Upward wheel before the browser dispatches its scroll event.
+  fireEvent.wheel(scroller, { deltaY: -80 })
+  stubScrollMetrics(scroller, { scrollHeight: 2300, clientHeight: 500 })
+  act(() => source.emit('chat-delta', JSON.stringify({ id: 3, delta: 'Streaming token' })))
+  expect(await screen.findByText('Streaming token')).toBeInTheDocument()
+  expect(scroller.scrollTop).toBe(1500)
+})
+
+it('auto-scrolls back to the bottom when the user explicitly submits a new message while scrolled up', async () => {
+  setup({
+    messages: [makeMessage(1, 'user', 'old question'), makeMessage(2, 'assistant', 'old answer')],
+    total: 2,
+    active_session: ACTIVE_SESSION,
+  })
+  post.mockImplementation((path: string) => path === '/api/chat/job' ? new Promise(() => {}) : Promise.resolve({}))
+  render(page())
+  const composer = await readyComposer()
+  const scroller = screen.getByText('old answer').closest('.overflow-y-auto') as HTMLElement
+  stubScrollMetrics(scroller, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+  fireEvent.scroll(scroller)
+
+  // Scroll up to read old messages.
+  scroller.scrollTop = 200
+  fireEvent.scroll(scroller)
+  expect(scroller.scrollTop).toBe(200)
+
+  // Submitting a new message re-pins and scrolls down to show Sending...
+  stubScrollMetrics(scroller, { scrollHeight: 2150, clientHeight: 500 })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  expect(screen.getByText('Sending...')).toBeInTheDocument()
+  await waitFor(() => expect(scroller.scrollTop).toBe(1650))
+  expect(composer).toBeDisabled()
 })
