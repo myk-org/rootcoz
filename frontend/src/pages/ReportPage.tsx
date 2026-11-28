@@ -34,6 +34,7 @@ import { JobAttribution } from '@/components/shared/JobAttribution'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { ReportPortalButton } from './report/ReportPortalButton'
 import { DatadogButton } from './report/DatadogButton'
+import { GreenwaveButton } from './report/GreenwaveButton'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { OriginJobBanner, ReanalyzedForwardBanner } from '@/components/shared/ReanalysisBanner'
 import { formatProviderLabel, formatProviderModelLabel } from '@/lib/providerCatalog'
@@ -161,6 +162,9 @@ function ReportContent() {
         datadog: exporters.find((e) => e.name === 'datadog')?.allow_unreviewed_push ?? false,
       },
     })
+    // Greenwave reads the same advertised list, plus its waiver flag.
+    dispatch({ type: 'SET_EXPORTERS', payload: exporters })
+    dispatch({ type: 'SET_GREENWAVE_WAIVERS_ENABLED', payload: caps.greenwave_waivers ?? false })
   }, [dispatch])
 
   const applyResultResponse = useCallback((resultRes: ResultResponse) => {
@@ -559,6 +563,14 @@ function ReportContent() {
             )}
             {isOperator && state.datadogAvailable && (result.child_job_analyses ?? []).length === 0 && (
               <DatadogButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={resolveBuildDisplayId(result) ?? result.build_number} hasFailures={(result.failures ?? []).length > 0} />
+            )}
+            {isOperator && (result.child_job_analyses ?? []).length === 0 && (
+              <GreenwaveButton
+                jobId={result.job_id}
+                jobName={result.job_name ?? result.job_id}
+                buildNumber={resolveBuildDisplayId(result) ?? result.build_number}
+                failures={result.failures ?? []}
+              />
             )}
             {!isViewer && (
               <Button variant="ghost" size="sm" className="gap-1.5 text-xs" asChild>

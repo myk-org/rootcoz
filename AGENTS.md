@@ -118,8 +118,20 @@ src/rootcoz/
     prow_validation.py      # Re-export shim of rootcoz.prow_validation for plugin imports
     registry.py             # CI source plugin registry: analysis_type → CISource class mapping
   exporters/                # Exporter plugins (push results to external systems)
-    base.py                 # Exporter ABC, ExportContext, ExporterResult
+    base.py                 # Exporter ABC, ExportContext, ExporterResult, ExporterPrerequisiteError
     reportportal.py         # Report Portal exporter: ReportPortalClient
+    datadog.py              # Datadog events exporter: DatadogExporter
+    greenwave_exporter.py   # Greenwave/ResultsDB exporter: GreenwaveExporter
+    greenwave_auth.py       # Greenwave auth strategies: build_greenwave_auth /
+                            # build_greenwave_waiver_auth for the mode selected by DB-only
+                            # greenwave_auth_mode — 7 modes including `sso` (the caller's own
+                            # Red Hat SSO browser-session OIDC token, with optional RFC 8693
+                            # audience exchange for ResultsDB/WaiverDB). Stays a pure,
+                            # storage-free strategy builder: delegated browser-session token
+                            # refresh and the RFC 8693 audience exchange live in
+                            # auth/sso/tokens.py, never here; required-field and UI
+                            # visibility metadata live in config.greenwave_method_missing_fields
+                            # and settings_registry.SETTING_VISIBLE_WHEN
   auth/                     # Authentication strategies & deep identity/SSO modules
     base.py                 # AuthStrategy ABC, AuthContext, AuthIdentity, AuthSideEffects,
                             # cookie names + read/set/clear helpers, reserved admin username,
@@ -141,7 +153,9 @@ src/rootcoz/
     sso/                    # SSO providers + deep flow orchestration: base.py (SSOProvider ABC,
                             # AuthError, ClaimSet), http.py, oidc.py, google.py, github.py,
                             # openshift.py, redhat.py, state.py, flows.py (browser login/link,
-                            # ticket lifecycle, unlink, device flow, IdP logout), __init__.py
+                            # ticket lifecycle, unlink, device flow, IdP logout), tokens.py
+                            # (delegated Red Hat SSO browser-session token refresh under a
+                            # per-session lock + RFC 8693 audience exchange), __init__.py
   sso_store.py              # SSO persistence (user_identities, sso_device_codes, sso_link_tickets),
                             # typed IdentityStorageError hierarchy & DeviceCodeExchangeResult
                             # (re-exported on storage.py; zero imports of auth/ or config/)
@@ -361,12 +375,18 @@ Exporters push analysis results to external systems. Each exporter implements th
 - **Generic push endpoint**: `POST /results/{job_id}/push/{plugin_name}` (operator+ role)
 - **Legacy endpoint**: `POST /results/{job_id}/push-reportportal` (backward compatible)
 - **Exporters list**: `GET /api/exporters` — lists available exporters with enabled status
-- **Auto-push**: When `AUTO_PUSH_EXPORTERS` is set and all failures are auto-reviewed, results are pushed to configured exporters
+- **Auto-push**: When `AUTO_PUSH_EXPORTERS` is set and every failure has been auto-reviewed by `rootcoz-ai`, results are pushed to the configured exporters; any failure a human reviewed stops it (`pushed_by=rootcoz-ai` must never describe human work), and exporters that declare `requires_subject_identifier` are skipped
 - **CLI**: `rootcoz push --plugin <name>`, `rootcoz exporters`, `rootcoz push-reportportal` (backward compat)
 
 ### Report Portal Integration (Optional)
 
 When `ENABLE_REPORTPORTAL=true`, users can push test classifications back to Report Portal via the `push-reportportal` endpoint, the generic `push --plugin reportportal` CLI command, or the generic push endpoint.
+
+### Greenwave / ResultsDB Integration (Optional)
+
+When a `greenwave_auth_mode` is selected in Server Settings (DB-only, like `jira_auth_mode` — no `GREENWAVE_AUTH_MODE` env var; unset disables the exporter entirely), users can push analysis results to ResultsDB (`push --plugin greenwave`, endpoint `POST /results/{job_id}/push/greenwave`). `ENABLE_GREENWAVE` (`enable_greenwave`, read from `ENABLE_GREENWAVE` or DB override with no alias) is a **tri-state**, not a plain switch: unset means auto — the exporter is enabled when a mode is selected **and** every required field for that mode is configured; `false` forces it off regardless of configuration; `true` without a selected mode (or with a mode's required fields, scheme, or token shape still bad) logs a warning and stays off — it never bypasses a prerequisite. It governs the advertised/readiness status, never whether a missing credential is inferred. Seven auth modes, each owning its fields: `bearer` (`GREENWAVE_API_TOKEN`), `oidc` (client-credentials: `GREENWAVE_OIDC_TOKEN_URL`/`_CLIENT_ID`/`_CLIENT_SECRET`), `sso` (Red Hat SSO user OIDC token plus optional `GREENWAVE_SSO_AUDIENCE`/`GREENWAVE_SSO_WAIVER_AUDIENCE` RFC 8693 exchange audiences), `kerberos` (SPNEGO keytab: `GREENWAVE_KEYTAB_PATH`/`_KEYTAB_PRINCIPAL`/`GREENWAVE_KRB5_SERVICE`/`GREENWAVE_KRB5_REALM` — the realm is explicit when set, else taken from the principal's realm, else left to `krb5.conf`), `mtls` (client cert: `GREENWAVE_CLIENT_CERT`/`_CLIENT_KEY`/`GREENWAVE_CA_BUNDLE`), `basic` (`GREENWAVE_BASIC_USER`/`_BASIC_PASSWORD`), `none` (`GREENWAVE_URL` only, sole mode allowing plain `http://`). Each push creates a ResultsDB group then one result per failure (testcase `rootcoz.{job_name}.{test_name}`, outcome from `GREENWAVE_OUTCOME_MAP`; unclassified/unmatched failures are skipped). Optional WaiverDB submission (behind `GREENWAVE_PUSH_WAIVERS=true` + `GREENWAVE_WAIVER_URL` + `GREENWAVE_PRODUCT_VERSION`, plus `GREENWAVE_WAIVER_TOKEN` only in `bearer` mode — ResultsDB and WaiverDB are separate services with separate tokens; every other mode authenticates the waiver write with the selected strategy) files waivers for `GREENWAVE_WAIVABLE_CLASSIFICATIONS` failures; waivers require an explicit `subject_identifier` (no job_name fallback — refuses malformed gating writes), and the same identifier is required for every Greenwave write, so the exporter declares `Exporter.requires_subject_identifier = True` and the auto-push path skips it entirely (a CI job name must never become a gating subject). Waivers are filed only for failures a human reviewed; a failure reviewed only by `rootcoz-ai` is never waived — lifting a gate needs a human decision, and no setting re-enables it. Missing waiver prerequisites return HTTP 422 (`ExporterPrerequisiteError`). Per-server push default (`greenwave_waiver_comment`) can be set in the CLI config file; the subject identifier is per-build and must be passed with `--subject-identifier` on each push (no config fallback — a stored default would waive the wrong build).
+
+`sso` mode is the only mode that authenticates with a **person**, not a deployment: every push uses the requesting caller's own active Red Hat SSO browser session (`sessions.sso_tokens_enc`, Fernet-encrypted at rest, deleted with the session on logout, expiry, account disable, or deletion, cleared immediately when Red Hat SSO is unlinked, and rendered unreadable — so refused — after a `ROOTCOZ_ENCRYPTION_KEY` rotation), refreshing an expired access token through Red Hat SSO's `refresh_token` and writing it back to the session row. It requires `GREENWAVE_URL` (strict HTTPS) plus the Red Hat SSO provider (`SSO_REDHAT_ISSUER`, `SSO_REDHAT_CLIENT_ID`, `SSO_REDHAT_CLIENT_SECRET`). `GREENWAVE_SSO_AUDIENCE` and `GREENWAVE_SSO_WAIVER_AUDIENCE` are optional RFC 8693 target audiences for the ResultsDB and WaiverDB writes; an unset waiver audience reuses the ResultsDB audience, and when neither is set the caller's refreshed access token is forwarded directly. There is no fallback to any deployment/server credential, and the mode is browser-session-only by design: a CLI, API-key, proxy, or non-Red-Hat-SSO caller is refused with an actionable error telling them to sign in through Red Hat SSO in a browser (CLI device-flow sessions deliberately store no IdP OIDC tokens). `POST /api/admin/settings/test/greenwave` in this mode therefore tests with the calling admin's own Red Hat SSO browser session.
 
 ### Auto-Review
 
@@ -540,8 +560,12 @@ Exceptions (server-level only, no payload equivalent):
 - `RP_PUSH_CLASSIFICATIONS` — server-only toggle for including classification (defect type mapping) in Report Portal pushes (default: True)
 - `RP_PUSH_ROOTCOZ_URL` — server-only toggle for including rootcoz analysis URL comment in Report Portal pushes (default: True)
 - `RP_PUSH_TRACKER_LINKS` — server-only toggle for including Jira/GitHub issue links as external system issues in Report Portal pushes (default: True)
+- `GREENWAVE_*` settings — Greenwave/ResultsDB exporter configuration (auth-mode-selected credentials per method, URLs, outcome map, waiver toggles; `GREENWAVE_API_TOKEN`/`GREENWAVE_WAIVER_TOKEN`/`GREENWAVE_OIDC_CLIENT_SECRET`/`GREENWAVE_BASIC_PASSWORD` sensitive). Editable at runtime via Server Settings (no restart required); `greenwave_auth_mode` itself is DB-only. Result pushes are per-request via `subject_identifier`/`waiver_comment` query params; no other request-tunable fields.
+  - `GREENWAVE_SSO_AUDIENCE` (`greenwave_sso_audience`) / `GREENWAVE_SSO_WAIVER_AUDIENCE` (`greenwave_sso_waiver_audience`): optional RFC 8693 target audiences for `sso`-mode ResultsDB/WaiverDB writes. Non-sensitive, visible only while `sso` is the selected mode, editable at runtime. When unset, the caller's refreshed Red Hat SSO access token is forwarded directly; an unset waiver audience reuses the ResultsDB audience.
+  - `GREENWAVE_KRB5_REALM` (`greenwave_krb5_realm`): `kerberos`-mode service realm — set only when the target SPN lives in a different realm than `GREENWAVE_KEYTAB_PRINCIPAL`; unset falls back to the principal's realm, then to `krb5.conf`.
+  - `ENABLE_GREENWAVE` (`enable_greenwave`): tri-state — when unset, enabled automatically if a mode is selected and its required fields are configured; `false` forces off; `true` without a mode warns and stays off.
 - `ENABLE_AUTO_REVIEW` — server capability toggle for auto-review of matching failures; when disabled, failures are never automatically marked as reviewed
-- `AUTO_PUSH_EXPORTERS` — server-only comma-separated list of exporter plugins to auto-push to when all failures are reviewed (e.g. `reportportal`); empty disables auto-push; requires `ENABLE_AUTO_REVIEW` to also be enabled
+- `AUTO_PUSH_EXPORTERS` — server-only comma-separated list of exporter plugins to auto-push to when every failure has been **auto**-reviewed by `rootcoz-ai` (a failure a human reviewed stops the automatic push, so a push is never attributed to the AI for human work); empty disables auto-push; requires `ENABLE_AUTO_REVIEW` to also be enabled; exporters declaring `requires_subject_identifier` (Greenwave) are skipped
 - `ROOTCOZ_ENCRYPTION_KEY` — server-only secret for at-rest encryption AND HMAC secret for all API key hashes (admin and user); never expose via request payloads, CLI flags, or shared config files. **Rotating this key invalidates both encrypted data (tokens) and all stored API key hashes (admin and user)** — operators must re-issue all API keys after rotation. Stored sessions use plain SHA-256 hashing (no HMAC) and are NOT affected by key rotation.
 - `LOG_LEVEL` — server log verbosity
 - `PUBLIC_BASE_URL` — trusted server-only origin for building absolute links; never derive from request headers to prevent host-header injection
@@ -573,7 +597,7 @@ Sensitive data (passwords, API tokens, credentials) must be:
 2. **Stripped from responses** — use `strip_sensitive_from_response()` before returning to API consumers
 3. **Never logged or pasted** — do not log passwords, tokens, or credentials at any log level, and never paste a live cookie, bearer token or API key into a PR body, a doc, a transcript or captured e2e evidence
 
-Sensitive fields: `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_oauth_client_secret`, `jira_atst_token`, `jira_email`, `jira_sa_token`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `vapid_private_key`
+Sensitive fields: `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_oauth_client_secret`, `jira_atst_token`, `jira_email`, `jira_sa_token`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `datadog_api_key`, `datadog_app_key`, `greenwave_api_token`, `greenwave_waiver_token`, `greenwave_oidc_client_secret`, `greenwave_basic_password`, `smtp_password`, `slack_webhook_url`, `vapid_private_key`
 
 Encryption uses Fernet (AES-128-CBC + HMAC-SHA256). Set `ROOTCOZ_ENCRYPTION_KEY` env var for production; falls back to an auto-generated file-based key under `$XDG_DATA_HOME/rootcoz/.encryption_key` (default: `~/.local/share/rootcoz/.encryption_key`) for development.
 

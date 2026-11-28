@@ -17,7 +17,7 @@ export function useUnreviewedPushGate(
   unreviewedCount: number
   allowUnreviewedPush: boolean
 } {
-  const { result, reviews, rpAllowUnreviewedPush, ddAllowUnreviewedPush } = useReportState()
+  const { result, reviews, exporters, rpAllowUnreviewedPush, ddAllowUnreviewedPush } = useReportState()
   const childJobName = scope?.childJobName
   const childBuildNumber = scope?.childBuildNumber
   const unreviewedCount = useMemo(
@@ -32,6 +32,13 @@ export function useUnreviewedPushGate(
         : 0,
     [result, reviews, childJobName, childBuildNumber],
   )
-  const allowUnreviewedPush = exporter === 'reportportal' ? rpAllowUnreviewedPush : ddAllowUnreviewedPush
+  // RP/DD read their own capability flags; every other exporter (greenwave and
+  // any future one) reads its entry from the advertised exporter list.
+  const allowUnreviewedPush =
+    exporter === 'reportportal'
+      ? rpAllowUnreviewedPush
+      : exporter === 'datadog'
+        ? ddAllowUnreviewedPush
+        : exporters.find(e => e.name === exporter)?.allow_unreviewed_push ?? false
   return { unreviewedCount, allowUnreviewedPush }
 }

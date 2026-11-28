@@ -17,6 +17,7 @@ from rootcoz import storage
 from rootcoz.auth.approval import (
     default_eligibility_check as _default_eligibility_check,
 )
+from rootcoz.auth.sso.base import OAuthTokenBundle, encrypt_oauth_tokens
 
 
 @pytest.fixture
@@ -1626,3 +1627,180 @@ async def test_track_user_never_inserts_or_updates_system_reserved_accounts(
         user = await storage.get_user_by_username(username)
         assert user is not None
         assert user["last_seen"] == old_ts
+
+
+# ---------------------------------------------------------------------------
+# Browser-session OIDC tokens (the Greenwave `sso` mode's credential)
+# ---------------------------------------------------------------------------
+
+
+def _sso_tokens_blob() -> str:
+    """An encrypted Red Hat SSO browser-session bundle."""
+    return encrypt_oauth_tokens(
+        OAuthTokenBundle(
+            access_token="session-access-token",
+            refresh_token="session-refresh-token",
+            provider="redhat",
+        )
+    )
+
+
+async def test_a_session_keeps_its_token_blob_off_the_auth_read(
+    setup_test_db: Path,
+) -> None:
+    """Auth checks never read the blob; only the delegated-call path asks for it."""
+    blob = _sso_tokens_blob()
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        token = await storage.create_session(
+            "alice", auth_provider="redhat", sso_tokens_enc=blob
+        )
+        session = await storage.get_session(token)
+        stored = await storage.get_session_sso_tokens(token)
+
+    assert session is not None
+    assert "sso_tokens_enc" not in session
+    assert stored == blob
+    # The credential is encrypted at rest, never the raw token.
+    assert "session-access-token" not in blob
+    assert "session-refresh-token" not in blob
+
+
+async def test_updating_the_token_blob_replaces_it(setup_test_db: Path) -> None:
+    """A refresh rotates the bundle; the session keeps one current blob."""
+    old = _sso_tokens_blob()
+    new = encrypt_oauth_tokens(
+        OAuthTokenBundle(access_token="rotated-access", provider="redhat")
+    )
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        token = await storage.create_session(
+            "alice", auth_provider="redhat", sso_tokens_enc=old
+        )
+        assert await storage.update_session_sso_tokens(token, new) is True
+        assert await storage.get_session_sso_tokens(token) == new
+
+        assert await storage.update_session_sso_tokens(token, None) is True
+        assert await storage.get_session_sso_tokens(token) is None
+
+
+async def test_a_token_blob_write_that_raced_an_unlink_is_refused(
+    setup_test_db: Path,
+) -> None:
+    """A refresh holding a stale blob must not resurrect revoked tokens.
+
+    The compare-and-set is what makes the read-check-refresh-write safe against
+    an unlink landing while the IdP call is in flight: the write only applies
+    to the ciphertext the refresher read, so the revoked (NULL) column stays
+    empty instead of being overwritten with the rotated bundle.
+    """
+    old = _sso_tokens_blob()
+    rotated = encrypt_oauth_tokens(
+        OAuthTokenBundle(access_token="rotated-access", provider="redhat")
+    )
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_user("alice")
+        await storage.add_user_identity(
+            "alice",
+            "redhat",
+            "rh-sub-1",
+            eligibility_check=_default_eligibility_check,
+        )
+        token = await storage.create_session(
+            "alice", auth_provider="redhat", sso_tokens_enc=old
+        )
+
+        # Matching ciphertext: the refresh lands as usual.
+        assert (
+            await storage.update_session_sso_tokens(
+                token, rotated, expected_sso_tokens_enc=old
+            )
+            is True
+        )
+        assert await storage.get_session_sso_tokens(token) == rotated
+
+        # Unlinking revokes the blob; the write read BEFORE it must lose.
+        assert await storage.unlink_user_identity("alice", "redhat") == "deleted"
+        assert await storage.get_session_sso_tokens(token) is None
+        assert (
+            await storage.update_session_sso_tokens(
+                token, old, expected_sso_tokens_enc=rotated
+            )
+            is False
+        )
+        assert await storage.get_session_sso_tokens(token) is None
+
+
+async def test_deleting_a_session_wipes_its_token_blob(setup_test_db: Path) -> None:
+    """Logout must not leave a usable IdP token behind."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        token = await storage.create_session(
+            "alice", auth_provider="redhat", sso_tokens_enc=_sso_tokens_blob()
+        )
+        await storage.delete_session(token)
+        assert await storage.get_session(token) is None
+        assert await storage.get_session_sso_tokens(token) is None
+
+
+async def test_unlinking_a_provider_wipes_its_sessions_token_blob(
+    setup_test_db: Path,
+) -> None:
+    """Unlinking Red Hat SSO revokes its delegated tokens but keeps the login.
+
+    The session row survives — a keyed user still signs in with the API key —
+    while the IdP tokens the unlinked identity supplied are gone.
+    """
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_user("alice")
+        await storage.add_user_identity(
+            "alice",
+            "redhat",
+            "rh-sub-1",
+            eligibility_check=_default_eligibility_check,
+        )
+        token = await storage.create_session(
+            "alice", auth_provider="redhat", sso_tokens_enc=_sso_tokens_blob()
+        )
+
+        assert await storage.unlink_user_identity("alice", "redhat") == "deleted"
+        assert await storage.get_session_sso_tokens(token) is None
+        assert await storage.get_session(token) is not None
+
+
+async def test_invalidating_every_session_for_a_user_wipes_their_blobs(
+    setup_test_db: Path,
+) -> None:
+    """A key rotation drops every session row, so no blob survives it."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_user("alice", role="reviewer")
+        token = await storage.create_session(
+            "alice", auth_provider="redhat", sso_tokens_enc=_sso_tokens_blob()
+        )
+        await storage.rotate_user_key("alice")
+        assert await storage.get_session_sso_tokens(token) is None
+
+
+async def test_a_cli_device_flow_session_carries_no_token_blob(
+    setup_test_db: Path,
+) -> None:
+    """The CLI never performed an OIDC browser login, so there is no blob.
+
+    This is what makes a device-flow session useless to the Greenwave ``sso``
+    mode (and why the resolver answers 401 instead of a fallback credential).
+    """
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_user("alice")
+        code = await storage.create_device_code(ttl_seconds=600, interval_seconds=5)
+        assert (
+            await storage.authorize_device_code(
+                code["user_code"], username="alice", provider="redhat"
+            )
+            == "approved"
+        )
+        assert await storage.redeem_device_code(code["device_code"]) is not None
+        minted = await storage.exchange_device_code_for_session(
+            code["device_code"],
+            username="alice",
+            eligibility_check=_default_eligibility_check,
+            approved_provider="redhat",
+        )
+        assert minted is not None and minted.ok
+        assert await storage.get_session_sso_tokens(minted.token) is None

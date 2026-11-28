@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any
 
 import jenkins
@@ -102,3 +103,89 @@ def mask_sensitive_fields(data: Any, *, sanitize_text: bool = True) -> Any:
 def is_sensitive_key(key: str) -> bool:
     """Return True if *key* names a sensitive field."""
     return key in SENSITIVE_KEYS or bool(_GENERIC_SENSITIVE_RE.search(key))
+
+
+#: ASCII control characters — stripped from identifiers and free-text
+#: fields built from CI input (job names, test names, error messages).
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+#: Character-set selection across the sanitizers (so a caller picks the right
+#: one instead of stacking them blindly):
+#: * :func:`strip_control_chars` — ASCII ``Cc``/DEL only. Cheap, and enough for
+#:   a field that reaches a log line or an ASCII-only identifier guard.
+#: * :func:`strip_invisible_chars` — every Unicode ``Cc``/``Cf``/``Cs``/``Co``/
+#:   ``Cn`` code point, i.e. ASCII control PLUS zero-width, soft hyphen, bidi
+#:   overrides and other invisible characters; ordinary ASCII spaces are
+#:   preserved, while tabs, newlines, and other ``Cc`` characters are removed.
+#:   It is a strict superset of :func:`strip_control_chars`, so the two are
+#:   never stacked.
+#: * :func:`strip_gating_text` — :func:`strip_invisible_chars`, for text that
+#:   reaches a gating system (ResultsDB note, WaiverDB comment).
+#: * ``rootcoz.url_utils.strip_nonprintable`` — keeps only printable code
+#:   points (ordinary spaces are printable and kept; tabs, newlines and other
+#:   non-printables are dropped): a one-line display value, not free text.
+def strip_control_chars(value: str) -> str:
+    """Return *value* with ASCII control characters removed.
+
+    Empty input is returned unchanged. This is the ASCII-only half of the
+    sanitizer set — see the selection rule above for when to use
+    :func:`strip_invisible_chars` / :func:`strip_gating_text` instead.
+    """
+    if not value:
+        return value
+    return _CONTROL_CHAR_RE.sub("", value)
+
+
+#: Unicode general categories of invisible characters — control (Cc),
+#: format (Cf: zero-width space, soft hyphen, bidi overrides), surrogate
+#: (Cs), private-use (Co), and unassigned (Cn) code points.  Stripping
+#: these closes the gap left by the ASCII-only ``_CONTROL_CHAR_RE``.
+_INVISIBLE_CHAR_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn"})
+
+
+def strip_invisible_chars(value: str) -> str:
+    """Return *value* with Unicode invisible characters removed.
+
+    Extends :func:`strip_control_chars` beyond ASCII C0/DEL to Unicode
+    invisible code points (e.g. ``U+200B`` ZERO WIDTH SPACE, ``U+00AD``
+    SOFT HYPHEN, bidi overrides), so identifier guards cannot be bypassed
+    with invisible-only input.  Ordinary ASCII spaces are preserved (tabs,
+    newlines, and other ``Cc`` characters are removed); callers apply
+    ``.strip()`` as needed.  See the selection rule on
+    :func:`strip_control_chars` for the full sanitizer set.
+    """
+    if not value:
+        return value
+    return "".join(
+        ch for ch in value if unicodedata.category(ch) not in _INVISIBLE_CHAR_CATEGORIES
+    )
+
+
+def strip_gating_text(value: str) -> str:
+    """Sanitize text that reaches a gating system: no control or invisible chars.
+
+    The single rule for a ResultsDB note, a WaiverDB comment, or an actor name
+    carried into either (including a proxy-supplied ``X-Forwarded-User``
+    username): ASCII control characters and Unicode invisible/bidi characters
+    are removed, so forged log lines and reordered comment text cannot enter a
+    gating record. Ordinary ASCII spaces are preserved; tabs, newlines and
+    other ``Cc`` characters are removed.
+
+    ``strip_invisible_chars`` already covers ASCII ``Cc``/DEL (every ASCII
+    control char categorises as ``Cc``) plus ``Cf``/``Cs``/``Co``/``Cn``, so it
+    is a strict superset of ``strip_control_chars`` — no second pass needed.
+    """
+    return strip_invisible_chars(value)
+
+
+def normalize_identifier(value: str | None) -> str | None:
+    """Normalize an optional identifier: strip invisible chars + whitespace.
+
+    Returns ``None`` for empty, whitespace-only, or invisible-only input so
+    downstream guards treat it as absent.
+    """
+    if not value:
+        return None
+    normalized = strip_invisible_chars(value).strip()
+    return normalized or None

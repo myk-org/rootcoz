@@ -10,11 +10,13 @@ deployment configured it.
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 from rootcoz.config import Settings
+from rootcoz.encryption import decrypt_sealed_or_none, encrypt_value
 
 
 class AuthError(Exception):
@@ -42,6 +44,21 @@ class AuthError(Exception):
 
 
 @dataclass(frozen=True)
+class OAuthTokenBundle:
+    """Tokens from a browser SSO login, kept out of claims and logs.
+
+    ``access_token`` and ``refresh_token`` are non-repr fields so a stray log line
+    or an exception message can never print a usable credential.
+    """
+
+    # repr=False on both credentials: tokens must never leak into logs.
+    access_token: str = field(repr=False)
+    refresh_token: str | None = field(default=None, repr=False)
+    expires_at: float | None = None
+    provider: str = ""
+
+
+@dataclass(frozen=True)
 class ClaimSet:
     """The provider-agnostic result of a successful external login.
 
@@ -60,6 +77,8 @@ class ClaimSet:
         email_is_authoritative: Whether the address came from a store only the
             deployment's IdP or cluster admin can write (see
             :attr:`SSOProvider.email_is_authoritative`).
+        oauth_tokens: Browser-session OIDC tokens, kept out of ``claims`` so the
+            audit/ticket JSON never becomes a secret store.
     """
 
     subject: str
@@ -68,6 +87,64 @@ class ClaimSet:
     claims: dict[str, Any] = field(default_factory=dict)
     asserts_email_verified: bool = True
     email_is_authoritative: bool = False
+    # Never merged into ``claims``: that dict is written to audit rows and
+    # ticket/identity JSON, where ``sso_store._SECRET_CLAIM_KEY_PARTS`` forbids
+    # anything token-shaped.
+    oauth_tokens: OAuthTokenBundle | None = field(default=None, repr=False)
+
+
+def encrypt_oauth_tokens(bundle: OAuthTokenBundle) -> str:
+    """Serialize and Fernet-encrypt an :class:`OAuthTokenBundle`."""
+    payload = {
+        "access_token": bundle.access_token,
+        "refresh_token": bundle.refresh_token,
+        "expires_at": bundle.expires_at,
+        "provider": bundle.provider,
+    }
+    return encrypt_value(json.dumps(payload, separators=(",", ":")))
+
+
+def decrypt_oauth_tokens(ciphertext: str | None) -> OAuthTokenBundle | None:
+    """Decrypt a stored bundle, or ``None`` when it is absent or unusable.
+
+    Only a value :func:`rootcoz.encryption.encrypt_value` produced is accepted:
+    these tokens are the caller's delegated credential, so plaintext JSON
+    handed back by a session row (or an attacker) must never be trusted as if
+    the server had sealed it. A corrupt, empty, hand-written, or undecryptable
+    blob is treated as no tokens at all — the caller starts a fresh login. Raw
+    token values are never logged.
+    """
+    if not ciphertext:
+        return None
+    plaintext = decrypt_sealed_or_none(ciphertext)
+    if plaintext is None:
+        return None
+    try:
+        payload = json.loads(plaintext)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    access_token = payload.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        return None
+    refresh_token = payload.get("refresh_token")
+    if not isinstance(refresh_token, str) or not refresh_token:
+        refresh_token = None
+    expires_at = payload.get("expires_at")
+    if isinstance(expires_at, bool) or not isinstance(expires_at, int | float):
+        expires_at = None
+    else:
+        expires_at = float(expires_at)
+    provider = payload.get("provider")
+    if not isinstance(provider, str):
+        provider = ""
+    return OAuthTokenBundle(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_at=expires_at,
+        provider=provider,
+    )
 
 
 class SSOProvider(ABC):

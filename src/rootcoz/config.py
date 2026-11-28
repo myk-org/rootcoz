@@ -31,6 +31,11 @@ from rootcoz.vapid import get_vapid_config
 
 logger = get_child_logger(__name__)
 
+#: Refresh a token this many seconds before its reported expiry. Shared by
+#: every token consumer (browser Red Hat SSO session bundles, Greenwave's OIDC
+#: client-credentials cache) so the margins cannot drift apart.
+TOKEN_REFRESH_MARGIN_SECONDS: float = 60.0
+
 # Defaults for the Prow artifact download limits (see ``Settings``).
 # Single source of truth — ``rootcoz.sources.prow_source`` reuses them as
 # fallback limits for callers that do not pass settings.
@@ -45,6 +50,17 @@ JENKINS_ARTIFACTS_MAX_SIZE_MB_MAX = 2048
 
 # Valid values for the explicit ``jira_auth_mode`` setting.
 JIRA_AUTH_MODES = ("oauth", "basic", "pat", "atst")
+
+# Valid values for the explicit ``greenwave_auth_mode`` setting.
+GREENWAVE_AUTH_MODES = (
+    "bearer",
+    "oidc",
+    "kerberos",
+    "mtls",
+    "basic",
+    "none",
+    "sso",
+)
 
 #: The recorded reason when no Jira connection can be resolved. Cause-free on
 #: purpose: it is persisted on a result and replayed on re-analysis, and it is
@@ -72,6 +88,303 @@ RESULTS_RETENTION_DAYS_MAX = 36500
 # limits one to one.
 SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS = 999_999
 SIDECAR_TRANSCRIPTS_MAX_SIZE_MB = 999_999_999
+
+# Settings that live only in the DB store: no environment variable ever maps to
+# them, so a stray env var (or dotenv entry) of the same name is ignored,
+# matching the pydantic-settings source hook that drops them. Their writes stay
+# on the PUT/import paths, the ones that record the mode-switch audit detail —
+# the persist endpoint records its own action instead, and refuses a DB-only key
+# outright because there is no env value to promote.
+DB_ONLY_SETTINGS = frozenset({"jira_auth_mode", "greenwave_auth_mode"})
+
+#: Valid ResultsDB result outcomes for ``GREENWAVE_OUTCOME_MAP`` validation.
+GREENWAVE_VALID_OUTCOMES = frozenset({"PASSED", "FAILED", "INFO", "NEEDS_INSPECTION"})
+
+#: Canonical rootcoz classifications — used to warn about unrecognized
+#: ``GREENWAVE_WAIVABLE_CLASSIFICATIONS`` entries at startup.
+GREENWAVE_KNOWN_CLASSIFICATIONS = frozenset(
+    {"PRODUCT BUG", "CODE ISSUE", "INFRASTRUCTURE"}
+)
+
+#: Default ``GREENWAVE_OUTCOME_MAP`` — classification → ResultsDB outcome.
+DEFAULT_GREENWAVE_OUTCOME_MAP = (
+    "PRODUCT BUG:FAILED,CODE ISSUE:FAILED,INFRASTRUCTURE:INFO"
+)
+
+
+def parse_greenwave_outcome_map(raw: str | None) -> dict[str, str]:
+    """Parse ``GREENWAVE_OUTCOME_MAP`` into ``{classification: outcome}``.
+
+    Entries have the ``CLASS:OUTCOME`` format, comma-separated. Whitespace
+    around ``:`` and ``,`` is trimmed; classifications and outcomes are
+    uppercased (matching is case-insensitive).
+
+    Raises:
+        ValueError: Malformed entry or outcome outside
+            :data:`GREENWAVE_VALID_OUTCOMES`.
+    """
+    if raw is None or not raw.strip():
+        return {}
+    mapping: dict[str, str] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if ":" not in entry:
+            raise ValueError(
+                f"Invalid GREENWAVE_OUTCOME_MAP entry {entry!r} "
+                "(expected CLASS:OUTCOME)"
+            )
+        classification, _, outcome = entry.partition(":")
+        classification = classification.strip().upper()
+        outcome = outcome.strip().upper()
+        if not classification:
+            raise ValueError(
+                f"Invalid GREENWAVE_OUTCOME_MAP entry {entry!r} (empty classification)"
+            )
+        if outcome not in GREENWAVE_VALID_OUTCOMES:
+            raise ValueError(
+                f"Invalid ResultsDB outcome {outcome!r} in GREENWAVE_OUTCOME_MAP "
+                f"(valid outcomes: {', '.join(sorted(GREENWAVE_VALID_OUTCOMES))})"
+            )
+        mapping[classification] = outcome
+    return mapping
+
+
+def parse_greenwave_waivable_classifications(
+    raw: str | None, *, warn_unrecognized: bool = False
+) -> frozenset[str]:
+    """Parse ``GREENWAVE_WAIVABLE_CLASSIFICATIONS`` into an uppercase set.
+
+    Comma-separated, whitespace-trimmed, case-insensitive (values are
+    uppercased to match rootcoz classifications).
+    """
+    if raw is None or not raw.strip():
+        return frozenset()
+    parsed: set[str] = set()
+    for item in raw.split(","):
+        item = item.strip().upper()
+        if not item:
+            continue
+        if warn_unrecognized and item not in GREENWAVE_KNOWN_CLASSIFICATIONS:
+            logger.warning(
+                "GREENWAVE_WAIVABLE_CLASSIFICATIONS contains unrecognized "
+                "classification %r (known: %s)",
+                item,
+                ", ".join(sorted(GREENWAVE_KNOWN_CLASSIFICATIONS)),
+            )
+        parsed.add(item)
+    return frozenset(parsed)
+
+
+def validate_greenwave_url_structure(
+    value: str | None,
+    env_name: str,
+) -> None:
+    """Structurally validate a Greenwave URL; never scheme-dependent.
+
+    Raises for a syntactically invalid port, a missing hostname, or
+    userinfo/query/fragment (credentials embedded in a URL would risk
+    leaking into logs and errors). The URL itself is intentionally NOT
+    echoed in the error message for the same reason.
+
+    The scheme rule (credentials must not travel over plain HTTP) does NOT
+    live in Settings construction: ``GREENWAVE_URL`` may come from the
+    environment while ``greenwave_auth_mode`` is DB-only, and raising on
+    the mismatch would make the merged config unvalidatable —
+    ``get_settings()`` then falls back to env-only and silently drops
+    every database override. The scheme rule is enforced where a
+    credential would actually be sent: the settings write path
+    (``_validate_settings_updates``) and ``build_greenwave_auth``.
+
+    Raises:
+        ValueError: When *value* is set but not a valid bare HTTP(S) URL
+            (hostname required; userinfo, query, and fragment not allowed).
+    """
+    if not value:
+        return
+    # One shared parser with validate_http_url (rootcoz.url_utils):
+    # whitespace/control characters, a malformed authority or port, a
+    # non-HTTP(S) scheme, a missing hostname, userinfo, query, and fragment
+    # all make it return None. HTTP and HTTPS both pass here on purpose —
+    # the credential-aware scheme rule lives in validate_greenwave_url and
+    # must stay out of Settings construction (see the class docstring).
+    if (
+        _parse_valid_url(
+            value,
+            allowed_schemes=("http", "https"),
+            reject_userinfo=True,
+            reject_query_fragment=True,
+        )
+        is None
+    ):
+        # Distinguish the one failure mode with its own actionable message.
+        # urlsplit itself raises for a malformed authority (unmatched IPv6
+        # bracket), while .port raises for a non-numeric port; the former
+        # stays the generic structural message, never the raw urlsplit text.
+        try:
+            parts = urlsplit(value)
+        except ValueError:
+            parts = None
+        if parts is not None and not has_whitespace_or_control(value):
+            try:
+                _ = parts.port
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid {env_name}: URL contains an invalid port"
+                ) from exc
+        raise ValueError(
+            f"Invalid {env_name}: must be an "
+            "HTTP(S) URL with a hostname "
+            "(userinfo, query, and fragment are not allowed)"
+        )
+
+
+def validate_greenwave_url(
+    value: str | None,
+    env_name: str,
+    *,
+    allow_http: bool = False,
+) -> None:
+    """Validate a Greenwave ResultsDB/WaiverDB URL for a write or a push.
+
+    Structural validation (see :func:`validate_greenwave_url_structure`)
+    plus the scheme rule: these URLs are push targets for authenticated
+    writes, so they must be strict HTTPS — plain HTTP is legal only with
+    ``allow_http`` (the credential-less ``none`` auth mode, for public
+    ResultsDB instances). This is the write-path/auth-build half of the
+    scheme rule; Settings construction runs the structural half only.
+
+    Raises:
+        ValueError: When *value* is set but not a valid bare HTTPS URL
+            (or bare HTTP/HTTPS when *allow_http* is set).
+    """
+    validate_greenwave_url_structure(value, env_name)
+    if not value:
+        return
+    allowed_schemes = ("https", "http") if allow_http else ("https",)
+    if urlsplit(value).scheme not in allowed_schemes:
+        raise ValueError(
+            f"Invalid {env_name}: must be an "
+            f"{'HTTP(S)' if allow_http else 'HTTPS'} URL with a hostname "
+            "(userinfo, query, and fragment are not allowed)"
+        )
+
+
+def is_sendable_bearer_value(value: str) -> bool:
+    """True when *value* can be sent as a ``Bearer`` credential.
+
+    Non-empty printable ASCII with no whitespace, for two different reasons.
+    Whitespace is legal in an HTTP field value but would silently split the
+    scheme from the credential (``Authorization: Bearer a b`` is accepted by
+    h11 and mangled), so it is refused. A control character is worse: HTTPX
+    itself does not validate a header value, but the HTTP/1.1 transport under
+    it (h11) rejects one with ``Illegal header value b'...'`` — a message that
+    quotes the token — which the push error path would then carry into a
+    result message and a warning log. Non-ASCII fails at the ascii encoding of
+    the header.
+
+    Punctuation is left unconstrained on purpose: an opaque token or a JWT is
+    not this client's to police.
+    """
+    return bool(value) and all(33 <= ord(char) <= 126 for char in value)
+
+
+def greenwave_scheme_error(settings: Settings, mode: str) -> str | None:
+    """Why the configured targets cannot carry this mode's credentials, if so.
+
+    The single predicate behind both the push boundary
+    (:func:`rootcoz.exporters.greenwave_auth.build_greenwave_auth`, which
+    refuses) and :attr:`Settings.greenwave_enabled` (which must not advertise
+    an exporter whose every push is guaranteed to fail). Keeping it here means
+    the two can never disagree, and keeps it OUT of Settings construction,
+    which has to stay mergeable when the URL comes from the environment and
+    the mode only from the database.
+
+    Args:
+        settings: Effective settings.
+        mode: Normalised auth mode (an unset mode is inert — no error).
+
+    Returns:
+        A human-readable reason, or ``None`` when the targets are acceptable.
+    """
+    if not mode:
+        return None
+    allow_http = mode == "none"
+    checks: list[tuple[str | None, str, bool]] = [
+        (settings.greenwave_url, "GREENWAVE_URL", allow_http)
+    ]
+    # The waiver target exists only when waiver writes are enabled; an unset
+    # (or disabled) waiver URL is inert and must not block an otherwise valid
+    # ResultsDB push.
+    if settings.greenwave_push_waivers:
+        checks.append((settings.greenwave_waiver_url, "GREENWAVE_WAIVER_URL", False))
+    # The token endpoint carries the client secret only in oidc mode.
+    if mode == "oidc":
+        checks.append(
+            (settings.greenwave_oidc_token_url, "GREENWAVE_OIDC_TOKEN_URL", False)
+        )
+    for value, env_name, http_ok in checks:
+        try:
+            validate_greenwave_url(value, env_name, allow_http=http_ok)
+        except ValueError as exc:
+            return str(exc)
+    return None
+
+
+def invalid_bearer_token_error(key: str, value: str) -> str | None:
+    """Return an error string if a non-empty bearer token cannot be sent in an HTTP header.
+
+    Leading and trailing whitespace is stripped first (matching Settings
+    normalization for secret fields). Empty or whitespace-only values
+    return ``None`` (clearing a token is allowed).
+    """
+    stripped = value.strip()
+    if not stripped or is_sendable_bearer_value(stripped):
+        return None
+    return (
+        f"Invalid {key.upper()}: cannot be sent in an HTTP header "
+        "(contains whitespace, control characters, or non-ASCII)"
+    )
+
+
+def greenwave_token_shape_error(settings: Settings, mode: str) -> str | None:
+    """Why a configured bearer token cannot be sent, or ``None`` when it can.
+
+    The readiness check consulted by :attr:`Settings.greenwave_enabled`, which
+    must not advertise an exporter whose every push is guaranteed to fail.
+    This check and the settings write path share
+    :func:`invalid_bearer_token_error`; the push boundary
+    (``_require_header_token``) enforces the same
+    :func:`is_sendable_bearer_value` predicate on ``Settings``-normalized
+    tokens, so the three cannot disagree.
+
+    Only ``bearer`` puts a configured secret straight into a header. ``basic``
+    encodes its credentials, ``kerberos``/``mtls`` do not send the secret as a
+    header value, and ``oidc``'s token comes from the IdP at request time —
+    that one is checked when it is fetched.
+
+    Args:
+        settings: Effective settings.
+        mode: Normalised auth mode (an unset mode is inert — no error).
+
+    Returns:
+        A human-readable reason naming the setting, or ``None`` when every
+        configured bearer token can be sent.
+    """
+    if mode != "bearer":
+        return None
+    checks = [("greenwave_api_token", settings.greenwave_api_token)]
+    if settings.greenwave_push_waivers:
+        # The waiver write authenticates WaiverDB with its own token.
+        checks.append(("greenwave_waiver_token", settings.greenwave_waiver_token))
+    for key, secret in checks:
+        if secret is None:
+            continue
+        error = invalid_bearer_token_error(key, secret.get_secret_value())
+        if error:
+            return error
+    return None
 
 
 def _split_outside_brackets(raw: str) -> list[str]:
@@ -842,12 +1155,13 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Drop ``jira_auth_mode`` from the env/dotenv sources.
+        """Drop the DB-only auth-mode fields from the env/dotenv sources.
 
-        The auth method can be chosen only in Server Settings (DB); the
-        ``JIRA_AUTH_MODE`` environment variable is deliberately ignored.
-        Init kwargs (DB-override merge in ``get_settings()``, admin PUT
-        validation) and ``model_copy`` pinning are unaffected.
+        The auth methods are selected ONLY in Server Settings (DB); the
+        ``JIRA_AUTH_MODE`` and ``GREENWAVE_AUTH_MODE`` environment
+        variables are deliberately ignored. Init kwargs (DB-override merge
+        in ``get_settings()``, admin PUT validation) and ``model_copy``
+        pinning are unaffected.
         """
 
         def _without_auth_mode(
@@ -855,7 +1169,8 @@ class Settings(BaseSettings):
         ) -> PydanticBaseSettingsSource:
             def _load() -> dict[str, Any]:
                 data = source()
-                data.pop("jira_auth_mode", None)
+                for db_only in DB_ONLY_SETTINGS:
+                    data.pop(db_only, None)
 
                 def _alias_value(alias: str) -> str | None:
                     # Aliases resolve from os.environ (the env source) AND
@@ -912,6 +1227,19 @@ class Settings(BaseSettings):
         if mode and mode not in JIRA_AUTH_MODES:
             raise ValueError(
                 f"jira_auth_mode must be one of {', '.join(JIRA_AUTH_MODES)} "
+                f"(case-insensitive, got {value!r})"
+            )
+        return mode or None
+
+    @field_validator("greenwave_auth_mode")
+    @classmethod
+    def _validate_greenwave_auth_mode(cls, value: str | None) -> str | None:
+        """Accept only the seven known methods (or empty — disabled)."""
+        mode = (value or "").strip().lower()
+        if mode and mode not in GREENWAVE_AUTH_MODES:
+            raise ValueError(
+                f"greenwave_auth_mode must be one of "
+                f"{', '.join(GREENWAVE_AUTH_MODES)} "
                 f"(case-insensitive, got {value!r})"
             )
         return mode or None
@@ -1280,6 +1608,161 @@ class Settings(BaseSettings):
             "Allow manual Datadog pushes of jobs that still have unreviewed"
             " failures. By default all failures must be reviewed before a manual push."
         ),
+    )
+
+    # Greenwave / ResultsDB exporter integration (optional, runtime-editable
+    # via Server Settings — result pushes take per-request parameters)
+    enable_greenwave: bool | None = Field(
+        default=None,
+        description=(
+            "Enable the Greenwave exporter. Requires an explicit"
+            " GREENWAVE_AUTH_MODE selection; when None, enabled if a mode"
+            " is configured and its required fields are configured."
+        ),
+    )
+    greenwave_url: str | None = Field(
+        default=None,
+        description="ResultsDB API URL (e.g. https://resultsdb.example.com/api/v2.0).",
+    )
+    greenwave_api_token: SecretStr | None = Field(
+        default=None,
+        description="ResultsDB API auth token (bearer auth mode).",
+    )
+    # DB-only Greenwave auth method selection (Server Settings UI) —
+    # REQUIRED for the Greenwave exporter, mirroring jira_auth_mode. When
+    # set, ONLY that method's fields are used. Unset disables the exporter
+    # entirely: no credentials are read, no inference. Never read from the
+    # environment (see settings_customise_sources); set via
+    # PUT /api/admin/settings.
+    greenwave_auth_mode: str | None = Field(
+        default=None,
+        description=(
+            "Explicit Greenwave auth method: 'bearer', 'oidc', 'kerberos',"
+            " 'mtls', 'basic', 'none', or 'sso' (Server Settings only). Unset"
+            " disables the Greenwave exporter (no auto-detection)."
+        ),
+    )
+    # oidc mode: client-credentials grant against the token URL.
+    greenwave_oidc_token_url: str | None = Field(
+        default=None,
+        description="OIDC token endpoint URL for the oidc auth mode.",
+    )
+    greenwave_oidc_client_id: str | None = Field(
+        default=None,
+        description="OIDC client ID for the oidc auth mode.",
+    )
+    greenwave_oidc_client_secret: SecretStr | None = Field(
+        default=None,
+        description="OIDC client secret for the oidc auth mode.",
+    )
+    # kerberos mode: SPNEGO/Negotiate with a client keytab.
+    greenwave_keytab_path: str | None = Field(
+        default=None,
+        description="Kerberos keytab file path for the kerberos auth mode.",
+    )
+    greenwave_keytab_principal: str | None = Field(
+        default=None,
+        description="Kerberos client principal (user@REALM) for the keytab.",
+    )
+    greenwave_krb5_realm: str | None = Field(
+        default=None,
+        description=(
+            "Kerberos service realm for the SPN (e.g. 'EXAMPLE.COM'). Unset "
+            "uses the keytab principal's realm; leave both unset to resolve "
+            "the realm from krb5.conf [domain_realm]."
+        ),
+    )
+    greenwave_krb5_service: str = Field(
+        default="HTTP",
+        description="Kerberos service class for the target SPN (default HTTP).",
+    )
+    # mtls mode: client certificate authentication at the TLS layer.
+    greenwave_client_cert: str | None = Field(
+        default=None,
+        description="Client certificate (PEM) path for the mtls auth mode.",
+    )
+    greenwave_client_key: str | None = Field(
+        default=None,
+        description="Client key (PEM) path for the mtls auth mode.",
+    )
+    greenwave_ca_bundle: str | None = Field(
+        default=None,
+        description="CA bundle PEM file or OpenSSL-hashed CA directory (c_rehash) for the mtls auth mode (optional).",
+    )
+    # basic mode: HTTP Basic authentication.
+    greenwave_basic_user: str | None = Field(
+        default=None,
+        description="Username for the basic auth mode.",
+    )
+    greenwave_basic_password: SecretStr | None = Field(
+        default=None,
+        description="Password for the basic auth mode.",
+    )
+    # sso mode: the requesting user's browser Red Hat SSO session token, with
+    # an optional RFC 8693 audience exchange per Greenwave service.
+    greenwave_sso_audience: str | None = Field(
+        default=None,
+        description=(
+            "Optional target audience for RFC 8693 OIDC token exchange against "
+            "Red Hat SSO for ResultsDB pushes (unset forwards the user's "
+            "refreshed Red Hat SSO access token directly)."
+        ),
+    )
+    greenwave_sso_waiver_audience: str | None = Field(
+        default=None,
+        description=(
+            "Optional target audience for RFC 8693 OIDC token exchange for "
+            "WaiverDB pushes (unset reuses GREENWAVE_SSO_AUDIENCE, or the "
+            "user's direct access token when neither is set)."
+        ),
+    )
+    greenwave_waiver_url: str | None = Field(
+        default=None,
+        description="WaiverDB API URL (optional; required for waiver submission).",
+    )
+    greenwave_waiver_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "WaiverDB auth token — OIDC bearer or service account token "
+            "(deployment-specific)."
+        ),
+    )
+    greenwave_push_waivers: bool = Field(
+        default=False,
+        description=(
+            "Submit WaiverDB waivers for reviewed failures whose classification "
+            "is in GREENWAVE_WAIVABLE_CLASSIFICATIONS. Requires GREENWAVE_WAIVER_URL, "
+            "GREENWAVE_WAIVER_TOKEN, and GREENWAVE_PRODUCT_VERSION."
+        ),
+    )
+    greenwave_waivable_classifications: str = Field(
+        default="INFRASTRUCTURE",
+        description=(
+            "Comma-separated classifications that generate waivers "
+            "(e.g. 'INFRASTRUCTURE,CODE ISSUE'). Matched case-insensitively "
+            "against rootcoz classifications."
+        ),
+    )
+    greenwave_outcome_map: str = Field(
+        default=DEFAULT_GREENWAVE_OUTCOME_MAP,
+        description=(
+            "Classification to ResultsDB outcome mapping, format "
+            "CLASS:OUTCOME,... Valid outcomes: PASSED, FAILED, INFO, "
+            "NEEDS_INSPECTION. Classifications not in the map are skipped "
+            "(not exported)."
+        ),
+    )
+    greenwave_subject_type: str = Field(
+        default="koji_build",
+        description="ResultsDB subject type for the tested artifact.",
+    )
+    greenwave_product_version: str | None = Field(
+        default=None,
+        description="Product version for WaiverDB waivers (required when waivers enabled).",
+    )
+    greenwave_verify_ssl: bool = Field(
+        default=True,
+        description="Verify TLS certificates for ResultsDB and WaiverDB connections.",
     )
 
     # Web Push (VAPID) configuration (optional, server-only)
@@ -1812,11 +2295,48 @@ class Settings(BaseSettings):
             "public_base_url",
             "reportportal_url",
             "reportportal_project",
+            "greenwave_url",
+            "greenwave_waiver_url",
+            "greenwave_product_version",
+            "greenwave_oidc_token_url",
+            "greenwave_oidc_client_id",
+            "greenwave_keytab_path",
+            "greenwave_keytab_principal",
+            "greenwave_client_cert",
+            "greenwave_client_key",
+            "greenwave_ca_bundle",
+            "greenwave_basic_user",
+            "greenwave_sso_audience",
+            "greenwave_sso_waiver_audience",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
                 stripped = value.strip()
                 object.__setattr__(self, field_name, stripped or None)
+        # Validate Greenwave push-target URL STRUCTURE before anything can
+        # use it — a malformed or credential-bearing URL is a startup error.
+        # The SCHEME rule (credentials never over plain HTTP) lives in the
+        # settings write path and in build_greenwave_auth instead: the URL
+        # may come from the environment while the mode is DB-only, and
+        # raising on that mismatch here would make the merged config
+        # unvalidatable — get_settings() then falls back to env-only and
+        # every database override is lost (credentials, roles, allow lists).
+        validate_greenwave_url_structure(self.greenwave_url, "GREENWAVE_URL")
+        # The waiver URL is held to the same structural rule at
+        # construction; its stricter HTTPS-only scheme rule (a waiver lifts
+        # a gate, so it is never downgraded to plain HTTP — even in the
+        # credential-less 'none' mode) is enforced by the write path and
+        # build_greenwave_waiver_auth.
+        validate_greenwave_url_structure(
+            self.greenwave_waiver_url, "GREENWAVE_WAIVER_URL"
+        )
+        # The OIDC token endpoint receives the client secret on every push
+        # and its response supplies the bearer token, so its HTTPS-only
+        # scheme rule is likewise enforced at the write path and at the auth
+        # build — never here, for the same DB-override-survival reason.
+        validate_greenwave_url_structure(
+            self.greenwave_oidc_token_url, "GREENWAVE_OIDC_TOKEN_URL"
+        )
         # Strip whitespace from string fields with empty-string defaults
         for field_name in (
             "jenkins_url",
@@ -1829,6 +2349,11 @@ class Settings(BaseSettings):
             "gcs_bucket",
             "jira_cloud_url",
             "jira_server_url",
+            # Greenwave text fields that are optional: whitespace-only means
+            # "not configured", the same rule SSO providers get from
+            # settings_registry.validate_and_strip_sso_fields below.
+            "greenwave_subject_type",
+            "greenwave_krb5_service",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
@@ -1854,6 +2379,10 @@ class Settings(BaseSettings):
             "reportportal_api_token",
             "datadog_api_key",
             "datadog_app_key",
+            "greenwave_api_token",
+            "greenwave_waiver_token",
+            "greenwave_oidc_client_secret",
+            "greenwave_basic_password",
         ):
             secret = getattr(self, field_name)
             if secret is not None:
@@ -1869,6 +2398,31 @@ class Settings(BaseSettings):
         from rootcoz.settings_registry import validate_and_strip_sso_fields
 
         validate_and_strip_sso_fields(self)
+        # Validate GREENWAVE_OUTCOME_MAP at startup: invalid outcomes or
+        # malformed entries are configuration errors, not runtime ones.
+        object.__setattr__(
+            self,
+            "greenwave_outcome_map",
+            self.greenwave_outcome_map.strip(),
+        )
+        parse_greenwave_outcome_map(self.greenwave_outcome_map)
+        # Auto-push depends on auto-review: failures are only pushed once
+        # auto-review has marked them reviewed.  A deployment configuring
+        # AUTO_PUSH_EXPORTERS with auto-review disabled is inert — warn,
+        # never fail construction: raising here would hard-fail env-var
+        # startups and, via get_settings()'s fallback, silently drop every
+        # DB override.  The write path (_validate_settings_updates in
+        # main.py) rejects the combination where it is actionable.
+        if self.auto_push_exporters.strip() and self.enable_auto_review is False:
+            logger.warning(
+                "AUTO_PUSH_EXPORTERS is configured but ENABLE_AUTO_REVIEW is "
+                "disabled — auto-push will not run; enable ENABLE_AUTO_REVIEW "
+                "or clear AUTO_PUSH_EXPORTERS"
+            )
+        # Warn once at startup about unrecognized waivable classifications.
+        parse_greenwave_waivable_classifications(
+            self.greenwave_waivable_classifications, warn_unrecognized=True
+        )
         return self
 
     @model_validator(mode="after")
@@ -2055,6 +2609,66 @@ class Settings(BaseSettings):
             push_classifications=self.rp_push_classifications,
             push_rootcoz_url=self.rp_push_rootcoz_url,
             push_tracker_links=self.rp_push_tracker_links,
+        )
+
+    @property
+    def greenwave_enabled(self) -> bool:
+        """Whether the Greenwave exporter is enabled and fully configured.
+
+        Mirrors ``jira_enabled``: an unset ``greenwave_auth_mode`` disables
+        the exporter outright (no credential inference), and the selected
+        mode's required fields must all be configured.
+
+        A target that would carry a credential over plain HTTP also counts as
+        not enabled: construction must stay mergeable (see
+        :func:`validate_greenwave_url_structure`), so the scheme rule is
+        enforced at the push boundary — but advertising the exporter as
+        available while every push is guaranteed to refuse would be a lie to
+        the UI, so the same predicate is consulted here.
+        """
+        if self.enable_greenwave is False:
+            return False
+        mode = normalize_greenwave_auth_mode(self.greenwave_auth_mode)
+        if not mode:
+            # No method selected: the exporter is disabled — no inference.
+            if self.enable_greenwave is True:
+                logger.warning(
+                    "enable_greenwave is True but no Greenwave auth method is "
+                    "selected (choose one in Server Settings)"
+                )
+            return False
+        missing = greenwave_method_missing_fields(self)
+        if missing:
+            if self.enable_greenwave is True:
+                logger.warning(
+                    "enable_greenwave is True but Greenwave auth method '%s' "
+                    "is missing: %s",
+                    mode,
+                    ", ".join(missing),
+                )
+            return False
+        scheme_error = greenwave_scheme_error(self, mode)
+        if scheme_error:
+            if self.enable_greenwave is True:
+                logger.warning("enable_greenwave is True but %s", scheme_error)
+            return False
+        token_error = greenwave_token_shape_error(self, mode)
+        if token_error:
+            if self.enable_greenwave is True:
+                logger.warning("enable_greenwave is True but %s", token_error)
+            return False
+        return True
+
+    @property
+    def greenwave_outcome_map_parsed(self) -> dict[str, str]:
+        """Parsed ``GREENWAVE_OUTCOME_MAP`` (uppercase classification → outcome)."""
+        return parse_greenwave_outcome_map(self.greenwave_outcome_map)
+
+    @property
+    def greenwave_waivable_set(self) -> frozenset[str]:
+        """Parsed ``GREENWAVE_WAIVABLE_CLASSIFICATIONS`` (uppercase set)."""
+        return parse_greenwave_waivable_classifications(
+            self.greenwave_waivable_classifications
         )
 
 
@@ -2542,6 +3156,80 @@ def _warn_browser_provider_without_base_url(settings: Settings) -> None:
             " configured (Server Settings or the environment)",
             missing,
         )
+
+
+def normalize_greenwave_auth_mode(value: str | None) -> str:
+    """Canonical ``greenwave_auth_mode`` value; ``""`` when unset or invalid.
+
+    Lenient on purpose: ``Settings.model_copy`` (per-request overrides)
+    bypasses field validators, so resolve paths normalize instead of
+    crashing. Invalid values log a warning and disable the exporter
+    (empty mode).
+    """
+    mode = (value or "").strip().lower()
+    if mode and mode not in GREENWAVE_AUTH_MODES:
+        logger.warning(
+            "Ignoring invalid greenwave_auth_mode %r (expected one of: %s)",
+            value,
+            ", ".join(GREENWAVE_AUTH_MODES),
+        )
+        return ""
+    return mode
+
+
+def greenwave_method_missing_fields(settings: Settings) -> list[str]:
+    """Missing settings field names for the selected Greenwave auth method.
+
+    Returns [] when ``greenwave_auth_mode`` is unset (the exporter is
+    disabled then — ``greenwave_enabled`` short-circuits before field
+    checks) or when the selected method's fields are all configured.
+    WaiverDB prerequisites (``GREENWAVE_WAIVER_URL``/``_TOKEN``/
+    ``_PRODUCT_VERSION`` when ``GREENWAVE_PUSH_WAIVERS`` is on) are NOT
+    checked here — they stay in ``GreenwaveExporter.missing_waiver_settings``.
+    """
+    mode = normalize_greenwave_auth_mode(settings.greenwave_auth_mode)
+    if not mode:
+        return []
+    required: dict[str, list[tuple[str, Any]]] = {
+        "bearer": [
+            ("greenwave_url", settings.greenwave_url),
+            ("greenwave_api_token", settings.greenwave_api_token),
+        ],
+        "oidc": [
+            ("greenwave_url", settings.greenwave_url),
+            ("greenwave_oidc_token_url", settings.greenwave_oidc_token_url),
+            ("greenwave_oidc_client_id", settings.greenwave_oidc_client_id),
+            ("greenwave_oidc_client_secret", settings.greenwave_oidc_client_secret),
+        ],
+        "kerberos": [
+            ("greenwave_url", settings.greenwave_url),
+            ("greenwave_keytab_path", settings.greenwave_keytab_path),
+            ("greenwave_keytab_principal", settings.greenwave_keytab_principal),
+        ],
+        "mtls": [
+            ("greenwave_url", settings.greenwave_url),
+            ("greenwave_client_cert", settings.greenwave_client_cert),
+            ("greenwave_client_key", settings.greenwave_client_key),
+        ],
+        "basic": [
+            ("greenwave_url", settings.greenwave_url),
+            ("greenwave_basic_user", settings.greenwave_basic_user),
+            ("greenwave_basic_password", settings.greenwave_basic_password),
+        ],
+        "none": [
+            ("greenwave_url", settings.greenwave_url),
+        ],
+        # sso mode authenticates with the CALLING user's browser Red Hat SSO
+        # session, so the deployment only needs the SSO client to refresh and
+        # (optionally) exchange that session's token.
+        "sso": [
+            ("greenwave_url", settings.greenwave_url),
+            ("sso_redhat_issuer", settings.sso_redhat_issuer),
+            ("sso_redhat_client_id", settings.sso_redhat_client_id),
+            ("sso_redhat_client_secret", settings.sso_redhat_client_secret),
+        ],
+    }
+    return [name for name, value in required[mode] if not value]
 
 
 # In-memory cache for DB settings overrides.

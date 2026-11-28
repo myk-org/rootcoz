@@ -21,7 +21,11 @@ _USERINFO_PREFIX = re.compile(r"(?<=//)[^/?#\s]+@")
 
 
 def _parse_valid_url(
-    raw: str, *, allowed_schemes: tuple[str, ...]
+    raw: str,
+    *,
+    allowed_schemes: tuple[str, ...],
+    reject_userinfo: bool = False,
+    reject_query_fragment: bool = False,
 ) -> ParseResult | None:
     """Parse an already-stripped, non-empty *raw* URL, or ``None`` if invalid.
 
@@ -30,7 +34,9 @@ def _parse_valid_url(
     for a plain space, so ``isspace()`` is needed too — and ``isspace()``
     alone lets ``\\x00``/``\\x1b``/``\\x7f``/Unicode ``Cc``/``Cf`` through), an
     authority ``urlparse`` accepts, a port it accepts, an allowed scheme, and
-    a non-empty hostname.
+    a non-empty hostname. *reject_userinfo* and *reject_query_fragment* add
+    the stricter checks a gating write target needs (embedded credentials and
+    token-carrying query/fragment).
     """
     if has_whitespace_or_control(raw):
         return None
@@ -41,11 +47,22 @@ def _parse_valid_url(
         return None
     if parsed.scheme not in allowed_schemes or not parsed.hostname:
         return None
+    if reject_userinfo and (parsed.username is not None or parsed.password is not None):
+        return None
+    if reject_query_fragment and (parsed.query or parsed.fragment):
+        return None
     return parsed
 
 
 def strip_nonprintable(text: str) -> str:
-    """Drop control and format characters — log- and message-forging bytes."""
+    """Drop control and format characters — log- and message-forging bytes.
+
+    Strictest of the text sanitizers: it keeps only what Python calls
+    printable. Ordinary ASCII space (``U+0020``) IS printable and is kept;
+    tabs, newlines and other non-printables are dropped. Use it for a
+    one-line display value, not for free text —
+    ``rootcoz.utils.strip_gating_text`` is the gating-system rule.
+    """
     return "".join(ch for ch in text if ch.isprintable())
 
 

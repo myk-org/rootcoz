@@ -119,13 +119,15 @@ describe('ReportPortalButton', () => {
     mockPost.mockResolvedValue(makePushBody())
   })
 
-  it('pushes to the reportportal endpoint on confirm', async () => {
+  it('pushes to the generic reportportal endpoint on confirm, never the legacy one', async () => {
     renderButton({ reviews: allReviewed(), allowUnreviewedPush: false })
     await confirmPush()
 
     await waitFor(() => {
-      expect(mockPost).toHaveBeenCalledWith('/results/job-1/push-reportportal')
+      expect(mockPost).toHaveBeenCalledWith('/results/job-1/push/reportportal')
     })
+    // Guard: reintroducing a direct legacy `push-reportportal` call must fail
+    expect(mockPost.mock.calls.some((c) => String(c[0]).includes('push-reportportal'))).toBe(false)
     expect(await screen.findByText('Pushed 2 classifications to Report Portal.')).toBeDefined()
   })
 

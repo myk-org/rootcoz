@@ -39,6 +39,8 @@ from rootcoz.auth.sso.base import SSOProvider
 from rootcoz.auth.sso.oidc import OIDCProvider
 from rootcoz.config import (
     DEFAULT_USER_ROLES,
+    GREENWAVE_AUTH_MODES,
+    GREENWAVE_KNOWN_CLASSIFICATIONS,
     JIRA_AUTH_MODES,
     Settings,
     atlassian_cloud_id_error,
@@ -48,16 +50,19 @@ from rootcoz.config import (
     duplicate_additional_repo_names,
     get_db_setting,
     get_settings,
+    invalid_bearer_token_error,
     issuer_problem,
     jira_site_url_error,
     normalize_domain_list,
     normalize_feedback_repo_url,
+    normalize_greenwave_auth_mode,
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
     remove_from_db_settings_cache,
     safe_parse_repo_ref,
     update_db_settings_cache,
+    validate_greenwave_url,
 )
 from rootcoz.encryption import (
     SENSITIVE_KEYS,
@@ -400,8 +405,12 @@ class SettingSpec:
 
     @property
     def persistable(self) -> bool:
-        """Whether an env-sourced value can be persisted into the DB store."""
-        return not self.server_only and not self.derived
+        """Whether an env-sourced value can be persisted into the DB store.
+
+        DB-only settings have no env value to promote, so they are never
+        persistable either.
+        """
+        return not self.server_only and not self.derived and not self.db_only
 
     @property
     def label(self) -> str:
@@ -449,8 +458,9 @@ def _build_sso_provider_specs(
     return tuple(specs)
 
 
-def _jira_visible(modes: list[str]) -> dict[str, Any]:
-    return {"key": "jira_auth_mode", "in": modes}
+def _mode_visible(key: str, modes: list[str]) -> dict[str, Any]:
+    """A ``visible_when`` rule: show the setting while *key* holds one of *modes*."""
+    return {"key": key, "in": modes}
 
 
 # Purpose-based category layout (#585): deployment-level first, then the two CI
@@ -572,23 +582,23 @@ _RAW_CATEGORY_LAYOUT: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
             SettingSpec(
                 "jira_email",
                 sensitive=True,
-                visible_when=_jira_visible(["basic"]),
+                visible_when=_mode_visible("jira_auth_mode", ["basic"]),
                 jira_verified_invalidating=True,
             ),
             SettingSpec(
                 "jira_api_token",
                 sensitive=True,
-                visible_when=_jira_visible(["basic"]),
+                visible_when=_mode_visible("jira_auth_mode", ["basic"]),
                 jira_verified_invalidating=True,
             ),
             SettingSpec(
                 "jira_cloud_url",
-                visible_when=_jira_visible(["basic"]),
+                visible_when=_mode_visible("jira_auth_mode", ["basic"]),
                 jira_verified_invalidating=True,
             ),
             SettingSpec(
                 "jira_cloud_ssl_verify",
-                visible_when=_jira_visible(["basic"]),
+                visible_when=_mode_visible("jira_auth_mode", ["basic"]),
                 jira_verified_invalidating=True,
             ),
             # pat (Jira Server/DC bearer PAT)
@@ -596,41 +606,41 @@ _RAW_CATEGORY_LAYOUT: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
                 "jira_pat",
                 label_override="JIRA personal access token",
                 sensitive=True,
-                visible_when=_jira_visible(["pat"]),
+                visible_when=_mode_visible("jira_auth_mode", ["pat"]),
                 jira_verified_invalidating=True,
             ),
             SettingSpec(
                 "jira_server_url",
-                visible_when=_jira_visible(["pat"]),
+                visible_when=_mode_visible("jira_auth_mode", ["pat"]),
                 jira_verified_invalidating=True,
             ),
             SettingSpec(
                 "jira_server_ssl_verify",
-                visible_when=_jira_visible(["pat"]),
+                visible_when=_mode_visible("jira_auth_mode", ["pat"]),
                 jira_verified_invalidating=True,
             ),
             # oauth (Atlassian OAuth 2.0 service-account credential)
             SettingSpec(
                 "jira_oauth_client_secret",
                 sensitive=True,
-                visible_when=_jira_visible(["oauth"]),
+                visible_when=_mode_visible("jira_auth_mode", ["oauth"]),
                 jira_verified_invalidating=True,
             ),
             SettingSpec(
                 "atlassian_oauth_client_id",
-                visible_when=_jira_visible(["oauth"]),
+                visible_when=_mode_visible("jira_auth_mode", ["oauth"]),
                 jira_verified_invalidating=True,
             ),
             # oauth + atst (shared api.atlassian.com gateway)
             SettingSpec(
                 "atlassian_oauth_cloud_id",
                 label_override="Atlassian OAuth cloud ID",
-                visible_when=_jira_visible(["oauth", "atst"]),
+                visible_when=_mode_visible("jira_auth_mode", ["oauth", "atst"]),
                 jira_verified_invalidating=True,
             ),
             SettingSpec(
                 "jira_oauth_ssl_verify",
-                visible_when=_jira_visible(["oauth", "atst"]),
+                visible_when=_mode_visible("jira_auth_mode", ["oauth", "atst"]),
                 jira_verified_invalidating=True,
             ),
             # atst (already-minted service-account scoped token)
@@ -638,7 +648,7 @@ _RAW_CATEGORY_LAYOUT: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
                 "jira_atst_token",
                 label_override="Jira service account scoped token",
                 sensitive=True,
-                visible_when=_jira_visible(["atst"]),
+                visible_when=_mode_visible("jira_auth_mode", ["atst"]),
                 jira_verified_invalidating=True,
             ),
         ),
@@ -685,6 +695,106 @@ _RAW_CATEGORY_LAYOUT: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
             SettingSpec("dd_push_rootcoz_url", defaults_hidden=True),
             SettingSpec("dd_push_tracker_links", defaults_hidden=True),
             SettingSpec("dd_allow_unreviewed_push", defaults_hidden=True),
+        ),
+    ),
+    (
+        "Greenwave",
+        (
+            SettingSpec(
+                "greenwave_auth_mode",
+                db_only=True,
+                options=tuple(GREENWAVE_AUTH_MODES),
+                pre_validate_model=True,
+            ),
+            SettingSpec("greenwave_url"),
+            SettingSpec(
+                "greenwave_api_token",
+                sensitive=True,
+                visible_when=_mode_visible("greenwave_auth_mode", ["bearer"]),
+            ),
+            # oidc (client-credentials grant against the token URL)
+            SettingSpec(
+                "greenwave_oidc_token_url",
+                visible_when=_mode_visible("greenwave_auth_mode", ["oidc"]),
+            ),
+            SettingSpec(
+                "greenwave_oidc_client_id",
+                visible_when=_mode_visible("greenwave_auth_mode", ["oidc"]),
+            ),
+            SettingSpec(
+                "greenwave_oidc_client_secret",
+                sensitive=True,
+                visible_when=_mode_visible("greenwave_auth_mode", ["oidc"]),
+            ),
+            # kerberos (SPNEGO/Negotiate with a client keytab)
+            SettingSpec(
+                "greenwave_keytab_path",
+                visible_when=_mode_visible("greenwave_auth_mode", ["kerberos"]),
+            ),
+            SettingSpec(
+                "greenwave_keytab_principal",
+                visible_when=_mode_visible("greenwave_auth_mode", ["kerberos"]),
+            ),
+            SettingSpec(
+                "greenwave_krb5_realm",
+                visible_when=_mode_visible("greenwave_auth_mode", ["kerberos"]),
+            ),
+            SettingSpec(
+                "greenwave_krb5_service",
+                visible_when=_mode_visible("greenwave_auth_mode", ["kerberos"]),
+            ),
+            # mtls (client certificate authentication)
+            SettingSpec(
+                "greenwave_client_cert",
+                visible_when=_mode_visible("greenwave_auth_mode", ["mtls"]),
+            ),
+            SettingSpec(
+                "greenwave_client_key",
+                visible_when=_mode_visible("greenwave_auth_mode", ["mtls"]),
+            ),
+            SettingSpec(
+                "greenwave_ca_bundle",
+                visible_when=_mode_visible("greenwave_auth_mode", ["mtls"]),
+            ),
+            # basic (HTTP Basic authentication)
+            SettingSpec(
+                "greenwave_basic_user",
+                visible_when=_mode_visible("greenwave_auth_mode", ["basic"]),
+            ),
+            SettingSpec(
+                "greenwave_basic_password",
+                sensitive=True,
+                visible_when=_mode_visible("greenwave_auth_mode", ["basic"]),
+            ),
+            # sso (the requesting user's browser Red Hat SSO session, with
+            # optional RFC 8693 audience exchanges)
+            SettingSpec(
+                "greenwave_sso_audience",
+                visible_when=_mode_visible("greenwave_auth_mode", ["sso"]),
+            ),
+            SettingSpec(
+                "greenwave_sso_waiver_audience",
+                visible_when=_mode_visible("greenwave_auth_mode", ["sso"]),
+            ),
+            # WaiverDB surface (mode-independent)
+            SettingSpec("greenwave_waiver_url", pre_validate_model=True),
+            SettingSpec(
+                "greenwave_waiver_token",
+                sensitive=True,
+                visible_when=_mode_visible("greenwave_auth_mode", ["bearer"]),
+            ),
+            SettingSpec("greenwave_push_waivers"),
+            SettingSpec(
+                "greenwave_waivable_classifications",
+                options=tuple(sorted(GREENWAVE_KNOWN_CLASSIFICATIONS)),
+                multiple=True,
+                allow_custom=True,
+            ),
+            SettingSpec("greenwave_outcome_map", pre_validate_model=True),
+            SettingSpec("greenwave_subject_type"),
+            SettingSpec("greenwave_product_version"),
+            SettingSpec("greenwave_verify_ssl"),
+            SettingSpec("enable_greenwave"),
         ),
     ),
     (
@@ -1728,6 +1838,79 @@ def normalize_setting_override(key: str, value: str) -> str:
     return value
 
 
+# The Greenwave settings whose write re-runs the URL-scheme cross-field
+# checks below: the mode, the ResultsDB URL, the per-mode credential fields
+# and the waiver surface (URL, waivers toggle, waiver token). A write
+# re-checks the effective ResultsDB URL against the effective mode, the OIDC
+# token endpoint on an explicit write, and the waiver endpoint when it is
+# written or waivers are on. The set gates no mode completeness — an
+# incomplete mode is stored, because the UI renders a mode's fields only once
+# it is persisted — so the credential fields are listed only to re-check the
+# schemes their mode puts in play; `greenwave_waiver_token` is listed with
+# them so a waiver-token save re-runs the same checks (its bearer shape is
+# checked separately in _GREENWAVE_TOKEN_SETTING_KEYS). Fields that gate no
+# scheme (krb5 service class, CA bundle) are excluded.
+_GREENWAVE_AUTH_SETTING_KEYS: frozenset[str] = frozenset(
+    {
+        "greenwave_auth_mode",
+        "greenwave_url",
+        "greenwave_waiver_url",
+        "greenwave_push_waivers",
+        "greenwave_api_token",
+        "greenwave_oidc_token_url",
+        "greenwave_oidc_client_id",
+        "greenwave_oidc_client_secret",
+        "greenwave_keytab_path",
+        "greenwave_keytab_principal",
+        "greenwave_client_cert",
+        "greenwave_client_key",
+        "greenwave_basic_user",
+        "greenwave_basic_password",
+        "greenwave_waiver_token",
+    }
+)
+
+# The bearer tokens a save WRITES, as opposed to the ones it inherits: the shape
+# rule applies only to these (see the cross-field block below).
+_GREENWAVE_TOKEN_SETTING_KEYS: frozenset[str] = frozenset(
+    {
+        "greenwave_api_token",
+        "greenwave_waiver_token",
+    }
+)
+
+
+def _effective_proposed_settings(
+    settings_updates: dict[str, Any],
+) -> Settings | None:
+    """Merge an admin update over the effective settings; None when invalid.
+
+    Shared by the cross-field save rules (the Greenwave URL-scheme
+    checks, auto-push requires auto-review) so an update touching only
+    one side of a rule is still evaluated against the resulting
+    configuration. None/empty values reset to the model default, matching
+    the PUT semantics — an explicit empty override beats the env value.
+    """
+    effective = get_settings().model_dump()
+    valid_keys = set(Settings.model_fields.keys())
+    for key, value in settings_updates.items():
+        if key not in valid_keys:
+            continue
+        if value is None or value == "":
+            field = Settings.model_fields[key]
+            effective[key] = (
+                field.default_factory() if field.default_factory else field.default
+            )
+        else:
+            effective[key] = value
+    try:
+        return Settings.model_validate(effective)
+    except ValidationError:
+        # Per-field problems were already reported by the caller; skip the
+        # cross-field checks when the merged proposal cannot validate.
+        return None
+
+
 async def validate_settings_updates(
     settings_updates: dict[str, Any],
     *,
@@ -1816,7 +1999,20 @@ async def validate_settings_updates(
                 errors.append(enum_error)
             else:
                 settings_updates[key] = canonical
-        if key in ("prow_url", "gcs_bucket", "default_user_role"):
+        if key in (
+            "prow_url",
+            "gcs_bucket",
+            "default_user_role",
+            # greenwave_url is NOT skipped: its STRUCTURAL problems
+            # (userinfo, query, fragment, bad port) are reported by the
+            # per-key model_validate below, while its mode-aware SCHEME rule
+            # needs the merged proposal and runs in the Greenwave cross-field
+            # block. greenwave_waiver_url skips here because the pre-validate
+            # block above already model-validates it (one message per
+            # problem, #361 Qodo r2).
+            "greenwave_waiver_url",
+            "greenwave_outcome_map",
+        ):
             continue
         if key == "sidecar_port":
             try:
@@ -1914,6 +2110,111 @@ async def validate_settings_updates(
                 " sign-in — without it this provider is hidden from the login page"
             )
 
+    # Greenwave auth mode (#183): the URL schemes must match the mode (plain
+    # HTTP is valid only for the credential-less 'none' mode, or while no mode
+    # is set — the exporter is inert then).  Like the auto-push rule
+    # below, it runs only when the update touches one of the mode's keys,
+    # and is evaluated on the EFFECTIVE proposed values via
+    # _effective_proposed_settings so absent-vs-explicitly-cleared is the
+    # helper's job: an explicit CLEAR of the mode is judged on the cleared
+    # value (a batch clearing the mode while setting an inert http URL is
+    # accepted), and a batch replacing url+mode together is judged on the
+    # new values — never on ``or``-fallbacks to the pre-batch state.
+    if not _GREENWAVE_AUTH_SETTING_KEYS.isdisjoint(settings_updates):
+        proposed = _effective_proposed_settings(settings_updates)
+        if proposed is not None:
+            try:
+                # Unset mode = exporter disabled, so its URL is inert. An
+                # explicit write of a URL is ALWAYS held to its scheme rule
+                # (so saving http:// can never succeed); an INHERITED value
+                # is only judged where it is actually in play, because a
+                # save that reveals a hidden field must stay possible (the
+                # exporter and the auth build still fail closed meanwhile).
+                validate_greenwave_url(
+                    proposed.greenwave_url,
+                    "GREENWAVE_URL",
+                    allow_http=normalize_greenwave_auth_mode(
+                        proposed.greenwave_auth_mode
+                    )
+                    in ("none", ""),
+                )
+                if "greenwave_waiver_url" in settings_updates or (
+                    proposed.greenwave_push_waivers
+                ):
+                    # A waiver write gates releases, so the waiver endpoint
+                    # stays HTTPS-only in every mode.
+                    validate_greenwave_url(
+                        proposed.greenwave_waiver_url, "GREENWAVE_WAIVER_URL"
+                    )
+                if "greenwave_oidc_token_url" in settings_updates:
+                    # The OIDC token endpoint carries the client secret on
+                    # every push. Only an EXPLICIT save is refused here: an
+                    # inherited http:// value must not block switching the
+                    # auth mode to oidc, or the admin could never reveal the
+                    # field that fixes it — greenwave_enabled and
+                    # build_greenwave_auth fail closed until it is fixed.
+                    validate_greenwave_url(
+                        proposed.greenwave_oidc_token_url,
+                        "GREENWAVE_OIDC_TOKEN_URL",
+                    )
+            except ValueError as exc:
+                errors.append(str(exc))
+        # A save is NOT rejected for an incomplete mode. The mode has to be
+        # storable first: the Server Settings UI renders a mode's fields only
+        # once that mode is persisted, so rejecting the switch would leave the
+        # admin unable to reach the inputs that complete it (Jira behaves the
+        # same way). An incomplete mode simply leaves the exporter disabled —
+        # `greenwave_enabled`, the exporters capability list and the Test
+        # connection button all name the missing fields.
+
+    # A bearer token THIS update writes must be a header value the transport
+    # can carry — in EVERY mode and whatever ``greenwave_push_waivers`` says.
+    # The value outlives the save, so an unusable token saved while its mode is
+    # inert only surfaces later, as a refused push (or a 422 from the auth
+    # build) once an admin activates that mode. Only an EXPLICIT write is judged: an
+    # inherited token stays inert-until-replaced, so a mode switch remains
+    # storable — the UI renders a mode's fields only once that mode is saved,
+    # and blocking the switch would lock the admin out of the field that fixes
+    # the token. An empty value is a clearing write, always allowed.
+    for token_key in sorted(_GREENWAVE_TOKEN_SETTING_KEYS & set(settings_updates)):
+        raw_val = settings_updates.get(token_key)
+        if isinstance(raw_val, str):
+            stripped = raw_val.strip()
+            token_err = invalid_bearer_token_error(token_key, stripped)
+            if token_err:
+                errors.append(token_err)
+            else:
+                settings_updates[token_key] = stripped
+
+    # Auto-push requires auto-review.  The Settings model only warns
+    # (raising there would hard-fail env-var startups and, via
+    # get_settings()'s fallback, wipe every DB override), so the
+    # combination is rejected here where the admin can act on it.
+    # The rule only runs when the update actually changes one of the two
+    # keys: a server already carrying the inert combination (set via env
+    # or saved before this rule existed) must still be able to save
+    # unrelated settings — a Jenkins URL, a token — so unrelated batches
+    # are not rejected for a combination the admin is not touching.
+    # Evaluated on the EFFECTIVE proposed values — current get_settings()
+    # semantics (env + DB overrides, not raw env) overlaid with this
+    # update — so an update touching only one of the two keys is caught
+    # too.  Covers both PUT and settings import, which share this
+    # function.  None/empty values reset to the model default, matching
+    # the PUT semantics above.
+    if {"auto_push_exporters", "enable_auto_review"}.isdisjoint(settings_updates):
+        return errors
+    proposed = _effective_proposed_settings(settings_updates)
+    if (
+        proposed is not None
+        and proposed.auto_push_exporters.strip()
+        and proposed.enable_auto_review is False
+    ):
+        errors.append(
+            "auto_push_exporters requires enable_auto_review — auto-push "
+            "only runs for failures auto-review has marked reviewed; "
+            "enable ENABLE_AUTO_REVIEW or clear AUTO_PUSH_EXPORTERS"
+        )
+
     return errors
 
 
@@ -1930,6 +2231,7 @@ class UpdateSettingsResult:
     redacted_keys: list[str]
     warnings: list[str]
     tag_facet_changes: list[dict[str, Any]]
+    audit_details: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -1946,6 +2248,7 @@ class ResetSettingResult:
 
     content: dict[str, Any]
     tag_facet_changes: list[dict[str, Any]]
+    audit_details: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -1966,6 +2269,7 @@ class ImportSettingsResult:
     redacted_keys: list[str]
     unchanged_count: int
     tag_facet_changes: list[dict[str, Any]]
+    audit_details: dict[str, Any]
 
 
 async def save_settings_to_db(
@@ -2072,16 +2376,23 @@ async def update_settings(
     if not settings_updates:
         raise HTTPException(status_code=400, detail="No settings provided")
 
-    async def _run() -> tuple[list[str], list[str]]:
+    async def _run() -> tuple[list[str], list[str], dict[str, Any]]:
         errors = await validate_settings_updates(settings_updates, hooks=hooks)
         if errors:
             raise HTTPException(
                 status_code=400, detail=f"Invalid settings: {'; '.join(errors)}"
             )
+        # Read the old Greenwave mode before the save — the audit row names
+        # old/new mode only, never credential values. After validation, so the
+        # new mode is the canonical normalized one.
+        audit_details = _greenwave_auth_mode_audit_detail(settings_updates)
         warnings = await save_settings_to_db(settings_updates, username, hooks=hooks)
-        return list(settings_updates.keys()), warnings
+        return list(settings_updates.keys()), warnings, audit_details
 
-    (changed_keys, warnings), facet_changes = await _run_with_tag_facets_lock(
+    (
+        (changed_keys, warnings, audit_details),
+        facet_changes,
+    ) = await _run_with_tag_facets_lock(
         "tag_facets" in settings_updates,
         _run,
         on_tag_facet_changes=on_tag_facet_changes,
@@ -2092,6 +2403,7 @@ async def update_settings(
         redacted_keys=[key for key in changed_keys if key in SENSITIVE_SETTINGS],
         warnings=warnings,
         tag_facet_changes=facet_changes,
+        audit_details=audit_details,
     )
 
 
@@ -2120,22 +2432,42 @@ async def persist_setting(
             status_code=400,
             detail=f"Setting '{key}' has no env value set",
         )
-    env_value, enum_error = await normalize_enumerated_value(
-        key, env_value, hooks=hooks
-    )
-    if enum_error:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid env value for '{key}': {enum_error}",
-        )
+    # ONE validator for every write path: enumerated canonicalisation, per-field
+    # Pydantic validation, integer bounds and the cross-field combination rules
+    # that PUT and import apply, so an env value cannot be promoted into a
+    # state those paths would refuse (a URL scheme the selected auth mode does
+    # not allow, an unusable waiver endpoint, …). It normalizes in place, so the
+    # value saved is the canonical one it approved.
+    updates = {key: env_value}
     try:
-        validated = validate_effective_setting({key: env_value})
-    except ValidationError as exc:
+        validation_errors = await validate_settings_updates(updates, hooks=hooks)
+    except HTTPException as exc:
+        if key == "tag_facets":
+            # Schema/live-tag problems keep their own 422 contract on this path
+            # (the tag_facets validation), not the promotion 400 below.
+            raise
+        # The shared validator RAISES (rather than returning) for one shape — an
+        # account-ID-shaped cloud id, which PUT answers with a 422. A promotion
+        # has no such legacy contract, so report it in the same 400 shape as
+        # every other invalid env value, which also keeps one reason code
+        # (`invalid_request`) for this class of refusal in the audit trail.
         raise HTTPException(
-            status_code=400, detail=f"Invalid env value for '{key}'"
+            status_code=400, detail=f"Invalid env value for '{key}': {exc.detail}"
         ) from exc
-    if setting_is_int(key):
-        env_value = str(getattr(validated, key))
+    if validation_errors:
+        detail = "; ".join(validation_errors)
+        if key not in detail and key.upper() not in detail:
+            # A cross-field rule can refuse this save over a setting the admin
+            # did not touch — the effective URL/mode pair, say. Attribute that
+            # to the configuration instead of to the value being promoted, so
+            # a one-key env→DB migration is not blamed for the wrong field.
+            detail += (
+                " (rejected by the current effective configuration, not by this value)"
+            )
+        raise HTTPException(
+            status_code=400, detail=f"Invalid env value for '{key}': {detail}"
+        )
+    env_value = str(updates[key] or "")
 
     async def _run() -> None:
         value_to_save = env_value
@@ -2195,13 +2527,42 @@ async def reset_setting(
         active_hooks.broadcast_change()
         return content
 
+    # A reset removes the override, which for greenwave_auth_mode IS the new
+    # effective value (unset). Captured BEFORE the delete, so the audit row
+    # names the transition instead of recording the already-reset state — the
+    # same old/new detail PUT and import record for a mode change.
+    audit_details = _greenwave_auth_mode_audit_detail({key: None})
     content, facet_changes = await _run_with_tag_facets_lock(
         key == "tag_facets",
         _run,
         on_tag_facet_changes=on_tag_facet_changes,
     )
 
-    return ResetSettingResult(content=content, tag_facet_changes=facet_changes)
+    return ResetSettingResult(
+        content=content,
+        tag_facet_changes=facet_changes,
+        audit_details=audit_details,
+    )
+
+
+def _greenwave_auth_mode_audit_detail(
+    settings_updates: dict[str, Any],
+) -> dict[str, Any]:
+    """Audit detail for a greenwave_auth_mode change: old/new mode only.
+
+    The mode value is a non-secret enum (like default_user_role); every
+    other changed setting stays key-names-only in the audit trail. Must be
+    read BEFORE the update is saved. Returns {} when the mode is unchanged
+    by this update.
+    """
+    if "greenwave_auth_mode" not in settings_updates:
+        return {}
+    return {
+        "greenwave_auth_mode_change": {
+            "old": get_settings().greenwave_auth_mode or "",
+            "new": str(settings_updates.get("greenwave_auth_mode") or ""),
+        }
+    }
 
 
 def _transform_additional_repos(
@@ -2369,9 +2730,15 @@ async def import_settings(
             redacted_keys=[],
             unchanged_count=len(unchanged),
             tag_facet_changes=[],
+            audit_details={},
         )
 
     applied_updates = {key: value for key, value in updates.items() if key in applied}
+    # Read the previous Greenwave auth mode BEFORE the save:
+    # save_settings_to_db refreshes the settings cache synchronously, so
+    # afterwards get_settings() already returns the NEW mode and the audit row
+    # would report a mode change that never happened (new -> new).
+    audit_details = _greenwave_auth_mode_audit_detail(applied_updates)
     warnings, facet_changes = await _run_with_tag_facets_lock(
         "tag_facets" in applied,
         lambda: save_settings_to_db(applied_updates, username, hooks=hooks),
@@ -2388,4 +2755,5 @@ async def import_settings(
         redacted_keys=[key for key in changed_keys if key in SENSITIVE_SETTINGS],
         unchanged_count=len(unchanged),
         tag_facet_changes=facet_changes,
+        audit_details=audit_details,
     )

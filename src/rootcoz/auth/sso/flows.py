@@ -40,6 +40,7 @@ from rootcoz.auth.base import (
 )
 from rootcoz.auth.principal import REVIEWER_ROLES, Principal
 from rootcoz.auth.sso import state as auth_sso_state
+from rootcoz.auth.sso.base import ClaimSet, encrypt_oauth_tokens
 from rootcoz.config import Settings, get_settings
 from rootcoz.url_utils import is_safe_navigation_url, is_same_origin
 
@@ -491,6 +492,17 @@ async def sso_finish_link_flow(
     return response
 
 
+def _browser_sso_tokens_enc(provider: str, claims: ClaimSet) -> str | None:
+    """Encrypt browser-session OIDC tokens, for Red Hat SSO logins only.
+
+    Other providers carry no tokens for delegated OIDC calls, so their sessions
+    stay token-free.
+    """
+    if provider != "redhat" or claims.oauth_tokens is None:
+        return None
+    return encrypt_oauth_tokens(claims.oauth_tokens)
+
+
 async def sso_issue_session_flow(
     request: Request,
     resolution: auth_identity.IdentityResolution,
@@ -500,6 +512,7 @@ async def sso_issue_session_flow(
     hooks: SSOFlowHooks,
     audit_action: str | None = None,
     as_json: bool = False,
+    sso_tokens_enc: str | None = None,
 ) -> Response:
     """Create the session an SSO login ends with and report where to go."""
     settings = get_settings()
@@ -518,6 +531,7 @@ async def sso_issue_session_flow(
         is_admin=is_admin,
         role=role,
         auth_provider=provider,
+        sso_tokens_enc=sso_tokens_enc,
     )
     blocked = auth_approval.approval_gate_applies(
         is_admin=is_admin, settings=settings
@@ -644,6 +658,7 @@ async def sso_callback_flow(
             suggested_username=outcome.suggested_username,
             binding=binding,
             next_path=auth_sso_state.safe_next(attempt.next_path),
+            sso_tokens_enc=_browser_sso_tokens_enc(provider, claims),
         )
         await hooks.record_audit(
             action="auth.sso_choice_required",
@@ -680,6 +695,7 @@ async def sso_callback_flow(
         provider=provider,
         next_path=attempt.next_path,
         hooks=hooks,
+        sso_tokens_enc=_browser_sso_tokens_enc(provider, claims),
     )
     response.delete_cookie(auth_sso_state.STATE_COOKIE, path="/")
     return response
@@ -807,6 +823,7 @@ async def sso_create_account_flow(request: Request, *, hooks: SSOFlowHooks) -> R
         hooks=hooks,
         audit_action="auth.sso_create",
         as_json=True,
+        sso_tokens_enc=record.get("sso_tokens_enc"),
     )
     response.delete_cookie(auth_sso_state.TICKET_COOKIE, path="/")
     return response
@@ -938,6 +955,7 @@ async def sso_link_account_flow(request: Request, *, hooks: SSOFlowHooks) -> Res
         hooks=hooks,
         audit_action="auth.sso_link",
         as_json=True,
+        sso_tokens_enc=record.get("sso_tokens_enc"),
     )
     response.delete_cookie(auth_sso_state.TICKET_COOKIE, path="/")
     return response

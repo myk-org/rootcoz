@@ -105,7 +105,10 @@ The `AI Spend` section of the report page attributes what the job spent: a break
   That is expected. Switching to `CODE ISSUE` removes old bug-report content, switching to `PRODUCT BUG` removes old suggested-fix content, and switching to `INFRASTRUCTURE` removes both.
 
 - `I never see the Report Portal prompt.`  
-  The `All failures reviewed. Update Report Portal?` prompt only appears when every failure in the job is reviewed and Report Portal is enabled for the server.
+  The `All failures reviewed` prompt only appears when every failure in the job is reviewed and at least one exporter is enabled for the server — Report Portal, Datadog, or Greenwave. It then offers each enabled exporter's push.
+
+- `What is the text I have to approve before a Greenwave push?`  
+  Greenwave includes a human-readable comment in each WaiverDB waiver it files, so the prompt pre-fills one from the job — `rootcoz: 3 failures reviewed for my-job #42 — PRODUCT BUG: 2, CODE ISSUE: 1` — counting the **effective** classifications (your overrides win over the AI label) and using no timestamps, usernames, or per-test names. You can edit it, and nothing is sent until you tick `I approve the text above`; editing the text voids the approval. The approved text is an input rather than a stored value: ResultsDB records the outcome per failure, and WaiverDB receives a comment the server composes from your text plus the pusher's name, the classification, the analysis details and the reviewer. The payload preview beside it shows the subject identifier, which of those two systems the push touches, the failure count, and your text verbatim. For a pipeline job the prompt pushes the root result only — child jobs carry their own push button and their own text.
 
 ## Related Pages
 
